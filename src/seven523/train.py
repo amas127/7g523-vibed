@@ -10,8 +10,8 @@ Typical runs::
 
     uv sync --group train
     uv run --group train 7g523-train --total-timesteps 1000000          # vs GreedyBot
-    uv run --group train 7g523-train --opponent self --load-checkpoint runs/.../agent.pt
-    uv run --group train 7g523-eval --checkpoint runs/.../agent.pt --episodes 500
+    uv run --group train 7g523-train --opponent self --load-checkpoint runs/<new-run>/agent.pt
+    uv run --group train 7g523-eval --checkpoint runs/<new-run>/agent.pt --episodes 500
     uv run --group train tensorboard --logdir runs --port 6006          # 看曲线
 """
 from __future__ import annotations
@@ -20,6 +20,7 @@ import argparse
 import json
 import random
 import time
+from collections import Counter
 from pathlib import Path
 
 import gymnasium as gym
@@ -28,10 +29,23 @@ import torch
 import torch.optim as optim
 
 from .actions import nvec_for
-from .env import Seven523Env, observation_dim
+from .env import (
+    OBS_VERSION,
+    OBS_VERSIONS,
+    Seven523Env,
+    observation_dim,
+    observation_num_players,
+)
 from .eval import evaluate
 from .networks import Agent, NeuralPolicy, load_agent, save_agent, warm_start_into
-from .policies import Policy, make_scripted_policies
+from .policies import (
+    EpisodeMixturePolicy,
+    MixturePolicy,
+    Policy,
+    make_scripted_policies,
+    pfsp_weights,
+    policy_from_spec,
+)
 from .ppo import PPOConfig, RolloutBatch, compute_gae, ppo_update
 from .rules import Rules
 
@@ -59,6 +73,41 @@ _LOG_FIELDS = (
 
 def _bool(value: str) -> bool:
     return value.lower() in {"true", "1", "yes", "y", "t"}
+
+
+#: Observation-version pairs allowed to warm-start across layouts: the two
+#: prefix chains (v1 -> v2 -> v3, v4 -> v5) plus the cross-family remap pairs
+#: (v1/v2 -> v4/v5).  Every other direction -- including v3 -> v4/v5 and all
+#: rollbacks -- is rejected at the load point instead of silently skipping the
+#: first layer.
+_WARM_START_VERSION_PAIRS: frozenset[tuple[int, int]] = frozenset(
+    {(1, 2), (2, 3), (1, 3), (1, 4), (2, 4), (4, 5), (1, 5), (2, 5)}
+)
+
+
+def parse_pool_member(raw: str) -> tuple[float, str]:
+    """Split a ``[WEIGHT@]SPEC`` league member (``1.5@ckpt:runs/<new-run>/agent.pt``)."""
+    if "@" in raw:
+        weight_raw, spec = raw.split("@", 1)
+        weight = float(weight_raw)
+        if weight < 0:
+            raise ValueError(f"pool member weight must be non-negative: {raw!r}")
+        return weight, spec.strip()
+    return 1.0, raw.strip()
+
+
+def _pool_member_ids(specs: list[str]) -> list[str]:
+    """Stable, readable per-member ids: the spec, disambiguated if repeated."""
+    counts = Counter(specs)
+    seen: dict[str, int] = {}
+    ids: list[str] = []
+    for spec in specs:
+        if counts[spec] == 1:
+            ids.append(spec)
+            continue
+        seen[spec] = seen.get(spec, 0) + 1
+        ids.append(f"{spec}#{seen[spec]}")
+    return ids
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -109,12 +158,128 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     # 7鬼523 / run management arguments.
     parser.add_argument("--num-players", type=int, default=2)
+    parser.add_argument(
+        "--obs-version",
+        type=int,
+        choices=list(OBS_VERSIONS),
+        default=OBS_VERSION,
+        help=(
+            "observation layout: 1 = legacy 185+3n, 2 = legacy + B0 point "
+            "context (188+3n), 3 = legacy + B0 + B1 unseen/last_player "
+            "(243+3n), 4 = slim S1 + B0 (64+21n), "
+            "5 = slim S1 + B0 + B1 (119+21n, default)"
+        ),
+    )
+    parser.add_argument(
+        "--reward-shaping",
+        choices=["terminal", "trick_diff", "win", "trick_diff_win"],
+        default="terminal",
+        help=(
+            "terminal: legacy sparse terminal return; trick_diff: per-step "
+            "potential difference (telescopes to the terminal return); win: "
+            "terminal sign(own - best other); trick_diff_win: both"
+        ),
+    )
     parser.add_argument("--hidden-size", type=int, default=128)
     parser.add_argument(
+        "--activation",
+        choices=["relu", "tanh", "gelu", "silu"],
+        default="relu",
+        help="hidden-layer activation (reference ppo.py uses tanh)",
+    )
+    parser.add_argument(
+        "--arch",
+        choices=["shared", "towers"],
+        default="shared",
+        help=(
+            "trunk topology: shared = one trunk feeding both heads "
+            "(default); towers = independent actor/critic MLPs "
+            "(reference ppo.py layout)"
+        ),
+    )
+    parser.add_argument(
         "--opponent",
-        choices=["greedy", "random", "self"],
+        choices=["greedy", "random", "self", "mix", "pool"],
         default="greedy",
-        help="stage 1: scripted bot; stage 2: frozen self-play snapshot",
+        help=(
+            "stage 1: scripted bot; stage 2: frozen self-play snapshot; "
+            "mix: frozen self + greedy pool (see --mix-greedy-prob); "
+            "pool: N-member league (see --pool-member)"
+        ),
+    )
+    parser.add_argument(
+        "--pool-member",
+        action="append",
+        default=None,
+        metavar="[WEIGHT@]SPEC",
+        help=(
+            "with --opponent pool: repeat per league member; SPEC is "
+            "greedy / random / self (refreshable) / ckpt:<agent.pt>; "
+            "weight defaults to 1"
+        ),
+    )
+    parser.add_argument(
+        "--pool-episode",
+        type=_bool,
+        default=False,
+        nargs="?",
+        const=True,
+        help=(
+            "with --opponent pool/mix: freeze one league member per episode "
+            "(EpisodeMixturePolicy) instead of re-drawing per decision; "
+            "default off keeps the legacy per-decision MixturePolicy"
+        ),
+    )
+    parser.add_argument(
+        "--pfsp",
+        type=_bool,
+        default=False,
+        nargs="?",
+        const=True,
+        help=(
+            "with --opponent pool --pool-episode: re-weight members every "
+            "--pfsp-every episodes by (1 - shrunk learner win rate)^2 + "
+            "--pfsp-epsilon, mixed with uniform; default off (static weights)"
+        ),
+    )
+    parser.add_argument(
+        "--pfsp-every",
+        type=int,
+        default=100,
+        metavar="K",
+        help="episodes between PFSP weight updates (default 100)",
+    )
+    parser.add_argument(
+        "--pfsp-uniform-mix",
+        type=float,
+        default=0.5,
+        metavar="M",
+        help=(
+            "weight on the uniform mixture component: 0 = pure PFSP, "
+            "1 = uniform (default 0.5)"
+        ),
+    )
+    parser.add_argument(
+        "--pfsp-epsilon",
+        type=float,
+        default=0.02,
+        help="additive smoothing in (1 - wr)^2 + epsilon (default 0.02)",
+    )
+    parser.add_argument(
+        "--pfsp-prior",
+        type=float,
+        default=10.0,
+        help=(
+            "Beta prior pseudo-count (alpha = beta = prior/2) shrinking each "
+            "member's observed win rate toward 0.5; 0 disables shrinkage "
+            "(default 10)"
+        ),
+    )
+    parser.add_argument(
+        "--mix-greedy-prob",
+        type=float,
+        default=0.5,
+        help="with --opponent mix, per-decision probability of facing GreedyBot",
     )
     parser.add_argument(
         "--self-play-refresh",
@@ -166,16 +331,40 @@ def make_env(
     opponents: list[Policy],
     seed: int,
     idx: int,
+    reward_shaping: str = "terminal",
+    obs_version: int = OBS_VERSION,
 ):
     """CleanRL-style thunk: one sub-env + episode statistics for the vector env."""
 
     def thunk() -> gym.Env:
         env = Seven523Env(
-            rules=rules, opponents=opponents, seed=seed + idx, learner=learner
+            rules=rules,
+            opponents=opponents,
+            seed=seed + idx,
+            learner=learner,
+            reward_shaping=reward_shaping,
+            obs_version=obs_version,
         )
         return gym.wrappers.RecordEpisodeStatistics(env)
 
     return thunk
+
+
+def _episode_info(infos: dict) -> dict | None:
+    """Finished-episode stats from a vector-env info dict.
+
+    ``RecordEpisodeStatistics`` reports the terminal stats either directly
+    (``AutoresetMode.NEXT_STEP``: ``infos["episode"]``) or nested under the
+    auto-reset payload (``SAME_STEP``: ``infos["final_info"]["episode"]``).
+    Both are dict-of-arrays indexed by sub-env.
+    """
+    episode = infos.get("episode")
+    if episode is not None:
+        return episode
+    final_info = infos.get("final_info")
+    if final_info is not None:
+        return final_info.get("episode")
+    return None
 
 
 class MetricsLogger:
@@ -263,7 +452,14 @@ def _self_play_opponents(
     agent: Agent,
 ) -> tuple[list[list[Policy]], NeuralPolicy]:
     frozen = NeuralPolicy(
-        Agent(obs_dim, nvec, hidden=args.hidden_size),
+        Agent(
+            obs_dim,
+            nvec,
+            hidden=args.hidden_size,
+            activation=args.activation,
+            obs_version=args.obs_version,
+            arch=args.arch,
+        ),
         rules,
         device=device,
         sample=args.self_play_sample,
@@ -275,6 +471,19 @@ def _self_play_opponents(
 
 def train(args: argparse.Namespace) -> Path:
     """Run PPO and return the run directory (checkpoints + ``metrics.csv``)."""
+    if args.pool_episode and args.opponent not in {"pool", "mix"}:
+        raise SystemExit("--pool-episode needs --opponent pool or mix")
+    if args.pfsp and not (args.opponent == "pool" and args.pool_episode):
+        raise SystemExit("--pfsp needs --opponent pool --pool-episode")
+    if args.pfsp:
+        if args.pfsp_every < 1:
+            raise ValueError("--pfsp-every must be >= 1")
+        if not 0.0 <= args.pfsp_uniform_mix <= 1.0:
+            raise ValueError("--pfsp-uniform-mix must be in [0, 1]")
+        if args.pfsp_epsilon < 0:
+            raise ValueError("--pfsp-epsilon must be non-negative")
+        if args.pfsp_prior < 0:
+            raise ValueError("--pfsp-prior must be non-negative")
     run_name = f"{args.exp_name}__{args.seed}__{int(time.time())}"
     run_dir = Path(args.run_dir) / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -295,39 +504,213 @@ def train(args: argparse.Namespace) -> Path:
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
     rules = Rules(num_players=args.num_players)
     learner = 0
-    obs_dim = observation_dim(rules.num_players)
+    obs_dim = observation_dim(rules.num_players, args.obs_version)
     nvec = np.asarray(nvec_for(rules), dtype=np.int64)
 
-    agent = Agent(obs_dim, nvec, hidden=args.hidden_size).to(device)
+    agent = Agent(
+        obs_dim,
+        nvec,
+        hidden=args.hidden_size,
+        activation=args.activation,
+        obs_version=args.obs_version,
+        arch=args.arch,
+    ).to(device)
     if args.load_checkpoint:
         loaded, _ = load_agent(args.load_checkpoint, device=device)
-        if loaded.nvec.tolist() == nvec.tolist():
+        if (
+            loaded.nvec.tolist() == nvec.tolist()
+            and loaded.obs_dim == obs_dim
+            and loaded.obs_version == args.obs_version
+            and loaded.arch == args.arch
+        ):
             agent.load_state_dict(loaded.state_dict())
         else:
+            source_version = int(getattr(loaded, "obs_version", 1))
+            target_version = int(args.obs_version)
+            source_players = observation_num_players(
+                loaded.obs_dim, source_version
+            )
+            target_players = observation_num_players(obs_dim, target_version)
+            # Cross-layout warm starts are only allowed along the design's
+            # forward table (prefix chains and the v1/v2 -> v4/v5 remap).
+            # Rollbacks and mixed player counts must fail loudly instead of
+            # silently skipping the first layer.
+            version_ok = source_version == target_version or (
+                source_version, target_version
+            ) in _WARM_START_VERSION_PAIRS
+            if (
+                not version_ok
+                or source_players is None
+                or source_players != target_players
+            ):
+                raise SystemExit(
+                    f"--load-checkpoint {args.load_checkpoint}: cannot "
+                    f"warm-start obs v{source_version}/{loaded.obs_dim} "
+                    f"({source_players} players) into "
+                    f"v{target_version}/{obs_dim} ({target_players} players); "
+                    f"allowed version pairs: "
+                    f"{sorted(_WARM_START_VERSION_PAIRS)}"
+                )
             copied = warm_start_into(agent, loaded)
             print(
                 f"warm start: copied {len(copied)} tensors from "
-                f"{args.load_checkpoint} (nvec {loaded.nvec.tolist()} -> {nvec.tolist()})"
+                f"{args.load_checkpoint} (arch {loaded.arch}->{args.arch}, "
+                f"obs src v{source_version}/{loaded.obs_dim} -> "
+                f"dst v{target_version}/{obs_dim}, "
+                f"nvec {loaded.nvec.tolist()} -> {nvec.tolist()})"
             )
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
     config = PPOConfig.from_args(args)
 
     frozen: NeuralPolicy | None = None
-    if args.opponent == "self":
+    member_ids: list[str] = []
+    episode_mixtures: list[list[EpisodeMixturePolicy]] = [
+        [] for _ in range(args.num_envs)
+    ]
+    if args.opponent in {"self", "mix", "pool"}:
         opponents, frozen = _self_play_opponents(
             args, rules, obs_dim, nvec, device, agent
         )
+        if args.opponent == "mix":
+            greedy = make_scripted_policies("greedy", rules, seed=args.seed)[0]
+            mix_members: list[tuple[float, Policy, str]] = [
+                (1.0 - args.mix_greedy_prob, frozen, "self"),
+                (args.mix_greedy_prob, greedy, "greedy"),
+            ]
+            opponents = []
+            for idx in range(args.num_envs):
+                seat_policies: list[Policy] = []
+                for seat in range(rules.num_players):
+                    rng = random.Random(args.seed + idx * 1000 + seat)
+                    if args.pool_episode:
+                        policy: Policy = EpisodeMixturePolicy(mix_members, rng=rng)
+                        if seat != learner:
+                            episode_mixtures[idx].append(policy)
+                    else:
+                        policy = MixturePolicy(
+                            [(weight, member) for weight, member, _ in mix_members],
+                            rng=rng,
+                        )
+                    seat_policies.append(policy)
+                opponents.append(seat_policies)
+        elif args.opponent == "pool":
+            if not args.pool_member:
+                raise SystemExit("--opponent pool needs at least one --pool-member")
+            specs = [parse_pool_member(raw)[1] for raw in args.pool_member]
+            member_ids = _pool_member_ids(specs)
+            members: list[tuple[float, Policy, str]] = []
+            for index, raw in enumerate(args.pool_member):
+                weight, spec = parse_pool_member(raw)
+                if spec == "self":
+                    member: Policy = frozen
+                else:
+                    member = policy_from_spec(
+                        spec, rules, seed=args.seed + index, device=str(device)
+                    )
+                members.append((weight, member, member_ids[index]))
+            opponents = []
+            for idx in range(args.num_envs):
+                seat_policies = []
+                for seat in range(rules.num_players):
+                    rng = random.Random(args.seed + idx * 1000 + seat)
+                    if args.pool_episode:
+                        policy = EpisodeMixturePolicy(members, rng=rng)
+                        if seat != learner:
+                            episode_mixtures[idx].append(policy)
+                    else:
+                        policy = MixturePolicy(
+                            [(weight, member) for weight, member, _ in members],
+                            rng=rng,
+                        )
+                    seat_policies.append(policy)
+                opponents.append(seat_policies)
     else:
         opponents = [
             make_scripted_policies(args.opponent, rules, seed=args.seed + idx)
             for idx in range(args.num_envs)
         ]
 
+    # PFSP (direction C): cumulative per-member win/draw/loss record from the
+    # learner's seat; every --pfsp-every finished episodes the pool weights are
+    # recomputed and pushed into every live EpisodeMixturePolicy.
+    pfsp_records: dict[str, list[int]] = {}
+    pfsp_episodes = 0
+    pfsp_last_update = 0
+    pfsp_updates = 0
+    pfsp_writer = None
+
+    def pfsp_update(global_step: int) -> None:
+        nonlocal pfsp_last_update, pfsp_updates
+        weights = pfsp_weights(
+            {
+                member_id: (
+                    float(record[0]),
+                    float(record[1]),
+                    float(record[2]),
+                )
+                for member_id, record in pfsp_records.items()
+            },
+            prior=args.pfsp_prior,
+            epsilon=args.pfsp_epsilon,
+            uniform_mix=args.pfsp_uniform_mix,
+        )
+        ordered = [weights[member_id] for member_id in member_ids]
+        for env_mixtures in episode_mixtures:
+            for policy in env_mixtures:
+                policy.set_weights(ordered)
+        for member_id in member_ids:
+            wins, draws, losses = pfsp_records[member_id]
+            games = wins + draws + losses
+            denominator = args.pfsp_prior + games
+            win_rate = (
+                (0.5 * args.pfsp_prior + wins + 0.5 * draws) / denominator
+                if denominator
+                else 0.5
+            )
+            assert pfsp_writer is not None
+            pfsp_writer.write(
+                f"{global_step},{pfsp_episodes},{member_id},{weights[member_id]:.6g},"
+                f"{win_rate:.6g},{wins},{draws},{losses}\n"
+            )
+            tensorboard.add_scalar(
+                f"pfsp/weight/{member_id}", weights[member_id], global_step
+            )
+        pfsp_writer.flush()
+        pfsp_updates += 1
+        pfsp_last_update = pfsp_episodes
+        print(
+            f"pfsp update {pfsp_updates} @ step {global_step} "
+            f"(episodes {pfsp_episodes}): "
+            + ", ".join(
+                f"{member_id}={weights[member_id]:.3f}" for member_id in member_ids
+            )
+        )
+
+    if args.pfsp:
+        pfsp_records = {member_id: [0, 0, 0] for member_id in member_ids}
+        pfsp_writer = (run_dir / "pfsp_weights.csv").open("w")
+        pfsp_writer.write(
+            "global_step,episodes,member_id,weight,win_rate,wins,draws,losses\n"
+        )
+
     envs = gym.vector.SyncVectorEnv(
         [
-            make_env(rules, learner, opponents[idx], args.seed, idx)
+            make_env(
+                rules,
+                learner,
+                opponents[idx],
+                args.seed,
+                idx,
+                args.reward_shaping,
+                args.obs_version,
+            )
             for idx in range(args.num_envs)
-        ]
+        ],
+        # Match the gym 0.21 reference stack (ADR-0003): a finished sub-env is
+        # reset on the same step.  gymnasium's default NEXT_STEP would swallow
+        # the next action, store it with reward=0/done=0, and chain the row
+        # across episodes (~4% chimera transitions on lvlbase).
+        autoreset_mode=gym.vector.AutoresetMode.SAME_STEP,
     )
     assert isinstance(envs.single_action_space, gym.spaces.MultiDiscrete), (
         "only MultiDiscrete action spaces are supported"
@@ -415,15 +798,37 @@ def train(args: argparse.Namespace) -> Path:
                 next_done = torch.as_tensor(
                     finished.astype(np.float32), device=device
                 )
-                if "episode" in infos:
+                if (episode_info := _episode_info(infos)) is not None:
                     for idx in np.flatnonzero(finished):
-                        episode_return = float(infos["episode"]["r"][idx])
-                        episode_length = int(infos["episode"]["l"][idx])
+                        episode_return = float(episode_info["r"][idx])
+                        episode_length = int(episode_info["l"][idx])
                         ep_returns.append(episode_return)
                         ep_lengths.append(episode_length)
                         tensorboard.log_episode(
                             global_step, episode_return, episode_length
                         )
+                        if pfsp_records:
+                            outcome = 0
+                            if episode_return > 0.0:
+                                outcome = 1
+                            elif episode_return < 0.0:
+                                outcome = -1
+                            for policy in episode_mixtures[int(idx)]:
+                                member_id = policy.finished_id
+                                if member_id is None:
+                                    continue
+                                record = pfsp_records.setdefault(
+                                    member_id, [0, 0, 0]
+                                )
+                                if outcome > 0:
+                                    record[0] += 1
+                                elif outcome < 0:
+                                    record[2] += 1
+                                else:
+                                    record[1] += 1
+                            pfsp_episodes += 1
+                            if pfsp_episodes - pfsp_last_update >= args.pfsp_every:
+                                pfsp_update(global_step)
             episodes_done += len(ep_returns)
 
             # bootstrap value if not done
@@ -499,6 +904,8 @@ def train(args: argparse.Namespace) -> Path:
     finally:
         envs.close()
         tensorboard.close()
+        if pfsp_writer is not None:
+            pfsp_writer.close()
 
     return run_dir
 

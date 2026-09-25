@@ -1,0 +1,478 @@
+<!doctype html>
+<!--
+  PROTOTYPE — 7鬼523 真人定级 · 在线模拟（一次性、可丢弃，勿进生产）
+
+  问题：新定级协议（20 局定级 → 自适应挑对手 → CI 达标即停）在手里用起来
+        是什么感觉？玩家和系统各自看到什么？
+
+  运行：双击本文件。零依赖、无持久化。
+  注意：对局结果按「隐藏实力」抽样，不是真打牌；真实接入时把每局换成
+        traces/*.json 里的记录即可，估计器一字不改。
+  可移植部分：下面的「评分核心」脚本块（纯函数，无 DOM）。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>7鬼523 真人定级 · 在线模拟</title>
+<style>
+  :root{
+    --ink:#1f2328; --muted:#6b7280; --line:#e5e7eb; --bg:#f6f7f8; --panel:#fff;
+    --accent:#2f6feb; --accent-soft:#eaf1fe; --ok:#15803d; --ok-soft:#eefaf1;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:15px/1.65 -apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB",
+         "Microsoft YaHei","Noto Sans CJK SC",sans-serif;
+    -webkit-font-smoothing:antialiased; font-variant-numeric:tabular-nums;
+  }
+  .wrap{max-width:1000px; margin:0 auto; padding:28px 20px 72px}
+  header h1{font-size:25px; margin:0 0 8px; letter-spacing:-.01em}
+  .lede{margin:0 0 8px; color:#374151; max-width:780px}
+  .proto{font-size:12.5px; color:var(--muted); padding-left:10px; border-left:3px solid var(--line); max-width:780px}
+  section{background:var(--panel); border:1px solid var(--line); border-radius:12px;
+          padding:18px 20px; margin-top:16px}
+  h2{font-size:12px; letter-spacing:.07em; color:var(--muted); font-weight:700;
+     margin:0 0 12px; text-transform:uppercase}
+  .hint{color:var(--muted); font-size:12.5px}
+  .setup-row{display:flex; flex-wrap:wrap; gap:16px 28px; align-items:flex-end}
+  .ctl{display:flex; flex-direction:column; gap:5px; font-size:13px; color:#374151}
+  select{font:inherit; font-size:13.5px; padding:5px 8px; border:1px solid var(--line);
+         border-radius:8px; background:#fff; color:var(--ink)}
+  button{font:inherit; font-size:13.5px; cursor:pointer; border-radius:8px; border:1px solid var(--line);
+         background:#fff; padding:7px 13px; color:var(--ink)}
+  button:hover:not(:disabled){border-color:#c9ced6; background:#fbfbfc}
+  button.primary{background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600}
+  button.primary:hover:not(:disabled){background:#2860d6}
+  button.ghost{color:var(--muted)}
+  button:disabled{opacity:.5; cursor:default}
+  .btns{display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:14px}
+  .estimate{margin:2px 0 6px}
+  .estimate .value{font-size:34px; font-weight:700; letter-spacing:-.02em}
+  .estimate .pm{font-size:16px; font-weight:600; color:var(--muted); margin-left:6px}
+  .estimate .sub{color:var(--muted); font-size:13px; margin-top:2px}
+  .progress{height:8px; background:#eef0f3; border-radius:4px; overflow:hidden; margin:10px 0 4px; max-width:520px}
+  .progress-fill{height:100%; width:0; background:var(--accent); border-radius:4px; transition:width .12s linear}
+  .banner{margin:14px 0 0; padding:10px 12px; border:1px solid #bfe3cc; border-radius:10px;
+          background:var(--ok-soft); color:#14532d; font-size:13.5px}
+  .chart{margin-top:16px}
+  .chart-svg{display:block; width:100%; height:auto; border:1px solid var(--line); border-radius:8px; background:#fdfdfe}
+  .chart-svg .grid{stroke:#eef0f3; stroke-width:1}
+  .chart-svg .axis{fill:#9aa2ad; font-size:10px; font-family:inherit}
+  .legend{display:flex; flex-wrap:wrap; gap:6px 16px; margin-top:8px; font-size:12.5px; color:#374151}
+  .dot{display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; vertical-align:1px}
+  .log{margin-top:14px; font-size:13px; color:#374151}
+  .log-line{padding:4px 0; border-top:1px dashed var(--line)}
+  .log-line b{font-weight:600}
+  .autoout{margin-top:12px; font-size:13.5px; line-height:1.9}
+  .autoout table{width:100%; border-collapse:collapse; margin-top:6px}
+  .autoout th,.autoout td{text-align:left; padding:5px 10px; border-bottom:1px solid var(--line); font-size:13px}
+  .autoout th{color:var(--muted); font-weight:600; font-size:11.5px; letter-spacing:.04em}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>7鬼523 真人定级 · 在线模拟</h1>
+    <p class="lede">你是玩家：隐藏实力藏在模拟器里，系统只能看到你的胜负与比分。
+      跟着协议点「打一局」——先在四个档位各打 5 局定级，之后系统挑信息量最大的对手，
+      95% CI 收到你设定的目标就停。</p>
+    <p class="proto">【原型】对局结果按隐藏实力抽样，不是真打牌；评分核心与
+      <code>elo_prototype.html</code> 相同，真实接入时把每局换成 <code>traces/*.json</code> 即可。</p>
+  </header>
+
+  <section id="setup">
+    <h2>开局</h2>
+    <div class="setup-row">
+      <label class="ctl">你的隐藏实力
+        <select id="skill">
+          <option value="random" selected>随机（1000–1600）</option>
+          <option value="novice">新手（~1150）</option>
+          <option value="mid">中游（~1350）</option>
+          <option value="pro">高手（~1500）</option>
+        </select>
+      </label>
+      <label class="ctl">目标精度（95% CI 半宽）
+        <select id="target">
+          <option value="50">±50（排个档就够）</option>
+          <option value="25" selected>±25（定级默认）</option>
+          <option value="12">±12（抠细节，很费局）</option>
+        </select>
+      </label>
+      <button class="primary" id="start">开始定级</button>
+    </div>
+    <p class="hint">系统不知道你选了什么——它只有你的对局记录。</p>
+  </section>
+
+  <section id="panel" hidden>
+    <h2>你的定级</h2>
+    <div class="estimate">
+      <div class="value"><span id="estR">—</span><span class="pm" id="estPM"></span></div>
+      <div class="sub" id="estSub"></div>
+      <div class="progress"><div class="progress-fill" id="progFill"></div></div>
+      <div class="sub" id="progLabel"></div>
+    </div>
+
+    <div class="btns">
+      <button class="primary" id="play1">打 1 局（按建议）</button>
+      <button id="play5">打 5 局</button>
+      <button id="play50">打 50 局</button>
+      <span style="flex:1"></span>
+      <select id="manualOpp"></select>
+      <button id="playManual">打 1 局（自选）</button>
+      <button class="ghost" id="revealBtn">揭晓真值</button>
+      <button class="ghost" id="restart">重新开始</button>
+    </div>
+
+    <div id="banner" class="banner" hidden></div>
+    <div id="chart" class="chart"></div>
+    <div id="log" class="log"></div>
+  </section>
+
+  <section id="autostats">
+    <h2>批量模拟</h2>
+    <p class="hint">让 40 位隐藏实力 1000–1585 的模拟玩家各自走完同一套协议，看要多少局、
+      区间准不准、比在线 Elo 好多少。点一次约几秒。</p>
+    <button id="autorun">跑 40 位玩家</button>
+    <div id="autoout" class="autoout"></div>
+  </section>
+
+</div>
+
+<!-- ═══════════════ 评分核心（可移植，纯函数，无 DOM） ═══════════════ -->
+<script>
+const ELO_SCALE = 400;  // 400 分差距 = 10:1 赔率（期望得分 10/11 ≈ 0.909）
+
+function expectedScore(ratingA, ratingB) {
+  return 1 / (1 + Math.pow(10, (ratingB - ratingA) / ELO_SCALE));
+}
+
+// 在线 Elo 一局更新（仅用于实时显示；fixed=true 表示秤砣）
+function ratingUpdate(ratingA, ratingB, scoreA, kA) {
+  const expectedA = expectedScore(ratingA, ratingB);
+  return { deltaA: kA * (scoreA - expectedA), expectedA };
+}
+
+// 批量 MAP：所有 traces 一起拟合，返回 { rating, se }，95% CI ≈ rating ± 1.96·se。
+// options.init 传上一次的估计可热启动（牛顿法 2~3 步收敛）。
+function fitRating(games, options) {
+  options = options || {};
+  const priorMean = options.priorMean != null ? options.priorMean : 1500;
+  const priorSd = options.priorSd != null ? options.priorSd : 200;
+  const priorPrec = 1 / (priorSd * priorSd);
+  const beta = Math.log(10) / ELO_SCALE;
+  const maxIter = options.maxIter || 40;
+  let rating = options.init != null ? options.init : priorMean;
+  for (let iter = 0; iter < maxIter; iter++) {
+    let grad = 0, info = priorPrec;
+    for (const g of games) {
+      const p = expectedScore(rating, g.rating);
+      grad += beta * (g.score - p);
+      info += beta * beta * p * (1 - p);
+    }
+    // 阻尼牛顿：限幅 + 区间钳制，防止 p→0/1 时过冲（全胜/全负 vs 远档对手）
+    const step = Math.max(-300, Math.min(300, (grad - (rating - priorMean) * priorPrec) / info));
+    rating = Math.max(400, Math.min(2600, rating + step));
+    if (Math.abs(step) < 1e-7) break;
+  }
+  let info = priorPrec;
+  for (const g of games) {
+    const p = expectedScore(rating, g.rating);
+    info += beta * beta * p * (1 - p);
+  }
+  return { rating: rating, se: 1 / Math.sqrt(info) };
+}
+</script>
+
+<!-- ═══════════════════════ 演示外壳（一次性） ═══════════════════════ -->
+<script>
+(function () {
+  'use strict';
+  const $ = sel => document.querySelector(sel);
+  const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  const ANCHORS = [
+    { label: 'RandomBot', R: 1000 },
+    { label: 'GreedyBot', R: 1315 },
+    { label: 'ckpt-1420.pt', R: 1420 },
+    { label: 'expert.pt', R: 1550 },
+  ];
+  const PLACEMENT = 20;
+  const COLORS = { batch: '#2f6feb', online: '#e07b39', truth: '#15803d' };
+
+  let S = null;   // 当前玩家
+
+  function mulberry32(seed) {
+    let a = seed >>> 0;
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function drawSkill(preset) {
+    const u = Math.random() - 0.5;
+    if (preset === 'novice') return Math.round(1150 + u * 100);
+    if (preset === 'mid') return Math.round(1350 + u * 100);
+    if (preset === 'pro') return Math.round(1500 + u * 100);
+    return Math.round(1000 + (u + 0.5) * 600);
+  }
+
+  function start() {
+    S = {
+      trueSkill: drawSkill($('#skill').value),
+      rng: mulberry32(Math.floor(Math.random() * 1e9)),
+      target: Number($('#target').value),
+      games: [],          // 完整对局（日志/图表用）
+      samples: [],        // 批量拟合输入 {rating, score}
+      online: 1500,
+      batch: { rating: 1500, se: 200 },
+      fit: null, sinceFit: 99,
+      history: [],
+      revealed: false,
+    };
+    $('#setup').hidden = true;
+    $('#panel').hidden = false;
+    $('#manualOpp').innerHTML = ANCHORS.map((a, i) =>
+      '<option value="' + i + '">' + esc(a.label) + '（' + a.R + '）</option>').join('');
+    render();
+  }
+
+  function pickOpponent(rating) {
+    let best = ANCHORS[0], bestInfo = -1;
+    for (const a of ANCHORS) {
+      const p = expectedScore(rating, a.R), info = p * (1 - p);
+      if (info > bestInfo) { bestInfo = info; best = a; }
+    }
+    return best;
+  }
+
+  function suggested() {
+    if (!S) return ANCHORS[0];
+    if (S.games.length < PLACEMENT) return ANCHORS[S.games.length % ANCHORS.length];
+    return pickOpponent(S.batch.rating);
+  }
+
+  // 一局：结果按隐藏实力抽样；系统只看到胜负与比分。
+  function playOne(opp) {
+    const p = expectedScore(S.trueSkill, opp.R);
+    const win = S.rng() < p;
+    const margin = 4 + 92 * Math.pow(S.rng(), 1.5);
+    const winnerScore = 50 + margin / 2;
+    const myScore = win ? winnerScore : 100 - winnerScore;
+    const score = win ? 1 : 0;
+    S.online = Math.max(40, S.online + ratingUpdate(S.online, opp.R, score, 16).deltaA);
+    S.games.push({ opp, win, myScore, oppScore: 100 - myScore });
+    S.samples.push({ rating: opp.R, score });
+    S.sinceFit += 1;
+    S.batch = fitRating(S.samples, { init: S.batch.rating });
+    S.history.push({ n: S.games.length, batch: S.batch.rating, half: 1.96 * S.batch.se, online: S.online });
+  }
+
+  function playGames(n) {
+    if (!S) return;
+    for (let k = 0; k < n; k++) {
+      if (S.games.length >= PLACEMENT) {
+        if (!S.fit || S.sinceFit >= 5) { S.fit = fitRating(S.samples, { init: S.batch.rating }); S.sinceFit = 0; }
+      }
+      playOne(S.games.length < PLACEMENT ? ANCHORS[S.games.length % ANCHORS.length] : pickOpponent(S.fit.rating));
+    }
+    render();
+  }
+
+  function phase() {
+    if (!S) return '';
+    if (S.games.length < PLACEMENT) return '定级中（' + S.games.length + '/' + PLACEMENT + ' 局）';
+    if (1.96 * S.batch.se <= S.target) return '已达标，可以停';
+    return '自适应收敛中';
+  }
+
+  /* ---------- 渲染 ---------- */
+  function render() {
+    if (!S) return;
+    const half = 1.96 * S.batch.se;
+    const done = half <= S.target;
+    $('#estR').textContent = Math.round(S.batch.rating);
+    $('#estPM').textContent = '± ' + Math.round(half);
+    $('#estSub').textContent = '95% CI ' + Math.round(S.batch.rating - half) + '–' + Math.round(S.batch.rating + half)
+      + ' · 已打 ' + S.games.length + ' 局 · ' + phase()
+      + ' · 在线 Elo（K=16）' + Math.round(S.online);
+    $('#progFill').style.width = Math.min(100, (S.target / half) * 100).toFixed(1) + '%';
+    $('#progLabel').textContent = done
+      ? '当前 ±' + Math.round(half) + '，已达到 ±' + S.target + ' 的目标'
+      : '当前 ±' + Math.round(half) + ' → 目标 ±' + S.target
+        + '（按当前信息量约还需 ' + estimateLeft(half) + ' 局）';
+
+    const s = suggested();
+    $('#play1').textContent = '打 1 局（建议 vs ' + s.label + '，预测胜率 ' + Math.round(100 * expectedScore(S.batch.rating, s.R)) + '%）';
+
+    const banner = $('#banner');
+    if (S.revealed) {
+      const err = S.batch.rating - S.trueSkill;
+      const cover = Math.abs(err) <= half;
+      banner.hidden = false;
+      banner.innerHTML = '真值 <b>' + S.trueSkill + '</b> · 估计误差 <b>' + (err >= 0 ? '+' : '') + Math.round(err)
+        + '</b> · 95% CI ' + (cover ? '覆盖了真值 ✓' : '没有覆盖 ✗（约 5% 的情况）');
+    } else if (done) {
+      banner.hidden = false;
+      banner.innerHTML = '已达标：你的定级结果 <b>' + Math.round(S.batch.rating) + ' ± ' + Math.round(half)
+        + '</b>（' + S.games.length + ' 局）。点「揭晓真值」核对区间。';
+    } else {
+      banner.hidden = true;
+    }
+    renderChart();
+    renderLog();
+  }
+
+  function estimateLeft(half) {
+    const info = 1 / (S.batch.se * S.batch.se);
+    const per = S.games.length ? (info - 1 / (200 * 200)) / S.games.length : 0;
+    if (per <= 0) return '?';
+    const need = (Math.pow(1.96 / S.target, 2) - info) / per;
+    return need > 0 ? Math.round(need / 10) * 10 : 0;
+  }
+
+  function renderChart() {
+    const el = $('#chart');
+    if (!S.history.length) { el.innerHTML = '<p class="hint">打一局后出现曲线。</p>'; return; }
+    const W = 860, H = 230, L = 46, R = 14, T = 14, B = 26;
+    const all = [];
+    S.history.forEach(h => { all.push(h.batch + h.half, h.batch - h.half, h.online); });
+    if (S.revealed) all.push(S.trueSkill);
+    let lo = Math.min.apply(null, all), hi = Math.max.apply(null, all);
+    const pad = Math.max(18, (hi - lo) * 0.06); lo -= pad; hi += pad;
+    const n = S.history.length;
+    const xOf = i => L + (i / Math.max(1, n)) * (W - L - R);
+    const yOf = v => T + ((hi - v) / (hi - lo)) * (H - T - B);
+
+    let svg = '';
+    const raw = (hi - lo) / 5, mag = Math.pow(10, Math.floor(Math.log10(raw)));
+    const step = (raw / mag <= 1 ? 1 : raw / mag <= 2 ? 2 : raw / mag <= 5 ? 5 : 10) * mag;
+    for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) {
+      const y = yOf(v).toFixed(1);
+      svg += '<line x1="' + L + '" y1="' + y + '" x2="' + (W - R) + '" y2="' + y + '" class="grid"/>';
+      svg += '<text x="' + (L - 8) + '" y="' + (Number(y) + 3.5).toFixed(1) + '" class="axis" text-anchor="end">' + Math.round(v) + '</text>';
+    }
+    // CI 带
+    const upper = S.history.map(h => xOf(h.n).toFixed(1) + ',' + yOf(h.batch + h.half).toFixed(1));
+    const lower = S.history.map(h => xOf(h.n).toFixed(1) + ',' + yOf(h.batch - h.half).toFixed(1)).reverse();
+    svg += '<polygon points="' + upper.concat(lower).join(' ') + '" fill="' + COLORS.batch + '" opacity="0.10"/>';
+    if (S.revealed) {
+      const y = yOf(S.trueSkill).toFixed(1);
+      svg += '<line x1="' + L + '" y1="' + y + '" x2="' + (W - R) + '" y2="' + y + '" stroke="' + COLORS.truth + '" stroke-width="1.2" stroke-dasharray="5 4"/>';
+      svg += '<text x="' + (W - R - 4) + '" y="' + (Number(y) - 4).toFixed(1) + '" class="axis" text-anchor="end" fill="' + COLORS.truth + '">真值 ' + S.trueSkill + '</text>';
+    }
+    const line = (key, color) => {
+      const d = S.history.map((h, i) => (i ? 'L' : 'M') + xOf(h.n).toFixed(1) + ',' + yOf(h[key]).toFixed(1)).join(' ');
+      return '<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="1.7" stroke-linejoin="round"/>';
+    };
+    svg += line('batch', COLORS.batch) + line('online', COLORS.online);
+    svg += '<text x="' + L + '" y="' + (H - B + 16) + '" class="axis">0</text>';
+    svg += '<text x="' + (W - R) + '" y="' + (H - B + 16) + '" class="axis" text-anchor="end">' + n + ' 局</text>';
+
+    el.innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" class="chart-svg">' + svg + '</svg>'
+      + '<div class="legend">'
+      + '<span><span class="dot" style="background:' + COLORS.batch + '"></span>批量 MAP（阴影 = 95% CI）</span>'
+      + '<span><span class="dot" style="background:' + COLORS.online + '"></span>在线 Elo（K=16）</span>'
+      + (S.revealed ? '<span><span class="dot" style="background:' + COLORS.truth + '"></span>真值（模拟）</span>' : '')
+      + '</div>';
+  }
+
+  function renderLog() {
+    const el = $('#log');
+    if (!S.games.length) { el.innerHTML = ''; return; }
+    const rows = S.games.slice(-8).reverse().map((g, i) => {
+      const h = S.history.find(x => x.n === S.games.length - i);
+      return '<div class="log-line">#' + (S.games.length - i) + ' vs <b>' + esc(g.opp.label) + '</b> · '
+        + (g.win ? '胜' : '负') + ' ' + Math.round(g.myScore) + ':' + Math.round(g.oppScore)
+        + ' · 批量 ' + Math.round(h.batch) + ' ± ' + Math.round(h.half)
+        + ' · 在线 ' + Math.round(h.online) + '</div>';
+    }).join('');
+    el.innerHTML = '<div class="hint" style="margin-bottom:4px">最近对局（新→旧）</div>' + rows;
+  }
+
+  /* ---------- 批量模拟：40 位玩家走完协议 ---------- */
+  function autoRun() {
+    const players = 40, cap = 1600;
+    const need50 = [], need25 = [];
+    let cover = 0, stopped = 0, eBatch = 0, eOnline = 0, at800 = 0;
+    for (let i = 0; i < players; i++) {
+      const trueSkill = Math.round(1000 + i * 15);
+      const rng = mulberry32(100000 + i * 7919);
+      const samples = [];
+      let online = 1500, batch = { rating: 1500, se: 200 }, fit = null;
+      const phaseAfter = () => 1.96 * batch.se;
+      for (let k = 0; k < cap; k++) {
+        let opp;
+        if (samples.length < PLACEMENT) opp = ANCHORS[samples.length % ANCHORS.length];
+        else opp = pickOpponent(fit ? fit.rating : batch.rating);
+        const win = rng() < expectedScore(trueSkill, opp.R) ? 1 : 0;
+        rng(); // 分差 draw，和交互模式消耗一致
+        samples.push({ rating: opp.R, score: win });
+        online += 16 * (win - expectedScore(online, opp.R));
+        if (samples.length % 10 === 0) { batch = fitRating(samples, { init: batch.rating, maxIter: 10 }); fit = batch; }
+        const h = phaseAfter();
+        if (need50[i] == null && h <= 50) need50[i] = samples.length;
+        if (need25[i] == null && h <= 25) {
+          need25[i] = samples.length;
+          if (Math.abs(batch.rating - trueSkill) <= h) cover++;
+          stopped++;
+        }
+        if (samples.length === 800) { eBatch += Math.pow(batch.rating - trueSkill, 2); eOnline += Math.pow(online - trueSkill, 2); at800++; }
+      }
+      if (need50[i] == null) need50[i] = Infinity;
+      if (need25[i] == null) need25[i] = Infinity;
+    }
+    const med = a => { a = a.slice().sort((x, y) => x - y); return a[Math.floor(a.length / 2)]; };
+    const cov = stopped ? (100 * cover / stopped).toFixed(0) + '%' : '—';
+    $('#autoout').innerHTML =
+      '<table><thead><tr><th>指标</th><th>结果</th><th>说明</th></tr></thead><tbody>'
+      + '<tr><td>达到 ±50 的中位局数</td><td><b>' + med(need50) + '</b></td><td>排档够用</td></tr>'
+      + '<tr><td>达到 ±25 的中位局数</td><td><b>' + med(need25) + '</b></td><td>默认定级目标</td></tr>'
+      + '<tr><td>停止时 95% CI 覆盖率</td><td><b>' + cov + '</b></td><td>真值落在区间内的比例，应接近 95%</td></tr>'
+      + '<tr><td>800 局时 RMSE（批量 MAP）</td><td><b>' + Math.sqrt(eBatch / at800).toFixed(1)
+      + '</b></td><td rowspan="2">批量误差 ∝ 1/√n；在线 K=16 有噪声地板</td></tr>'
+      + '<tr><td>800 局时 RMSE（在线 K=16）</td><td><b>' + Math.sqrt(eOnline / at800).toFixed(1) + '</b></td></tr>'
+      + '</tbody></table>'
+      + '<p class="hint">40 位玩家的隐藏实力覆盖 1000–1585，同一条协议、不同随机数；'
+      + '40 位样本下覆盖率本身有 ±7% 的抽样误差。</p>';
+  }
+
+  /* ---------- 绑定 ---------- */
+  $('#start').addEventListener('click', start);
+  $('#play1').addEventListener('click', () => playGames(1));
+  $('#play5').addEventListener('click', () => playGames(5));
+  $('#play50').addEventListener('click', () => playGames(50));
+  $('#playManual').addEventListener('click', () => {
+    if (S) playGamesManual(Number($('#manualOpp').value));
+  });
+  function playGamesManual(idx) {
+    const opp = ANCHORS[idx];
+    if (S.games.length >= PLACEMENT) {
+      if (!S.fit || S.sinceFit >= 5) { S.fit = fitRating(S.samples, { init: S.batch.rating }); S.sinceFit = 0; }
+    }
+    playOne(opp);
+    render();
+  }
+  $('#revealBtn').addEventListener('click', () => { if (S) { S.revealed = true; render(); } });
+  $('#restart').addEventListener('click', () => {
+    S = null;
+    $('#panel').hidden = true;
+    $('#setup').hidden = false;
+  });
+  $('#autorun').addEventListener('click', () => {
+    const btn = $('#autorun');
+    btn.disabled = true; btn.textContent = '计算中…';
+    $('#autoout').innerHTML = '<p class="hint">计算中（40 人 × 最多 1600 局）…</p>';
+    setTimeout(() => {
+      try { autoRun(); } finally { btn.disabled = false; btn.textContent = '再跑一次'; }
+    }, 30);
+  });
+})();
+</script>
+</body>
+</html>

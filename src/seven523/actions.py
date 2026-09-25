@@ -239,9 +239,10 @@ def action_mask(
 ) -> int:
     """134-bit mask of every legal action for this hand against ``incumbent``.
 
-    Legality is checked on the strongest-suit realisation: ``beats`` orders by
-    ``(rank, suit)`` within a kind, so if any suit arrangement beats the
-    incumbent, the strongest one does too.
+    Legality is checked on the strongest-suit realisation: a suit choice only
+    moves the top card's ``(rank, suit)``, and within a family ``beats`` is
+    monotone in that key, so if any suit arrangement beats the incumbent, the
+    strongest one does too.  Bombs ignore suits entirely.
 
     Memoised on the immutable inputs: a seat's mask is rebuilt by both the
     projection and the engine's validation, and a bounded cache collapses that

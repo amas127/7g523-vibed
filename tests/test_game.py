@@ -101,7 +101,7 @@ def test_illegal_action_is_rejected():
 # -- projection / leakage --------------------------------------------------
 
 
-def make_state(hands, draw, *, revealed, incumbent=None, current=0, scores=None):
+def make_state(hands, draw, *, revealed, incumbent=None, current=0, scores=None, played=()):
     n = len(hands)
     return GameState(
         hands=tuple(frozenset(hand) for hand in hands),
@@ -115,6 +115,7 @@ def make_state(hands, draw, *, revealed, incumbent=None, current=0, scores=None)
         last_player=None,
         collected=0,
         phase=Phase.PLAY,
+        played=tuple(played),
     )
 
 
@@ -126,9 +127,10 @@ def test_view_and_observation_do_not_leak_hidden_state():
     hidden_b = [Card(Rank.R2, Suit.HEART), Card(Rank.R5, Suit.DIAMOND)]
     draw_a = [Card(Rank.R4, Suit.SPADE), Card(Rank.R6, Suit.CLUB)]
     draw_b = [Card(Rank.R6, Suit.CLUB), Card(Rank.R4, Suit.SPADE)]
+    played = [Card(Rank.R9, Suit.CLUB)]
 
-    state_a = make_state([own, hidden_a], draw_a, revealed=revealed)
-    state_b = make_state([own, hidden_b], draw_b, revealed=revealed)
+    state_a = make_state([own, hidden_a], draw_a, revealed=revealed, played=played)
+    state_b = make_state([own, hidden_b], draw_b, revealed=revealed, played=played)
     view_a = game.view(state_a, 0)
     view_b = game.view(state_b, 0)
 
@@ -141,11 +143,51 @@ def test_view_and_observation_do_not_leak_hidden_state():
         "draw_count",
         "revealed",
         "trick_cards",
+        "played",
         "last_player",
         "done",
     ):
         assert getattr(view_a, field) == getattr(view_b, field)
     assert encode_observation(view_a) == encode_observation(view_b)
+
+
+def test_played_history_accumulates_finished_tricks_only():
+    game = Game()
+    a = [Card(Rank.R7, Suit.SPADE), Card(Rank.R4, Suit.DIAMOND)]
+    b = [Card(Rank.R3, Suit.HEART), Card(Rank.R6, Suit.CLUB)]
+    state = make_state([a, b], [], revealed=[a[0], b[0]], current=0)
+    assert state.played == ()
+    assert game.view(state, 0).played == ()
+
+    state, _ = game.step(state, action_id(ComboKind.SINGLE, (Rank.R7,)))
+    # The trick is still open: its cards are public in ``trick_cards``, not in
+    # the collected history yet.
+    assert state.played == ()
+    assert game.view(state, 1).played == ()
+
+    state, result = game.step(state, PASS)
+    assert result.trick_over and result.winner == 0 and not result.dug
+    assert state.played == (Card(Rank.R7, Suit.SPADE),)
+    assert game.view(state, 0).played == (Card(Rank.R7, Suit.SPADE),)
+    assert game.view(state, 1).played == (Card(Rank.R7, Suit.SPADE),)
+
+
+def test_played_history_accounts_for_every_card_in_a_full_game():
+    game = Game()
+    policy = GreedyBot()
+    for seed in range(5):
+        state = game.new(random.Random(seed))
+        while not state.done:
+            action, suit = policy.act(game.view(state, state.current))
+            state, _ = game.step(state, action, suit)
+            if state.done:
+                break
+            # Until 撬底 collects the losers' hands, every card that left the
+            # draw pile or a hand sits either in an open trick or in ``played``.
+            assert len(state.played) + len(state.trick_cards) == 54 - len(
+                state.draw_pile
+            ) - sum(len(hand) for hand in state.hands)
+        assert state.done
 
 
 # -- multi-player flow (crafted states) --------------------------------------
@@ -264,20 +306,6 @@ def test_step_falls_back_when_the_suit_request_would_be_illegal():
     assert not result.trick_over
     assert Card(Rank.R7, Suit.SPADE) in state.trick_cards
     assert state.hands[0] == frozenset({Card(Rank.R7, Suit.CLUB)})
-
-
-def test_score_winner_draw_and_win():
-    base = make_state(
-        [[Card(Rank.R7, Suit.SPADE)], [Card(Rank.R4, Suit.SPADE)]],
-        [],
-        revealed=[Card(Rank.R7, Suit.SPADE), Card(Rank.R4, Suit.SPADE)],
-    )
-    game = Game()
-    assert game.score_winner(base) is None  # not terminal
-    drawn = replace(base, scores=(50, 50), phase=Phase.DONE)
-    assert game.score_winner(drawn) is None
-    won = replace(base, scores=(60, 40), phase=Phase.DONE)
-    assert game.score_winner(won) == 0
 
 
 # -- multi-player fuzz -------------------------------------------------------

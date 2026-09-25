@@ -1,7 +1,9 @@
-"""Rule configuration.
+"""Rule configuration — the "rules as data" seam.
 
 The standard variant from RULES.md is :data:`DEFAULT_RULES`.  Fields live here
-so callers never edit the engine to try a variant.
+so callers never edit the engine to try a variant.  ``comparison`` selects the
+combo-comparison semantics; ``"tier"`` is the pre-2026-09-25 variant kept only
+to replay legacy traces.
 """
 from __future__ import annotations
 
@@ -17,6 +19,10 @@ class Rules:
     consecutive_pairs_min: int = 3
     consecutive_pairs_max: int = 3
     total_points: int = 100
+    #: Combo comparison semantics consumed by :func:`~seven523.combos.beats`.
+    #: ``"family"`` is the RULES.md §3.1 variant; ``"tier"`` is the flat-tier
+    #: comparison used before 2026-09-25, kept only to replay old traces.
+    comparison: str = "family"
 
     def __post_init__(self) -> None:
         if self.num_players < 2:
@@ -29,6 +35,8 @@ class Rules:
             raise ValueError("consecutive pairs need at least three pairs")
         if self.consecutive_pairs_max < self.consecutive_pairs_min:
             raise ValueError("bad consecutive-pair bounds")
+        if self.comparison not in {"family", "tier"}:
+            raise ValueError(f"unknown comparison {self.comparison!r}")
 
 
 DEFAULT_RULES = Rules()

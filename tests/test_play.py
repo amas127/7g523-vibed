@@ -12,6 +12,9 @@ from seven523.play import (
     QuitGame,
     action_text,
     combo_text,
+    interactive_chooser,
+    main as play_main,
+    opponent_identity,
     parse_choice,
     play_game,
     replay_trace,
@@ -19,11 +22,11 @@ from seven523.play import (
     suit_hint,
 )
 from seven523.trace import (
+    build_trace,
     card_from_json,
     card_json,
     initial_snapshot,
     load_trace,
-    rules_json,
     save_trace,
     state_from_snapshot,
 )
@@ -142,10 +145,10 @@ def test_state_from_snapshot_rebuilds_the_deal():
     assert rebuilt.draw_pile == state.draw_pile
     assert rebuilt.revealed == state.revealed
     assert rebuilt.current == state.current
+    assert rebuilt.played == ()
 
 
-def _played_trace(chooser=None):
-    rules = DEFAULT_RULES
+def _played_trace(chooser=None, *, rules=DEFAULT_RULES):
     opponents = [GreedyBot(rules), GreedyBot(rules)]
     record = {}
     scores = play_game(
@@ -157,15 +160,14 @@ def _played_trace(chooser=None):
         print_fn=SILENT,
         record=record,
     )
-    trace = {
-        "version": 1,
-        "created_at": "2026-01-01T00:00:00",
-        "rules": rules_json(rules),
-        "seed": 21,
-        "human_seat": 0,
-        "players": ["human@seat0", "贪心 bot"],
+    trace = build_trace(
+        rules,
+        seed=21,
+        human_seat=0,
+        players=["human@seat0", "贪心 bot"],
+        created_at="2026-01-01T00:00:00",
         **record,
-    }
+    )
     return trace, scores
 
 
@@ -274,3 +276,38 @@ def test_old_traces_without_suit_still_replay():
     for step in trace["steps"]:
         step.pop("suit", None)
     assert replay_trace(trace, print_fn=SILENT) is True
+
+
+# -- rung-labelled opponent traces (M3) ---------------------------------------
+
+
+def test_opponent_identity_labels_rungs_and_anchors():
+    # Scripted bots are the study's pinned anchors.
+    assert opponent_identity(None, "greedy") == ("anchor", "greedy")
+    assert opponent_identity(None, "random") == ("anchor", "random")
+    # A checkpoint carries its rung id, taken from the run directory.
+    assert opponent_identity("runs/lvl3/agent.pt", "greedy") == ("opponent", "lvl3")
+    assert opponent_identity("agent.pt", "greedy") == ("opponent", "agent")
+    with pytest.raises(ValueError):
+        opponent_identity(None, "mystery")
+
+
+def test_play_main_writes_rung_labelled_trace(tmp_path, monkeypatch):
+    def stub_chooser(human_seat, print_fn=print):
+        def chooser(game, state, view):
+            return legal_ids(view.mask)[0]
+
+        return chooser
+
+    monkeypatch.setattr("seven523.play.interactive_chooser", stub_chooser)
+    path = tmp_path / "greedy.json"
+    play_main(["--opponent", "greedy", "--seed", "5", "--save-trace", str(path)])
+    trace = load_trace(path)
+    assert trace["players"] == ["human@seat0", "anchor:greedy@seat1"]
+    assert replay_trace(trace, print_fn=SILENT) is True
+
+
+def test_interactive_chooser_is_exported_for_placement():
+    # The placement CLI reuses this chooser; only its construction is checked
+    # here (actually playing needs input()).
+    assert callable(interactive_chooser(0, print_fn=SILENT))

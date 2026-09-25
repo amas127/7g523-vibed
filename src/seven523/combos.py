@@ -24,6 +24,19 @@ class ComboKind(Enum):
     BIG_BOMB = "big_bomb"
 
 
+#: Comparison families (RULES.md §3.1): a non-bomb combo only compares against
+#: combos of its own family — 单张族 ``SINGLE/STRAIGHT``, 对子族
+#: ``PAIR/CONSECUTIVE_PAIRS``.  Bombs ignore families and beat everything.
+FAMILY: dict[ComboKind, int] = {
+    ComboKind.SINGLE: 0,
+    ComboKind.STRAIGHT: 0,
+    ComboKind.PAIR: 1,
+    ComboKind.CONSECUTIVE_PAIRS: 1,
+}
+
+#: Flat-tier ordering (pre-2026-09-25 RULES.md).  ``beats`` reads it in the
+#: legacy ``rules.comparison == "tier"`` replay mode and for bombs;
+#: :attr:`Combo.strength` uses it to *sort* candidate plays.
 TIER: dict[ComboKind, int] = {
     ComboKind.SINGLE: 1,
     ComboKind.PAIR: 1,
@@ -46,6 +59,11 @@ class Combo:
     @property
     def tier(self) -> int:
         return TIER[self.kind]
+
+    @property
+    def family(self) -> int | None:
+        """Comparison family (RULES.md §3.1); ``None`` for bombs, which are exempt."""
+        return FAMILY.get(self.kind)
 
     @property
     def size(self) -> int:
@@ -129,15 +147,13 @@ def classify(cards: Iterable[Card], rules: Rules = DEFAULT_RULES) -> Combo | Non
     return None
 
 
-def beats(candidate: Combo, incumbent: Combo | None, rules: Rules = DEFAULT_RULES) -> bool:
-    """True iff ``candidate`` strictly beats ``incumbent`` (RULES.md §3).
+def _beats_tier(candidate: Combo, incumbent: Combo) -> bool:
+    """The flat-tier comparison used before 2026-09-25 (``rules.comparison == "tier"``).
 
-    ``beats(c, None)`` is True: any legal combo may lead.  Across tiers only the
-    tier matters; within a kind, size comes first (except bombs, which compare by
-    rank only), then the top card's point order and suit.
+    Kept only so traces recorded under the old rules replay: non-bombs compare
+    across tiers (单牌/对子 tier 1 < 顺子/连对 tier 2), same-tier different kinds
+    never compare, and bombs compare by tier then rank.
     """
-    if incumbent is None:
-        return True
     if candidate.tier != incumbent.tier:
         return candidate.tier > incumbent.tier
     if candidate.kind != incumbent.kind:
@@ -147,3 +163,26 @@ def beats(candidate: Combo, incumbent: Combo | None, rules: Rules = DEFAULT_RULE
     if candidate.size != incumbent.size:
         return candidate.size > incumbent.size
     return candidate.top_key > incumbent.top_key
+
+
+def beats(candidate: Combo, incumbent: Combo | None, rules: Rules = DEFAULT_RULES) -> bool:
+    """True iff ``candidate`` strictly beats ``incumbent`` (RULES.md §3).
+
+    ``beats(c, None)`` is True: any legal combo may lead.  Bombs beat every
+    non-bomb and compare among themselves by tier then rank.  Non-bombs only
+    compare inside their family (单张: single/straight; 对子: pair/consecutive
+    pairs); a cross-family play never beats.  Within a family, size comes
+    first, then the top card's point order and suit.  ``rules.comparison ==
+    "tier"`` selects the legacy flat-tier rule (:func:`_beats_tier`) instead.
+    """
+    if incumbent is None:
+        return True
+    if rules.comparison == "tier":
+        return _beats_tier(candidate, incumbent)
+    if candidate.is_bomb or incumbent.is_bomb:
+        if candidate.tier != incumbent.tier:
+            return candidate.tier > incumbent.tier
+        return candidate.top_rank > incumbent.top_rank
+    if candidate.family != incumbent.family:
+        return False
+    return (candidate.size, candidate.top_key) > (incumbent.size, incumbent.top_key)

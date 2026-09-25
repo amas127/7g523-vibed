@@ -30,9 +30,11 @@ from .trace import (
     build_trace,
     initial_snapshot,
     load_trace,
+    player_label,
     rules_from_json,
     save_trace,
     state_from_snapshot,
+    step_record,
 )
 
 __all__ = [
@@ -40,7 +42,9 @@ __all__ = [
     "QuitGame",
     "action_text",
     "combo_text",
+    "interactive_chooser",
     "main",
+    "opponent_identity",
     "parse_args",
     "parse_choice",
     "play_game",
@@ -53,8 +57,8 @@ HELP = """\
 输入可选列表里的编号出牌；q 退出，h 显示帮助。
 顶牌有多花色可选时，列表会提示（默认 ♠，可换 ♥）；输入 编号+花色 即可，
 如 10♥ 或 10 2；直接输编号则用默认最强花色。炸弹/王炸与花色无关。
-牌型大小：单牌/对子 < 顺子/连对 < 小炸弹（含王炸）< 大炸弹；
-同牌型比张数再比最大牌；同点数比花色（♠ > ♥ > ♣ > ♦）。
+牌型大小：单张族（单牌 < 顺子）、对子族（对子 < 连对）各自比较，跨族不可压；
+炸弹压所有：小炸弹（含王炸）< 大炸弹；同族先比张数再比最大牌；同点数比花色（♠ > ♥ > ♣ > ♦）。
 顺子/连对按自然环 3-4-5-6-7-8-9-10-J-Q-K-A-2，A-2-3 合法。"""
 
 KIND_LABELS: dict[ComboKind, str] = {
@@ -282,7 +286,7 @@ def play_game(
 
     ``chooser`` may raise :class:`QuitGame` to abandon the game.
     When ``record`` is given it is filled with ``initial`` (the deal),
-    ``steps`` (one entry per move), ``final_scores`` and ``winner``.
+    ``steps`` (one entry per move) and ``final_scores``.
     Returns the final scores (one per seat).
     """
     policies: list[Policy | None] = list(opponents)
@@ -299,23 +303,18 @@ def play_game(
 
     def on_turn(seat, action_id, suit, view, result):
         label = "你" if seat == human_seat else names[seat]
-        print_fn(f"{label}出了 " + action_text(game, action_id, view.hand, suit))
+        text = action_text(game, action_id, view.hand, suit)
+        print_fn(f"{label}出了 " + text)
         if record is not None:
-            state = match.state
             record["steps"].append(
-                {
-                    "seat": seat,
-                    "action": action_id,
-                    "suit": suit,
-                    "text": action_text(game, action_id, view.hand, suit),
-                    "scores": list(state.scores),
-                    "hand_sizes": [len(hand) for hand in state.hands],
-                    "draw_count": len(state.draw_pile),
-                    "trick_over": result.trick_over,
-                    "winner": result.winner,
-                    "points": result.points_taken,
-                    "dug": result.dug,
-                }
+                step_record(
+                    seat,
+                    action_id,
+                    suit,
+                    text=text,
+                    state=match.state,
+                    result=result,
+                )
             )
         if result.trick_over:
             print_fn(_trick_text(result, names))
@@ -350,11 +349,31 @@ def play_game(
     print_fn(f"本局结束：{scores} —— {outcome}")
     if record is not None:
         record["final_scores"] = list(state.scores)
-        record["winner"] = winners[0] if len(winners) == 1 else None
     return state.scores
 
 
-def _interactive_chooser(
+def opponent_identity(checkpoint: str | None, opponent: str = "greedy") -> tuple[str, str]:
+    """Trace identity ``(role, id)`` of a ``7g523-play`` opponent.
+
+    A checkpoint labels by its run directory: ``runs/<new-run>/agent.pt``
+    becomes ``opponent:<new-run>@seatN`` (the directory name carries the run
+    id), so a human trace can be calibrated against the measured ladder
+    (HR §6.3/§8).
+    The scripted bots are the pinned anchors and label as
+    ``anchor:greedy@seatN`` / ``anchor:random@seatN``, matching the study
+    traces.  Display names (``贪心 bot`` …) are not identities and never reach
+    the trace.
+    """
+    if checkpoint:
+        path = Path(checkpoint)
+        name = path.parent.name if path.parent != Path(".") else path.stem
+        return "opponent", name or "agent"
+    if opponent not in {"greedy", "random"}:
+        raise ValueError(f"unknown scripted opponent {opponent!r}")
+    return "anchor", opponent
+
+
+def interactive_chooser(
     human_seat: int, print_fn: Callable[..., None] = print
 ) -> Callable[[Game, GameState, View], int]:
     def chooser(game: Game, state: GameState, view: View) -> int:
@@ -416,8 +435,8 @@ def _trace_path(path: Path, round_no: int, rounds: int) -> Path:
     return path.with_name(f"{path.stem}_{round_no}{path.suffix or '.json'}")
 
 
-def main() -> None:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
     if args.replay:
         try:
             replay_trace(load_trace(args.replay), pause=args.pause)
@@ -442,7 +461,8 @@ def main() -> None:
         opponent_name = "贪心 bot"
 
     opponents = [policy] * rules.num_players
-    chooser = _interactive_chooser(args.seat)
+    chooser = interactive_chooser(args.seat)
+    role, identity = opponent_identity(args.checkpoint, args.opponent)
     print(f"对手：{opponent_name}；你坐 {args.seat} 号位。输入 h 看帮助。")
     try:
         for round_no in range(1, args.rounds + 1):
@@ -468,7 +488,9 @@ def main() -> None:
                     seed=seed,
                     human_seat=args.seat,
                     players=[
-                        f"human@seat{args.seat}" if seat == args.seat else opponent_name
+                        f"human@seat{args.seat}"
+                        if seat == args.seat
+                        else player_label(role, identity, seat)
                         for seat in range(rules.num_players)
                     ],
                     created_at=datetime.now().isoformat(timespec="seconds"),

@@ -337,6 +337,35 @@ def test_mask_following_sets_pass_and_only_legal_beats():
     assert mask == (1 << PASS_ID)
 
 
+def test_mask_rejects_cross_family_beats():
+    """RULES.md §3.1: a pair is only answered by pairs, a single by singles/straights."""
+    pair7 = classify([Card(Rank.R7, Suit.SPADE), Card(Rank.R7, Suit.HEART)])
+    straight_hand = [
+        Card(Rank.R8, Suit.SPADE),
+        Card(Rank.R9, Suit.SPADE),
+        Card(Rank.R10, Suit.SPADE),
+    ]
+    straight_id = CATALOG.index(
+        action_for(ComboKind.STRAIGHT, (Rank.R8, Rank.R9, Rank.R10))
+    )
+    mask = action_mask(straight_hand, pair7)
+    assert not (mask >> straight_id) & 1
+    assert (mask >> PASS_ID) & 1
+
+    single4 = classify([Card(Rank.R4, Suit.SPADE)])
+    pairs_hand = [
+        Card(rank, suit)
+        for rank in (Rank.R3, Rank.R4, Rank.R5)
+        for suit in (Suit.SPADE, Suit.HEART)
+    ]
+    pairs_id = CATALOG.index(
+        action_for(ComboKind.CONSECUTIVE_PAIRS, (Rank.R3, Rank.R4, Rank.R5))
+    )
+    mask = action_mask(pairs_hand, single4)
+    assert not (mask >> pairs_id) & 1
+    assert (mask >> PASS_ID) & 1
+
+
 def test_legal_ids_full_mask_is_every_action():
     assert legal_ids((1 << len(CATALOG)) - 1) == list(range(len(CATALOG)))
 

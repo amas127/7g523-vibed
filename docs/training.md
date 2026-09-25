@@ -1,5 +1,9 @@
 # 训练与评估使用手册
 
+> **规则口径（2026-09-25）**：非炸弹比较已改为牌型族（[ADR-0007](adr/0007-family-comparison.md)、`RULES.md` §3）。本文引用的历史 Elo/胜率/训练结论均为旧 `tier` 口径，不可与新规则结果混比；重标定见 [plans.md](plans.md) T15 与 [experiments/README.md](experiments/README.md) 顶部警告。
+
+> **模型资产状态（2026-09-25）**：牌型族规则变更前的全部 checkpoint 已从 `runs/` 删除（含本文示例曾引用的 `runs/probe/*`、`runs/lvl*` 等），旧路径不再可用。下文 `--load-checkpoint` / `--checkpoint` / `--pool-member` 中的 `runs/<...>/agent.pt` 均为占位符：先按「阶段 1」训练出新模型；整体重标定计划见 [plans.md](plans.md) T15。
+
 依赖一次性安装（gymnasium + cu132 版 torch 已在 `train` 组里）：
 
 ```bash
@@ -36,7 +40,7 @@ uv run --group train 7g523-train --exp-name stage1 --total-timesteps 300000 \
 
 ```bash
 uv run --group train 7g523-train --exp-name stage2 \
-    --opponent self --load-checkpoint runs/stage1__1__.../agent.pt \
+    --opponent self --load-checkpoint runs/<stage1-run>/agent.pt \
     --total-timesteps 300000 --eval-interval 20 --eval-opponent greedy
 ```
 
@@ -44,13 +48,32 @@ uv run --group train 7g523-train --exp-name stage2 \
 `--self-play-sample` 让对手按 mask 采样而不是 argmax。`--load-checkpoint`
 只是热启动，不影响 `--opponent` 的选择。
 
+对手池（league）：`--opponent mix` 是「冻结自己 + GreedyBot」的按决策混合
+（比例由 `--mix-greedy-prob` 控制）；`--opponent pool` 是真正的多成员池：
+
+```bash
+uv run --group train 7g523-train --exp-name league --opponent pool \
+    --pool-member 1@ckpt:runs/<run-a>/agent.pt \
+    --pool-member 1@ckpt:runs/<run-b>/agent.pt \
+    --pool-member 2@greedy \
+    --load-checkpoint runs/<new-run>/agent.pt --total-timesteps 200000
+```
+
+示例里的两个 ckpt 成员是占位符（旧 probe 快照已删除），可先只留 `2@greedy`
+跑通；替换成自己训练的新 ckpt 后再补多成员池。
+
+每个 `--pool-member` 形如 `[WEIGHT@]SPEC`，`SPEC` 支持 `greedy` / `random` /
+`ckpt:<agent.pt>` / `self`（`self` 走 `--self-play-refresh` 原地刷新）。
+`MixturePolicy` 在每次决策按权重抽一个成员，各 env 用独立 RNG。
+
 ## 评估
 
 ```bash
-uv run --group train 7g523-eval --checkpoint runs/stage1__1__.../agent.pt \
+uv run --group train 7g523-eval --checkpoint runs/<run>/agent.pt \
     --episodes 1000 --opponent greedy
 
 uv run --group train 7g523-eval --checkpoint ... --opponent random --json
+# ckpt 策略可用 --device cuda 指定推理设备（小 MLP 下与 CPU 同速，见评测报告）
 ```
 
 | 指标 | 含义 |
@@ -61,9 +84,55 @@ uv run --group train 7g523-eval --checkpoint ... --opponent random --json
 | `mean_length` | 平均步数（学习者视角） |
 | `illegal_rate` | 非法动作率，必须为 0（mask 是唯一合法性权威） |
 
+## 天梯定级与候选对候选比较
+
+定级用 `tools/build_ladder.py`：**候选内换座配对**（每副牌对每个候选打两局、座位互换），
+`--games-per-anchor` 必须是**偶数**（400 = 200 副牌 × 双座位）；结果不受候选顺序影响。
+跨 fit 比较不可靠（父模型跨 seed sd 可达 37），方案对比请用同 fit 或 ≥3 seed 合并：
+
+```bash
+uv run --group train python tools/build_ladder.py \
+  --candidate A=ckpt:runs/<run-a>/agent.pt --candidate B=ckpt:runs/<run-b>/agent.pt \
+  --games-per-anchor 400 --seed 0 --device cuda --no-traces --games-out runs/games.jsonl
+```
+
+候选对候选（同牌换座、按牌聚簇配对 bootstrap，方差比绝对锚点 Elo 小 2–3×；建议 ≥3 seed）：
+
+```bash
+uv run --group train python tools/head_to_head.py \
+  --left A=ckpt:runs/<run-a>/agent.pt \
+  --right B=ckpt:runs/<run-b>/agent.pt \
+  --seeds 0,1,2 --pairs 400 --device cuda [--json] [--games-out runs/h2h.jsonl]
+
+uv run --group train python tools/h2h_screen.py --help   # 多对 × 3 seed × 200 副批量筛选
+```
+
+分辨率：20 Elo ≈ 400–500 副牌，10 Elo ≈ 1500–2000。`--games-out` 落每局 JSONL
+（`seed/seats/scores/subject/opponent/subject_seat/kind`，多 seed 自动分文件），支持事后
+配对/bootstrap。结论与误差口径见 [experiments/README.md](./experiments/README.md)。
+
+`tools/build_ladder.py`、`tools/head_to_head.py`、`tools/h2h_screen.py` 都支持
+`--workers N`（默认 1 = 原串行循环）：`N>1` 时按 schedule 分片、spawn 进程并行，结果与串行
+**逐位一致**（有回归测试）；`--device cuda` 下每个 worker 各开一个 CUDA context
+（显存不够时降 `--workers` 或改 `--device cpu`）。
+
 ## 常用开关
 
 - `--cuda False`：强制 CPU；`--opponent random`：对手换随机 bot
+- `--activation {relu,tanh,gelu,silu}`：隐藏层激活（默认 relu；激活存入 checkpoint，旧 ckpt 缺省按 relu 加载）
+- `--arch {shared,towers}`：网络架构（默认 `shared`，共享主干）。`towers` = 独立 actor/critic 两塔（参数 +69.6%），为实验性选项、T6 已判负并关闭该线（见 [experiments/twin-towers-500k.md](./experiments/twin-towers-500k.md)）；默认 `shared` 逐位不变
+- `--obs-version {1,2,3,4,5}`：选择观测布局版本，默认 `5`（`OBS_VERSION`）。v1=原始（185+3n）；v2=B0 增广（+3 维点分量 `trick_points`/`remaining_points`/`point_hold`，188+3n，见 [experiments/observation-augmentation-b0.md](./experiments/observation-augmentation-b0.md)）；v3=B1 增广（v2+55：`unseen` 54 维 + `last_player` 1 维，243+3n、2 家 249，见 [experiments/observation-augmentation-b1.md](./experiments/observation-augmentation-b1.md)；结果未确认）；v4=观测 S1+B0（64+21n、2 家 106）；**v5=观测 S1+B0+B1（119+21n、2 家 161，默认）**，v4 是 v5 的逐位前缀（见 [ADR-0008](./adr/0008-observation-layout-v5.md)）。旧 ckpt 按自身 `obs_version` 推理；跨版本热启动对允许方向做段级列重映射（前缀方向新列置 0，`incumbent_top`/`revealed` 的 54→19 段为近似），不可映射方向在加载点显式拒绝
+- `--reward-shaping {terminal,trick_diff,win,trick_diff_win}`：奖励分解（默认 `terminal` 旧行为逐位不变）。`trick_diff` 每步 `Φ(s')−Φ(s)`（一局求和 = 终局回报，telescoping）；`win` 终局 `sign(own−max(others)) ∈ {−1,0,+1}`；`trick_diff_win` 为两者叠加。T1 结果见 [experiments/reward-shaping-500k.md](./experiments/reward-shaping-500k.md)（A1 正信号在训练 seed 复现后未复现）
+- `--opponent mix|pool`：对手混合 / 多成员联赛；`--pool-member [WEIGHT@]SPEC`（SPEC = `greedy`/`random`/`self`/`ckpt:<agent.pt>`，可重复，权重默认 1）
+- `--pool-episode`（默认关）：`--opponent pool/mix` 时改为**逐局**冻结一个成员
+  （`EpisodeMixturePolicy`，在 `env.reset` 时抽一次），代替旧的逐决策重抽（`MixturePolicy`）；
+  关闭时逐位保持旧行为。
+- `--pfsp`（默认关，需 `--opponent pool --pool-episode`）：每 `--pfsp-every K`（默认 100）局
+  按学习者对每个成员的战绩重算采样权重——`wr_i` 先经 `Beta(prior/2, prior/2)`
+  （`--pfsp-prior`，默认 10；0 关收缩）向 0.5 收缩，再 `w_i ∝ (1−wr_i)² + --pfsp-epsilon`
+  （默认 0.02），最后与均匀按 `--pfsp-uniform-mix`（默认 0.5）混合；平局计半。逐局战绩与
+  权重写入 `runs/<run>/pfsp_weights.csv`（TensorBoard `pfsp/weight/*`）。默认全关 = 旧行为；
+  T5 结果（三效应 null）见 [experiments/opponent-distribution-500k.md](./experiments/opponent-distribution-500k.md)。
 - PPO 超参：`--total-timesteps`、`--learning-rate`、`--ent-coef`、`--target-kl ...`
 - `--hidden-size`：MLP 宽度（默认 128）
 - `--checkpoint-interval 0`：只留最终 `agent.pt`；`--log-interval 10`：每 10 次 update 打印一次

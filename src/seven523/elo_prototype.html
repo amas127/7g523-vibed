@@ -1,0 +1,904 @@
+<!doctype html>
+<!--
+  PROTOTYPE — 7鬼523 Elo 评分原型（一次性、可丢弃，勿进生产）
+
+  问题：用棋类 Elo 的哪几种变体，能让不同水平的模型（checkpoint / bot）
+        拿到分开、稳定、有绝对含义的分数？
+
+  运行：双击本文件即可。零依赖、无持久化、不跑真实引擎——对局是按隐藏
+        强度合成的，只为把评分规则压到各种极端情形下看反应。
+
+  可移植部分：「Elo 核心」脚本块（纯函数，无 DOM），对应未来
+        src/seven523/elo.py 的 expected_score / k_factor / rating_update。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>7鬼523 Elo 评分原型</title>
+<style>
+  :root{
+    --ink:#1f2328; --muted:#6b7280; --line:#e5e7eb; --bg:#f6f7f8; --panel:#fff;
+    --accent:#2f6feb; --accent-soft:#eaf1fe; --warn:#b45309; --ok:#15803d;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:15px/1.65 -apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB",
+         "Microsoft YaHei","Noto Sans CJK SC",sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1040px; margin:0 auto; padding:28px 20px 72px}
+  header h1{font-size:25px; margin:0 0 8px; letter-spacing:-.01em}
+  .lede{margin:0 0 10px; color:#374151; max-width:780px}
+  .spec{
+    margin:12px 0 0; padding:10px 14px; border:1px solid var(--line); border-radius:10px;
+    background:#fbfcfd; font-size:13.5px; color:#374151; max-width:820px;
+  }
+  .spec b{color:var(--ink)}
+  .proto{font-size:12.5px; color:var(--muted); margin-top:10px; padding-left:10px;
+         border-left:3px solid var(--line); max-width:780px}
+  section{background:var(--panel); border:1px solid var(--line); border-radius:12px;
+          padding:18px 20px; margin-top:16px}
+  h2{font-size:12px; letter-spacing:.07em; color:var(--muted); font-weight:700;
+     margin:0 0 12px; text-transform:uppercase}
+  .hint{color:var(--muted); font-size:12.5px}
+  .overview{font-size:13.5px; color:#374151; margin:0 0 12px; font-variant-numeric:tabular-nums}
+  .table-wrap{overflow-x:auto}
+  table{width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums}
+  th,td{text-align:left; padding:7px 10px; border-bottom:1px solid var(--line); font-size:14px; white-space:nowrap}
+  th{color:var(--muted); font-weight:600; font-size:11.5px; letter-spacing:.04em}
+  tr:last-child td{border-bottom:none}
+  .dot{display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:7px; vertical-align:1px}
+  .tag{display:inline-block; font-size:11px; padding:1px 6px; border-radius:999px;
+       border:1px solid var(--line); color:var(--muted); margin-left:6px}
+  .score-cell{min-width:170px}
+  .score-num{font-weight:650; margin-right:8px}
+  .track{display:inline-block; width:78px; height:6px; background:#eef0f3; border-radius:3px;
+         vertical-align:middle; overflow:hidden}
+  .fill{height:100%; border-radius:3px}
+  .err{float:right; color:var(--muted); font-size:12.5px}
+  .focus{margin:14px 0 0; padding:10px 12px; border:1px dashed #c9d4ea; border-radius:10px;
+         background:#f7faff; font-size:13.5px; font-variant-numeric:tabular-nums}
+  .calib{margin:14px 0 0; padding:10px 12px; border:1px dashed #c9d4ea; border-radius:10px;
+         background:#f7faff; font-size:13.5px; font-variant-numeric:tabular-nums; line-height:1.8}
+  .chart{margin-top:16px}
+  .chart-svg{display:block; width:100%; height:auto; border:1px solid var(--line); border-radius:8px; background:#fdfdfe}
+  .chart-svg .grid{stroke:#eef0f3; stroke-width:1}
+  .chart-svg .axis{fill:#9aa2ad; font-size:10px; font-family:inherit}
+  .chart-svg .anchor-line{stroke:#c6ccd4; stroke-width:1; stroke-dasharray:4 4}
+  .legend{display:flex; flex-wrap:wrap; gap:6px 16px; margin-top:8px; font-size:12.5px; color:#374151;
+          font-variant-numeric:tabular-nums}
+  .log{margin-top:14px; font-size:13px; font-variant-numeric:tabular-nums}
+  .log-head{color:var(--muted); font-size:11.5px; letter-spacing:.04em; margin-bottom:4px}
+  .log-line{padding:3px 0; border-top:1px dashed var(--line); color:#374151}
+  .log-line b{font-weight:600}
+  .controls-grid{display:flex; flex-wrap:wrap; gap:14px 28px}
+  .ctl{display:flex; flex-direction:column; gap:5px; font-size:13px; color:#374151}
+  .ctl select{font:inherit; font-size:13.5px; padding:5px 8px; border:1px solid var(--line);
+              border-radius:8px; background:#fff; color:var(--ink)}
+  .btns{display:flex; flex-wrap:wrap; gap:8px}
+  button{font:inherit; font-size:13.5px; cursor:pointer; border-radius:8px; border:1px solid var(--line);
+         background:#fff; padding:7px 13px; color:var(--ink)}
+  button:hover:not(:disabled){border-color:#c9ced6; background:#fbfbfc}
+  button.primary{background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600}
+  button.primary:hover:not(:disabled){background:#2860d6}
+  button.ghost{color:var(--muted)}
+  button:disabled{opacity:.45; cursor:default}
+  .tabs{display:flex; flex-wrap:wrap; gap:6px; margin-bottom:16px}
+  .tab{padding:6px 13px; border:1px solid var(--line); border-radius:999px; background:#fff;
+       font-size:13px; cursor:pointer}
+  .tab:hover{border-color:#c9ced6}
+  .tab.active{background:var(--accent-soft); border-color:#bcd0fb; color:#1a4fbf; font-weight:650}
+  .scenario-intro{font-size:14px; color:#374151; margin:0 0 14px; max-width:820px}
+  .step{display:flex; gap:12px; padding:11px 0; border-top:1px dashed var(--line); align-items:flex-start}
+  .step .idx{flex:0 0 22px; width:22px; height:22px; border-radius:50%; border:1px solid var(--line);
+             display:flex; align-items:center; justify-content:center; font-size:11.5px; color:var(--muted);
+             margin-top:2px}
+  .step.done .idx{background:#e7f5ec; border-color:#bfe3cc; color:var(--ok)}
+  .step.current .idx{background:var(--accent-soft); border-color:#bcd0fb; color:#1a4fbf; font-weight:650}
+  .step .body{flex:1; min-width:0}
+  .step .note{color:var(--muted); font-size:13px; margin-top:5px}
+  .step .future{opacity:.55}
+  .scenario-foot{margin-top:14px; display:flex; gap:8px}
+  .progress{color:var(--muted); font-size:12.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>7鬼523 Elo 评分原型</h1>
+    <p class="lede">给 bot 和 checkpoint 评分：让不同水平拿到<b>分开、稳定、有绝对含义</b>的 Elo。
+      规则照搬棋类，只做三处 7鬼523 化的选择——秤砣锚定、新手期 K、每局实得用胜负还是分数。</p>
+    <div class="spec">
+      <b>算法（核心三行）</b><br>
+      期望：<b>E<sub>A</sub> = 1 / (1 + 10<sup>(R<sub>B</sub>−R<sub>A</sub>)/400</sup>)</b>（400 分 = 10:1 赔率，期望得分 10/11 ≈ 0.909，不是 95%）<br>
+      实得：<b>S<sub>A</sub> = 胜 1 / 平 0.5 / 负 0</b>，或 <b>本局得分/100</b>（可切换）<br>
+      更新：<b>R<sub>A</sub> += K<sub>A</sub> × (S<sub>A</sub> − E<sub>A</sub>)</b>，K<sub>A</sub> 随场次从新手值线性降到常规值<br>
+      <b>秤砣：</b>RandomBot / GreedyBot 固定不更新，给整个池子钉住绝对刻度。<br>
+      <b>报告：</b>Elo 与场均分差（score_diff）分开——前者答「谁更强」，后者答「强多少」。<br>
+      <b>定级：</b>批量 MAP 拟合 traces（误差 ∝ 1/√n，无 K 噪声地板，输出 95% CI）；在线 Elo 只作实时显示。
+    </div>
+    <p class="proto">【原型】对局是合成的，不是真跑引擎：每局按隐藏强度抽样胜负与比分。
+      评分核心是下面的独立 Elo 模块（纯函数、无 DOM），验证后可整块搬进 <code>src/seven523/elo.py</code>。
+      只做 2 家（当前训练基线）。</p>
+  </header>
+
+  <section id="state">
+    <h2>当前联赛</h2>
+    <div id="overview" class="overview"></div>
+    <div class="table-wrap">
+      <table id="ratings">
+        <thead><tr>
+          <th>模型</th><th class="score-cell">Elo</th><th>场次</th><th>战绩</th>
+          <th title="所有对局的 own_score − opponent_score 平均值（报告指标，不进评分）">场均分差</th>
+          <th>模拟真值</th><th>误差</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div id="focus" class="focus" hidden></div>
+    <div id="calib" class="calib" hidden></div>
+    <div id="chart" class="chart"></div>
+    <div id="log" class="log"></div>
+  </section>
+
+  <section id="controls">
+    <h2>评分参数（改完即时生效；新模型一律从 1500 起步）</h2>
+    <div class="controls-grid">
+      <label class="ctl">结果信号
+        <select data-cfg="signal">
+          <option value="binary" selected>胜负 0 / 1</option>
+          <option value="points">分数占比 0–1</option>
+        </select>
+      </label>
+      <label class="ctl">常规 K
+        <select data-cfg="kBase">
+          <option value="4">4（稳，慢）</option>
+          <option value="8">8</option>
+          <option value="16" selected>16（棋类常用）</option>
+          <option value="24">24（快，抖）</option>
+        </select>
+      </label>
+      <label class="ctl">新手期
+        <select data-cfg="prov">
+          <option value="off">关</option>
+          <option value="30x40" selected>前 30 局 K=40</option>
+          <option value="50x64">前 50 局 K=64</option>
+        </select>
+      </label>
+      <label class="ctl">锚定秤砣
+        <select data-cfg="anchored">
+          <option value="1" selected>开</option>
+          <option value="0">关</option>
+        </select>
+      </label>
+      <label class="ctl">运气系数
+        <select data-cfg="luck">
+          <option value="1" selected>×1（棋类式）</option>
+          <option value="1.5">×1.5</option>
+          <option value="2">×2（牌运大）</option>
+        </select>
+      </label>
+    </div>
+  </section>
+
+  <section id="freeplay">
+    <h2>自由操作</h2>
+    <div class="btns">
+      <button data-play="random1">打 1 局</button>
+      <button data-play="random10">打 10 局</button>
+      <button data-play="round1">打 1 轮轮转</button>
+      <button data-play="round5">打 5 轮轮转</button>
+      <button data-play="reset" class="ghost">重置（同种子）</button>
+      <button data-play="reseed" class="ghost">重置（换种子）</button>
+    </div>
+    <p class="hint" id="seed-hint"></p>
+  </section>
+
+  <section id="scenarios">
+    <h2>引导场景</h2>
+    <div class="tabs" id="tabs"></div>
+    <div id="scenario-body"></div>
+  </section>
+
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     Elo 核心（可移植）：纯函数，不碰 DOM / 随机 / 赛程。
+     cfg = { kBase, kProv, provGames }；player = { rating, games, fixed }
+     搬到 Python 时一一对应：
+       expected_score(rating_a, rating_b) -> float
+       k_factor(games, cfg) -> float
+       rating_update(player_a, player_b, score_a, cfg) -> (delta_a, delta_b, expected_a)
+     ═══════════════════════════════════════════════════════════════════ -->
+<script>
+const ELO_SCALE = 400;  // 棋类惯例：400 分差距 = 10:1 赔率（期望得分 10/11 ≈ 0.909）
+
+function expectedScore(ratingA, ratingB) {
+  return 1 / (1 + Math.pow(10, (ratingB - ratingA) / ELO_SCALE));
+}
+
+// 新手期：K 从 kProv 线性衰减到 kBase，打满 provGames 局后为标准 K。
+function kFactor(games, cfg) {
+  if (!cfg.provGames || cfg.provGames <= 0) return cfg.kBase;
+  const t = Math.min(1, games / cfg.provGames);
+  return cfg.kBase + (cfg.kProv - cfg.kBase) * (1 - t);
+}
+
+// 一局的更新量。scoreA ∈ [0,1] 是 A 的实得（胜负 0/0.5/1，或 得分/100）。
+// fixed=true 表示秤砣：K=0，评级不变。deltaA+deltaB 不一定为 0（双方 K 不同）。
+function ratingUpdate(playerA, playerB, scoreA, cfg) {
+  const expectedA = expectedScore(playerA.rating, playerB.rating);
+  const kA = playerA.fixed ? 0 : kFactor(playerA.games, cfg);
+  const kB = playerB.fixed ? 0 : kFactor(playerB.games, cfg);
+  return {
+    deltaA: kA * (scoreA - expectedA),
+    deltaB: kB * ((1 - scoreA) - (1 - expectedA)),
+    expectedA,
+  };
+}
+
+// 批量 MAP 拟合：把收集到的多条对局一起解出评分（traces 离线模式）。
+// games = [{ rating, score }]：对手评分 + 本局实得（胜负 0/1，平 0.5）。
+// 返回 { rating, se }，95% CI ≈ rating ± 1.96·se。在线 Elo 是它的随机逼近；
+// 批量版没有 K 的噪声地板——局数翻倍，se 按 1/√n 缩小。
+function fitRating(games, options) {
+  options = options || {};
+  const priorMean = options.priorMean != null ? options.priorMean : 1500;
+  const priorSd = options.priorSd != null ? options.priorSd : 200;
+  const priorPrec = 1 / (priorSd * priorSd);
+  const beta = Math.log(10) / ELO_SCALE;
+  let rating = priorMean;
+  for (let iter = 0; iter < 60; iter++) {
+    let grad = 0, info = priorPrec;
+    for (const g of games) {
+      const p = expectedScore(rating, g.rating);
+      grad += beta * (g.score - p);
+      info += beta * beta * p * (1 - p);
+    }
+    // 阻尼牛顿：限幅 + 区间钳制，防止 p→0/1 时过冲（全胜/全负 vs 远档对手）
+    const step = Math.max(-300, Math.min(300, (grad - (rating - priorMean) * priorPrec) / info));
+    rating = Math.max(400, Math.min(2600, rating + step));
+    if (Math.abs(step) < 1e-7) break;
+  }
+  let info = priorPrec;
+  for (const g of games) {
+    const p = expectedScore(rating, g.rating);
+    info += beta * beta * p * (1 - p);
+  }
+  return { rating: rating, se: 1 / Math.sqrt(info) };
+}
+</script>
+
+<!-- ══════════════════════════ 演示外壳（一次性） ══════════════════════════ -->
+<script>
+(function () {
+  'use strict';
+
+  /* ---------- 名册与颜色 ---------- */
+  const ROSTERS = {
+    league: [
+      { id: 'random', label: 'RandomBot',      skill: 1000, anchor: true },
+      { id: 'greedy', label: 'GreedyBot',      skill: 1315, anchor: true },
+      { id: 'stage1', label: 'stage1.pt',      skill: 1405 },
+      { id: 'stage2', label: 'stage2.pt',      skill: 1400 },
+      { id: 'expert', label: 'expert.pt',      skill: 1550 },
+    ],
+    newcomers: [
+      { id: 'random',   label: 'RandomBot',    skill: 1000, anchor: true },
+      { id: 'greedy',   label: 'GreedyBot',    skill: 1315, anchor: true },
+      { id: 'coldProv', label: 'cold-start.pt', skill: 1400 },
+      { id: 'coldStd',  label: 'cold-plain.pt', skill: 1400, novice: false },
+      { id: 'warm',     label: 'warm-start.pt', skill: 1400, start: 1400, novice: false },
+    ],
+    resolution: [
+      { id: 'near1', label: 'ckpt-A.pt', skill: 1390, start: 1405, novice: false },
+      { id: 'near2', label: 'ckpt-B.pt', skill: 1420, start: 1405, novice: false },
+    ],
+    unanchored: [
+      { id: 'random', label: 'RandomBot', skill: 1000, anchor: true },
+      { id: 'greedy', label: 'GreedyBot', skill: 1315, anchor: true },
+      { id: 'stage1', label: 'stage1.pt', skill: 1405 },
+      { id: 'stage2', label: 'stage2.pt', skill: 1400 },
+    ],
+    human: [
+      { id: 'random', label: 'RandomBot',    skill: 1000, anchor: true },
+      { id: 'greedy', label: 'GreedyBot',    skill: 1315, anchor: true },
+      { id: 'mid',    label: 'ckpt-1420.pt', skill: 1420, anchor: true },
+      { id: 'expert', label: 'expert.pt',    skill: 1550, anchor: true },
+      { id: 'you',    label: '你（真人）',    skill: 1400 },
+    ],
+  };
+  const MODEL_COLORS = {
+    random: '#9aa2ad', greedy: '#7d8794',
+    stage1: '#2f6feb', stage2: '#e07b39', expert: '#3f9d63',
+    coldProv: '#2f6feb', coldStd: '#c2414b', warm: '#3f9d63',
+    mid: '#a25ec2', you: '#c2414b',
+    near1: '#2f6feb', near2: '#e07b39',
+  };
+  const FALLBACK_COLORS = ['#2f6feb', '#e07b39', '#3f9d63', '#a25ec2', '#c2414b', '#0e8a92'];
+  const DEFAULT_CFG = { signal: 'binary', kBase: 16, kProv: 40, provGames: 30, anchored: true, luck: 1 };
+
+  /* ---------- 场景定义：tab 点击 = 按预设整池重置 ---------- */
+  const SCENARIOS = [
+    {
+      id: 'levels', label: '① 分级',
+      intro: '五名选手的真水平在模拟里已知：RandomBot 1000、GreedyBot 1315、stage1 1405、stage2 1400、expert 1550。'
+           + '问题：轮流对局之后，Elo 能不能把这些级别排开、排稳？特别注意 stage1 与 stage2 只差 5 分。',
+      preset: { roster: 'league', cfg: { signal: 'binary', kBase: 16, provGames: 30, kProv: 40, anchored: true, luck: 1 } },
+      seed: 523,
+      steps: [
+        { label: '打 1 轮轮转（20 局）', run: s => playRounds(s, 1),
+          note: '每名选手只下了 8 局：数字离真值很远（stage1 显示 1467，真值 1405），名次基本靠运气。' },
+        { label: '再打 2 轮（累计 60 局）', run: s => playRounds(s, 2),
+          note: 'expert 与下面拉开了；stage1 与 stage2 谁高谁低仍是噪声。' },
+        { label: '再打 8 轮（累计 220 局）', run: s => playRounds(s, 8),
+          note: '秤砣把 RandomBot 钉在 1000、GreedyBot 钉在 1315；stage1 与 stage2 都在 1400 上下 ±50 摆动，'
+              + '而真值只差 5 分——在线 Elo 分不开这一对，也不该硬分。' },
+        { label: '再打 30 轮（累计 820 局）', run: s => playRounds(s, 30),
+          note: '分差不再随局数缩小：K=16 的在线 Elo 自带 ±30~50 的抖动（噪声地板）。要把名次排稳，得把 K 降下来。' },
+      ],
+    },
+    {
+      id: 'newcomer', label: '② 新模型定级',
+      intro: '新 checkpoint 怎么进入榜单：从 1500 冷启动（可配新手期 K），还是直接继承父模型当前评分？'
+           + '三个新模型真值都是 1400。问题：头几十局谁更可信，多久之后起步点不再重要？',
+      preset: { roster: 'newcomers', cfg: { signal: 'binary', kBase: 16, provGames: 30, kProv: 40, anchored: true, luck: 1 } },
+      seed: 523,
+      steps: [
+        { label: '各打 10 局校准赛', run: s => calibrate(s, 10),
+          note: '对手是 Random / Greedy 秤砣。warm-start 从父模型的 1400 起步，还在原位；两个冷启动都还在 1450 以上。'
+              + '300 次重复的平均误差：warm 38、两个冷启动 83~85。' },
+        { label: '再各打 20 局（累计 30）', run: s => calibrate(s, 20),
+          note: 'cold-start 的步长是 2.5 倍，到得更快，但也更容易冲过头（这次冲到了 1532）；cold-plain 更稳。' },
+        { label: '再各打 70 局（累计 100）', run: s => calibrate(s, 70),
+          note: '起步的差异基本抹平：三者都在 ±40 的抖动里（平均误差 41~46）。' },
+        { label: '再各打 200 局（累计 300）', run: s => calibrate(s, 200),
+          note: '长跑后没有区别（平均误差 38~40）。两个结论：新手期 K 把步长和噪声同时放大，不提高精度，'
+              + '只在「只打几局」时给个方向；真正省局数的是继承父模型评分——前 20 局就省下 ~40 的误差。' },
+      ],
+    },
+    {
+      id: 'points', label: '③ 分数信号',
+      intro: '同样五名选手，改用「本局得分/100」作为实得（0~1），而不是 0/1 胜负。'
+           + '分数信号每局信息更多，但棋类刻度「400 分 = 10:1 赔率（期望 91%）」不再成立。',
+      preset: { roster: 'league', cfg: { signal: 'points', kBase: 16, provGames: 30, kProv: 40, anchored: true, luck: 1 } },
+      seed: 523,
+      steps: [
+        { label: '打 1 轮（20 局）', run: s => playRounds(s, 1),
+          note: '每局不论大小胜都在挪分，早期移动比①快。' },
+        { label: '再打 2 轮（累计 60 局）', run: s => playRounds(s, 2),
+          note: '名次出来了，但 stage1 只有 1422——用胜负信号时它已经到 1485。间距被压了。' },
+        { label: '再打 8 轮（累计 220 局）', run: s => playRounds(s, 8),
+          note: '稳态：stage1≈1354、expert≈1402（真值 1405 / 1550）。分数信号下，不同对手给出的隐含刻度互相矛盾，'
+              + '评分只能在各对手之间折中——同一泳池内名次还在，但数值不能按「400 分 = 10:1 赔率」解读。'
+              + '「场均分差」列与①是同一批对局，和信号无关；变的只是 Elo 怎么读它。' },
+        { label: '切回胜负信号，再打 2 轮', run: s => { s.cfg.signal = 'binary'; syncControls(); playRounds(s, 2); },
+          note: '旧刻度还留在评分里，要等一段重新收敛。真实联赛一个赛季应固定一种信号，不能混用。' },
+      ],
+    },
+    {
+      id: 'resolution', label: '④ 分得开吗',
+      intro: 'ckpt-A（真值 1390）与 ckpt-B（真值 1420）只差 30 分，约合 54% 胜率。'
+           + '问题：让 Elo 可靠地排开这 30 分，需要多少局？盯住两家的分差和它们互换位置的频率。',
+      preset: { roster: 'resolution', cfg: { signal: 'binary', kBase: 16, provGames: 0, kProv: 40, anchored: true, luck: 1 },
+                focus: ['near1', 'near2'] },
+      seed: 523,
+      steps: [
+        { label: 'A vs B 打 50 局', run: s => playPairs(s, 'near1', 'near2', 50),
+          note: '44%–56% 的战绩按真值应该接近 46%：50 局什么都说明不了，Elo 差（-52）更是真值（-30）的 1.7 倍。' },
+        { label: '再打 150 局（累计 200）', run: s => playPairs(s, 'near1', 'near2', 150),
+          note: '分差翻到了 +51——较弱的一方被排到了前面。K=16 的噪声地板就是 ±50 这个量级。' },
+        { label: '再打 800 局（累计 1000）', run: s => playPairs(s, 'near1', 'near2', 800),
+          note: '方向回来了，但幅度 -57 仍是真值 -30 的近两倍。这时直接看胜率更有用：焦点框里 1000 局的 95% CI'
+              + '（40.7%–46.9%）已经排除 50%，而 Elo 的抖动不会随局数缩小。' },
+        { label: '把 K 降到 4，再打 800 局', run: s => { s.cfg.kBase = 4; syncControls(); playPairs(s, 'near1', 'near2', 800); },
+          note: '单次分差不会立刻变稳（历史误差还在：-68），但同样 1800 局重复 200 次，K=16 时较弱方有 27% 被排到前面，'
+              + 'K=4 只有 13%。要稳的名次：低 K + 长窗口；要精确的近邻比较：直接看胜率 CI。' },
+      ],
+    },
+    {
+      id: 'anchor', label: '⑤ 为什么要有秤砣',
+      intro: '同一批模型，去掉秤砣（RandomBot / GreedyBot 也参与评分、不固定）。'
+           + '问题：没有固定参照物时，分数还有绝对含义吗？',
+      preset: { roster: 'unanchored', cfg: { signal: 'binary', kBase: 16, provGames: 30, kProv: 40, anchored: false, luck: 1 } },
+      seed: 523,
+      steps: [
+        { label: '打 3 轮（36 局）', run: s => playRounds(s, 3),
+          note: '相对强弱是对的，但整池分数在往 1500 附近收：零和更新让总分守恒，等于把整池垫高了 '
+              + '1500 − 真值均值（1280）= 220。RandomBot 现在还在 1330，正往 1220 滑。' },
+        { label: '再打 10 轮（累计 156 局）', run: s => playRounds(s, 10),
+          note: 'RandomBot 停在 ~1220，不是 1000。打再多局这个整体偏移也不会消失——闭池内的 Elo 只在相差一个常数的意义下有意义。' },
+        { label: '换成带秤砣重开', run: s => { resetKeepWalkthrough(s, 'league', Object.assign({}, s.cfg, { anchored: true }), 523); syncControls(); },
+          note: '把 RandomBot 钉在 1000、GreedyBot 钉在 1315 之后，同一批对局给出的分数有了绝对含义：'
+              + '1405 就是「比随机强 405 分、比贪心强 90 分」。' },
+        { label: '打 3 轮对比（60 局）', run: s => playRounds(s, 3),
+          note: '相对名次与步骤①一样（stage1/stage2 谁上谁下只是噪声），刻度整体差了 220。'
+              + '尺子的零点要有人钉住，跨赛季、跨 checkpoint 的分数才能比较。' },
+      ],
+    },
+    {
+      id: 'human', label: '⑥ 真人快速定级',
+      intro: '你是真人（模拟真值 1400），每局人机对战都能存一条 trace。新方案分三步：先 20 局定级找档次 → '
+           + '每 5 局重估一次、挑预测胜率最接近 50% 的对手 → CI 达到目标就停。面板同时给出批量 MAP（结论）'
+           + '与在线 Elo（实时显示）作对照。',
+      preset: { roster: 'human', calib: true,
+                cfg: { signal: 'binary', kBase: 16, provGames: 0, kProv: 40, anchored: true, luck: 1 } },
+      seed: 523,
+      steps: [
+        { label: '定级赛：四个锚各打 5 局（20 局）', run: s => playPlacement(s, 5),
+          note: '批量 1436 ± 159；在线 1474。20 局只够定位档次（真值 1400 落在 CI 内），面板已经知道下一步该打谁'
+              + '（ckpt-1420，预测胜率 52%），并给出预算：到 ±50 还需约 220 局。' },
+        { label: '自动挑对手：再打 30 局（累计 50）', run: s => playAdaptive(s, 30),
+          note: '批量 1455 ± 98；在线 1465。CI 按 1/√n 收窄；自适应把对手集中到了信息量最大的 ckpt-1420'
+              + '（50 局中打了 35 局）。' },
+        { label: '再打 150 局（累计 200）', run: s => playAdaptive(s, 150),
+          note: '批量 1439 ± 48；在线 1411。CI 已达 ±50 的目标；到 ±25 预计还需约 560 局。'
+              + '注意点估计 +39 仍偏，但 CI 覆盖真值——报告要带区间。' },
+        { label: '再打 600 局（累计 800）', run: s => playAdaptive(s, 600),
+          note: '批量 1390 ± 24（真值 1400，误差 -10）；在线 1364（误差 -36）。到 ±25 达标、停止。'
+              + '同样 800 局如果都打 RandomBot，CI 会宽到 ±40；固定 K 的在线 Elo 则永远停在 ±30~40 的抖动里。' },
+      ],
+    },
+  ];
+
+  /* ---------- 状态 ---------- */
+  const state = {
+    cfg: Object.assign({}, DEFAULT_CFG),
+    models: [], history: {}, h2h: {}, log: [], games: 0,
+    seed: 523, rng: null, rosterKey: 'league', focus: null,
+    scenario: { id: 'levels', stepIndex: 0 },
+  };
+
+  /* ---------- 随机数（可复现） ---------- */
+  function mulberry32(seed) {
+    let a = seed >>> 0;
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  /* ---------- 合成对局：真水平 → 胜负 + 比分 ---------- */
+  function sampleOutcome(a, b, cfg) {
+    const pA = 1 / (1 + Math.pow(10, -(a.skill - b.skill) / (ELO_SCALE * cfg.luck)));
+    const aWins = state.rng() < pA;
+    const margin = 4 + 92 * Math.pow(state.rng(), 1.5);   // 胜者净胜分 4~96
+    const winnerScore = 50 + margin / 2;
+    const scoreA = aWins ? winnerScore : 100 - winnerScore;
+    return { aWins, scoreA, scoreB: 100 - scoreA };
+  }
+
+  /* ---------- 一局 ---------- */
+  function playOne(a, b) {
+    const cfg = state.cfg;
+    const r = sampleOutcome(a, b, cfg);
+    const scoreA = cfg.signal === 'points' ? r.scoreA / 100 : (r.aWins ? 1 : 0);
+    const upd = ratingUpdate(a, b, scoreA, cfg);
+    const prevA = a.rating, prevB = b.rating;
+    a.rating = Math.max(40, a.rating + upd.deltaA);
+    b.rating = Math.max(40, b.rating + upd.deltaB);
+    // 报告指标对所有参赛者都记（含秤砣）；评分更新只看 fixed。
+    a.games += 1; a.diffSum += r.scoreA - r.scoreB; r.aWins ? a.wins++ : a.losses++;
+    b.games += 1; b.diffSum += r.scoreB - r.scoreA; r.aWins ? b.losses++ : b.wins++;
+    state.models.forEach(m => state.history[m.id].push(m.rating));
+    state.games += 1;
+    recordH2H(a, b, r.aWins, r.scoreA - r.scoreB);
+    state.log.unshift({ n: state.games, a, b, r, dA: a.rating - prevA, dB: b.rating - prevB });
+    if (state.log.length > 6) state.log.pop();
+    // 场景⑥：涉「你」的每局都记入批量拟合样本（对手用已知梯级分）。
+    if (state.calib && (a.id === 'you' || b.id === 'you')) {
+      const youIsA = a.id === 'you';
+      const opp = youIsA ? b : a;
+      const win = youIsA ? r.aWins : !r.aWins;
+      state.calib.games.push({ rating: opp.skill, score: win ? 1 : 0 });
+      state.calib.mix[opp.id] = (state.calib.mix[opp.id] || 0) + 1;
+    }
+    return r;
+  }
+
+  function recordH2H(a, b, aWins, aDiff) {
+    const [x, y] = [a.id, b.id].sort();
+    const key = x + '|' + y;
+    const rec = state.h2h[key] || (state.h2h[key] = { x, y, xWins: 0, yWins: 0, xDiff: 0 });
+    const firstIsX = a.id === x;
+    if (firstIsX === aWins) rec.xWins++; else rec.yWins++;
+    rec.xDiff += firstIsX ? aDiff : -aDiff;   // 以 x 为主语累计分差
+  }
+
+  /* ---------- 赛程 ---------- */
+  function playRandom(s, n) {
+    for (let k = 0; k < n; k++) {
+      const i = Math.floor(s.rng() * s.models.length);
+      let j = Math.floor(s.rng() * (s.models.length - 1));
+      if (j >= i) j += 1;
+      playOne(s.models[i], s.models[j]);
+    }
+  }
+
+  function playRounds(s, n) {
+    for (let r = 0; r < n; r++) {
+      for (let i = 0; i < s.models.length; i++) {
+        for (let j = i + 1; j < s.models.length; j++) {
+          playOne(s.models[i], s.models[j]);   // 换边各打一局
+          playOne(s.models[j], s.models[i]);
+        }
+      }
+    }
+  }
+
+  function playPairs(s, aId, bId, n) {
+    const a = s.models.find(m => m.id === aId), b = s.models.find(m => m.id === bId);
+    for (let k = 0; k < n; k++) {
+      if (k % 2 === 0) playOne(a, b); else playOne(b, a);
+    }
+  }
+
+  // 每个新模型轮流与秤砣对局：随机 / 贪心交替。
+  function calibrate(s, n) {
+    const newcomers = s.models.filter(m => !m.anchorRole);
+    const anchors = s.models.filter(m => m.anchorRole);
+    for (let k = 0; k < n; k++) {
+      for (const m of newcomers) playOne(m, anchors[k % anchors.length]);
+    }
+  }
+
+  // 场景⑥：真人定级。① 定级赛：各档锚点交错打几局；② 自适应：挑信息量最大的对手。
+  function playPlacement(s, rounds) {
+    const you = s.models.find(m => m.id === 'you');
+    const anchors = s.models.filter(m => m.anchorRole);
+    for (let r = 0; r < rounds; r++) for (const a of anchors) playOne(you, a);
+  }
+
+  function playAdaptive(s, n) {
+    const you = s.models.find(m => m.id === 'you');
+    const anchors = s.models.filter(m => m.anchorRole);
+    for (let k = 0; k < n; k++) {
+      if (!s.calib.fit || s.calib.sinceFit >= 5) { s.calib.fit = fitRating(s.calib.games); s.calib.sinceFit = 0; }
+      let opp = anchors[0], best = -1;
+      for (const a of anchors) {
+        const p = expectedScore(s.calib.fit.rating, a.skill), info = p * (1 - p);
+        if (info > best) { best = info; opp = a; }
+      }
+      playOne(you, opp);
+      s.calib.sinceFit += 1;
+    }
+  }
+
+  /* ---------- 重置 ---------- */
+  function resetState(rosterKey, cfg, seed) {
+    state.cfg = Object.assign({}, DEFAULT_CFG, cfg || {});
+    state.rosterKey = rosterKey;
+    state.seed = seed;
+    state.rng = mulberry32(seed);
+    state.models = ROSTERS[rosterKey].map((spec, i) => ({
+      id: spec.id, label: spec.label, skill: spec.skill,
+      rating: (spec.anchor && state.cfg.anchored) ? spec.skill : (spec.start != null ? spec.start : 1500),
+      fixed: !!spec.anchor && state.cfg.anchored,
+      anchorRole: !!spec.anchor,
+      novice: spec.novice !== false,
+      color: MODEL_COLORS[spec.id] || FALLBACK_COLORS[i % FALLBACK_COLORS.length],
+      games: 0, wins: 0, losses: 0, diffSum: 0,
+    }));
+    state.history = {};
+    state.models.forEach(m => { state.history[m.id] = [m.rating]; });
+    state.h2h = {};
+    state.log = [];
+    state.games = 0;
+    state.focus = null;
+    state.calib = null;
+  }
+
+  // 场景专属的额外状态：焦点对局 / 真人定级面板。
+  function scenarioExtras() {
+    const sc = SCENARIOS.find(x => x.id === state.scenario.id);
+    state.focus = (sc && sc.preset.focus) ? sc.preset.focus : null;
+    state.calib = (sc && sc.preset.calib) ? { games: [], mix: {}, fit: null, sinceFit: 99 } : null;
+  }
+
+  // 场景内重开（保留走线进度）——场景⑤中途换配置用。
+  function resetKeepWalkthrough(s, rosterKey, cfg, seed) {
+    const walkthrough = s.scenario;
+    resetState(rosterKey, cfg, seed);
+    state.scenario = walkthrough;
+    scenarioExtras();
+  }
+
+  function syncFixedFlags() {
+    state.models.forEach(m => { m.fixed = m.anchorRole && state.cfg.anchored; });
+  }
+
+  /* ---------- 场景驱动 ---------- */
+  function startScenario(id, keepSeed) {
+    const sc = SCENARIOS.find(x => x.id === id);
+    const seed = keepSeed ? state.seed : sc.seed;
+    resetState(sc.preset.roster, sc.preset.cfg, seed);
+    state.scenario = { id: id, stepIndex: 0 };
+    scenarioExtras();
+    syncControls();
+    render();
+  }
+
+  function runStep() {
+    const sc = SCENARIOS.find(x => x.id === state.scenario.id);
+    const idx = state.scenario.stepIndex;
+    if (idx >= sc.steps.length) return;
+    sc.steps[idx].run(state);
+    state.scenario.stepIndex += 1;
+    render();
+  }
+
+  /* ---------- 控件 ---------- */
+  function syncControls() {
+    const c = state.cfg;
+    document.querySelector('[data-cfg="signal"]').value = c.signal;
+    document.querySelector('[data-cfg="kBase"]').value = String(c.kBase);
+    document.querySelector('[data-cfg="prov"]').value = c.provGames ? (c.provGames + 'x' + c.kProv) : 'off';
+    document.querySelector('[data-cfg="anchored"]').value = c.anchored ? '1' : '0';
+    document.querySelector('[data-cfg="luck"]').value = String(c.luck);
+  }
+
+  function bindControls() {
+    document.getElementById('controls').addEventListener('change', e => {
+      const el = e.target, key = el.dataset.cfg;
+      if (!key) return;
+      if (key === 'signal') state.cfg.signal = el.value;
+      if (key === 'kBase') state.cfg.kBase = Number(el.value);
+      if (key === 'prov') {
+        if (el.value === 'off') { state.cfg.provGames = 0; }
+        else { const p = el.value.split('x'); state.cfg.provGames = Number(p[0]); state.cfg.kProv = Number(p[1]); }
+      }
+      if (key === 'anchored') { state.cfg.anchored = el.value === '1'; syncFixedFlags(); }
+      if (key === 'luck') state.cfg.luck = Number(el.value);
+      render();
+    });
+
+    document.getElementById('freeplay').addEventListener('click', e => {
+      const b = e.target.closest('button[data-play]');
+      if (!b) return;
+      const act = b.dataset.play;
+      if (act === 'random1') playRandom(state, 1);
+      if (act === 'random10') playRandom(state, 10);
+      if (act === 'round1') playRounds(state, 1);
+      if (act === 'round5') playRounds(state, 5);
+      if (act === 'reset') resetKeepWalkthrough(state, state.rosterKey, state.cfg, state.seed);
+      if (act === 'reseed') resetKeepWalkthrough(state, state.rosterKey, state.cfg, state.seed + 1);
+      state.scenario.stepIndex = 0;
+      render();
+    });
+
+    document.getElementById('scenario-body').addEventListener('click', e => {
+      const b = e.target.closest('button');
+      if (!b) return;
+      if (b.dataset.step === 'restart') { startScenario(state.scenario.id); return; }
+      if (b.dataset.step === 'next') runStep();
+    });
+  }
+
+  /* ---------- 渲染 ---------- */
+  const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  function render() {
+    renderOverview();
+    renderTable();
+    renderFocus();
+    renderCalib();
+    renderChart();
+    renderLog();
+    renderScenario();
+    document.getElementById('seed-hint').textContent = '种子 ' + state.seed + ' · 换种子＝重开联赛换一批牌运';
+  }
+
+  function renderOverview() {
+    const c = state.cfg;
+    const prov = c.provGames ? ('前 ' + c.provGames + ' 局 K=' + c.kProv + '，之后 K=' + c.kBase) : ('关（全程 K=' + c.kBase + '）');
+    document.getElementById('overview').innerHTML =
+      '已打 <b>' + state.games + '</b> 局 · 信号 <b>' + (c.signal === 'binary' ? '胜负' : '分数占比') + '</b>'
+      + ' · 新手期 ' + prov
+      + ' · 锚定 <b>' + (c.anchored ? '开' : '关') + '</b>'
+      + ' · 运气 ×' + c.luck;
+  }
+
+  function renderTable() {
+    const rows = state.models.slice().sort((a, b) => b.rating - a.rating);
+    const cells = rows.map(m => {
+      const pct = Math.max(2, Math.min(100, (m.rating - 800) / 10));
+      const tags = [];
+      if (m.fixed) tags.push('<span class="tag">秤砣</span>');
+      else if (m.novice && state.cfg.provGames && m.games < state.cfg.provGames) {
+        tags.push('<span class="tag">新手期 剩 ' + (state.cfg.provGames - m.games) + ' 局</span>');
+      }
+      const err = m.rating - m.skill;
+      const errTxt = (err >= 0 ? '+' : '') + Math.round(err);
+      const rec = m.games ? (m.wins + '–' + m.losses) : '—';
+      const sd = m.games ? m.diffSum / m.games : null;
+      const sdTxt = sd === null ? '—' : ((sd >= 0 ? '+' : '') + sd.toFixed(1));
+      return '<tr>'
+        + '<td><span class="dot" style="background:' + m.color + '"></span>' + esc(m.label) + tags.join('') + '</td>'
+        + '<td class="score-cell"><span class="score-num">' + Math.round(m.rating) + '</span>'
+        +   '<span class="track"><span class="fill" style="width:' + pct.toFixed(1) + '%;background:' + m.color + '"></span></span></td>'
+        + '<td>' + m.games + '</td><td>' + rec + '</td>'
+        + '<td>' + sdTxt + '</td>'
+        + '<td>' + m.skill + '</td>'
+        + '<td><span class="err">' + errTxt + '</span></td>'
+        + '</tr>';
+    });
+    document.querySelector('#ratings tbody').innerHTML = cells.join('');
+  }
+
+  function renderFocus() {
+    const el = document.getElementById('focus');
+    if (!state.focus) { el.hidden = true; return; }
+    const [aid, bid] = state.focus;
+    const a = state.models.find(m => m.id === aid), b = state.models.find(m => m.id === bid);
+    const rec = state.h2h[aid < bid ? aid + '|' + bid : bid + '|' + aid];
+    if (!a || !b || !rec) { el.hidden = true; return; }
+    const aWins = a.id === rec.x ? rec.xWins : rec.yWins;
+    const bWins = a.id === rec.x ? rec.yWins : rec.xWins;
+    const n = aWins + bWins;
+    if (!n) { el.hidden = true; return; }
+    const p = aWins / n, se = Math.sqrt(p * (1 - p) / n);
+    const lo = Math.max(0.002, p - 1.96 * se), hi = Math.min(0.998, p + 1.96 * se);
+    const toElo = q => 400 * Math.log10(q / (1 - q));
+    const avgDiff = (a.id === rec.x ? rec.xDiff : -rec.xDiff) / n;
+    el.hidden = false;
+    el.innerHTML = '<b>焦点对局</b> ' + esc(a.label) + ' vs ' + esc(b.label) + '：'
+      + n + ' 局，' + aWins + '–' + bWins + '（胜率 ' + (p * 100).toFixed(1) + '%'
+      + '，95% CI ' + (lo * 100).toFixed(1) + '%–' + (hi * 100).toFixed(1) + '%）'
+      + ' · A 场均分差 ' + (avgDiff >= 0 ? '+' : '') + avgDiff.toFixed(1)
+      + ' · 折合 Elo 差 ' + (toElo(p) >= 0 ? '+' : '') + Math.round(toElo(p))
+      + '（CI ' + Math.round(toElo(lo)) + ' … ' + Math.round(toElo(hi)) + '）'
+      + ' · 当前 Elo 差 ' + Math.round(a.rating - b.rating);
+  }
+
+  function renderCalib() {
+    const el = document.getElementById('calib');
+    if (!state.calib) { el.hidden = true; return; }
+    const you = state.models.find(m => m.id === 'you');
+    const games = state.calib.games;
+    const fit = fitRating(games);
+    const half = 1.96 * fit.se;
+    const mix = Object.keys(state.calib.mix).map(id => {
+      const m = state.models.find(x => x.id === id);
+      return (m ? m.label : id) + '×' + state.calib.mix[id];
+    }).join('、') || '—';
+    const signed = v => (v >= 0 ? '+' : '') + Math.round(v);
+    const anchors = state.models.filter(m => m.anchorRole);
+    let next = null, bestInfo = -1;
+    for (const a of anchors) {
+      const p = expectedScore(fit.rating, a.skill), inf = p * (1 - p);
+      if (inf > bestInfo) { bestInfo = inf; next = a; }
+    }
+    const info = 1 / (fit.se * fit.se);
+    const perGame = games.length ? (info - 1 / (200 * 200)) / games.length : 0;
+    const needed = target => perGame > 0
+      ? Math.max(0, Math.round((Math.pow(1.96 / target, 2) - info) / perGame / 10) * 10) : null;
+    const n50 = needed(50), n25 = needed(25);
+    el.hidden = false;
+    el.innerHTML = '<b>真人定级面板</b>（模拟真值 1400）· 已收集 traces <b>' + games.length + '</b> 局（' + esc(mix) + '）<br>'
+      + '在线 Elo（K=16）：<b>' + Math.round(you.rating) + '</b>（误差 ' + signed(you.rating - 1400) + '）'
+      + ' · 批量 MAP：<b>' + Math.round(fit.rating) + ' ± ' + Math.round(half) + '</b>'
+      + '（95% CI ' + Math.round(fit.rating - half) + '–' + Math.round(fit.rating + half)
+      + '，误差 ' + signed(fit.rating - 1400) + '）<br>'
+      + '下一步建议：<b>' + (next ? esc(next.label) : '—') + '</b>'
+      + (next ? '（预测胜率 ' + Math.round(100 * expectedScore(fit.rating, next.skill)) + '%，信息量最大）' : '')
+      + ' · 目标 95% CI：±50 ' + (n50 ? '还需 ~' + n50 + ' 局' : '已达标')
+      + ' · ±25 ' + (n25 ? '还需 ~' + n25 + ' 局' : '已达标');
+  }
+
+  function niceStep(range, target) {
+    const raw = range / target;
+    const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+    const norm = raw / mag;
+    return (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10) * mag;
+  }
+
+  function resample(arr, maxPoints) {
+    if (arr.length <= maxPoints) return arr.map((v, i) => [i, v]);
+    const stride = Math.ceil(arr.length / maxPoints), out = [];
+    for (let i = 0; i < arr.length; i += stride) out.push([i, arr[i]]);
+    if (out[out.length - 1][0] !== arr.length - 1) out.push([arr.length - 1, arr[arr.length - 1]]);
+    return out;
+  }
+
+  function renderChart() {
+    const el = document.getElementById('chart');
+    if (!state.games) { el.innerHTML = '<p class="hint">打一局后出现评分曲线。</p>'; return; }
+    const W = 880, H = 236, L = 46, R = 14, T = 14, B = 26;
+    const all = [];
+    state.models.forEach(m => all.push.apply(all, state.history[m.id]));
+    state.models.forEach(m => { if (m.fixed) all.push(m.skill); });
+    let lo = Math.min.apply(null, all), hi = Math.max.apply(null, all);
+    const pad = Math.max(18, (hi - lo) * 0.08);
+    lo -= pad; hi += pad;
+    const xOf = i => L + (state.games ? (i / state.games) * (W - L - R) : 0);
+    const yOf = v => T + ((hi - v) / (hi - lo)) * (H - T - B);
+    const step = niceStep(hi - lo, 5);
+
+    let svg = '';
+    for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) {
+      const y = yOf(v).toFixed(1);
+      svg += '<line x1="' + L + '" y1="' + y + '" x2="' + (W - R) + '" y2="' + y + '" class="grid"/>';
+      svg += '<text x="' + (L - 8) + '" y="' + (Number(y) + 3.5).toFixed(1) + '" class="axis" text-anchor="end">'
+           + Math.round(v) + '</text>';
+    }
+    state.models.forEach(m => {
+      if (!m.fixed) return;
+      const y = yOf(m.skill).toFixed(1);
+      svg += '<line x1="' + L + '" y1="' + y + '" x2="' + (W - R) + '" y2="' + y + '" class="anchor-line"/>';
+      svg += '<text x="' + (W - R - 4) + '" y="' + (Number(y) - 4).toFixed(1) + '" class="axis" text-anchor="end">'
+           + esc(m.label) + ' 真值 ' + m.skill + '</text>';
+    });
+    state.models.forEach(m => {
+      const pts = resample(state.history[m.id], 900);
+      const d = pts.map((p, k) => (k ? 'L' : 'M') + xOf(p[0]).toFixed(1) + ',' + yOf(p[1]).toFixed(1)).join(' ');
+      svg += '<path d="' + d + '" fill="none" stroke="' + m.color + '" stroke-width="1.7" stroke-linejoin="round"/>';
+    });
+    const yAxis = T + (H - T - B);
+    svg += '<text x="' + L + '" y="' + (yAxis + 16) + '" class="axis">0</text>';
+    svg += '<text x="' + (W - R) + '" y="' + (yAxis + 16) + '" class="axis" text-anchor="end">'
+         + state.games + ' 局</text>';
+
+    const legend = state.models.slice().sort((a, b) => b.rating - a.rating).map(m =>
+      '<span><span class="dot" style="background:' + m.color + '"></span>' + esc(m.label) + ' ' + Math.round(m.rating) + '</span>'
+    ).join('');
+    el.innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" class="chart-svg">' + svg + '</svg>'
+                 + '<div class="legend">' + legend + '</div>';
+  }
+
+  function renderLog() {
+    const el = document.getElementById('log');
+    if (!state.log.length) { el.innerHTML = ''; return; }
+    const rows = state.log.map(e => {
+      const da = (e.dA >= 0 ? '+' : '') + e.dA.toFixed(1);
+      const db = (e.dB >= 0 ? '+' : '') + e.dB.toFixed(1);
+      return '<div class="log-line">#' + e.n + ' <b>' + esc(e.a.label) + '</b> ' + Math.round(e.r.scoreA)
+        + ':' + Math.round(e.r.scoreB) + ' <b>' + esc(e.b.label) + '</b>'
+        + ' · ' + esc(e.a.label) + ' ' + da + (e.a.fixed ? '（秤砣）' : '')
+        + ' · ' + esc(e.b.label) + ' ' + db + (e.b.fixed ? '（秤砣）' : '') + '</div>';
+    }).join('');
+    el.innerHTML = '<div class="log-head">最近对局（新→旧）</div>' + rows;
+  }
+
+  function renderScenario() {
+    const tabs = SCENARIOS.map(sc =>
+      '<button class="tab' + (sc.id === state.scenario.id ? ' active' : '') + '" data-tab="' + sc.id + '">' + sc.label + '</button>'
+    ).join('');
+    document.getElementById('tabs').innerHTML = tabs;
+
+    const sc = SCENARIOS.find(x => x.id === state.scenario.id);
+    const cur = state.scenario.stepIndex;
+    const steps = sc.steps.map((st, i) => {
+      const cls = i < cur ? 'done' : (i === cur ? 'current' : 'future');
+      const idx = i < cur ? '✓' : String(i + 1);
+      let action;
+      if (i === cur) action = '<button class="primary" data-step="next">' + esc(st.label) + '</button>';
+      else if (i < cur) action = '<span>' + esc(st.label) + '</span>';
+      else action = '<button disabled>' + esc(st.label) + '</button>';
+      const note = i < cur ? '<div class="note">' + esc(st.note) + '</div>' : '';
+      return '<div class="step ' + cls + '"><div class="idx">' + idx + '</div><div class="body">' + action + note + '</div></div>';
+    }).join('');
+    const done = cur >= sc.steps.length;
+    document.getElementById('scenario-body').innerHTML =
+      '<p class="scenario-intro">' + esc(sc.intro) + '</p>'
+      + steps
+      + '<div class="scenario-foot"><button class="ghost" data-step="restart">重新开始本场景</button>'
+      + '<span class="progress">进度 ' + Math.min(cur, sc.steps.length) + '/' + sc.steps.length
+      + (done ? ' · 已走完，可自由操作或重新开始' : '') + '</span></div>';
+  }
+
+  /* ---------- 启动 ---------- */
+  document.getElementById('tabs').addEventListener('click', e => {
+    const b = e.target.closest('button[data-tab]');
+    if (b) startScenario(b.dataset.tab);
+  });
+  bindControls();
+  startScenario('levels');
+})();
+</script>
+</body>
+</html>

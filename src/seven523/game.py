@@ -37,6 +37,11 @@ class GameState:
     last_player: int | None
     collected: int
     phase: Phase
+    #: Every card already collected into a finished trick, in play order
+    #: (oldest first).  A public fact: anyone at the table saw them played.
+    #: Restored traces start empty because the trace format records actions,
+    #: not this derived history.
+    played: tuple[Card, ...] = ()
 
     @property
     def done(self) -> bool:
@@ -90,6 +95,7 @@ class View:
     draw_count: int
     revealed: tuple[Card, ...]
     trick_cards: tuple[Card, ...]
+    played: tuple[Card, ...]
     last_player: int | None
     done: bool
 
@@ -133,9 +139,6 @@ class Game:
             phase=Phase.PLAY,
         )
 
-    def is_terminal(self, state: GameState) -> bool:
-        return state.done
-
     # -- information ---------------------------------------------------------
     def view(self, state: GameState, seat: int) -> View:
         """Project the state for one seat; ``mask`` covers templates only (ADR-0004)."""
@@ -151,6 +154,7 @@ class Game:
             draw_count=len(state.draw_pile),
             revealed=state.revealed,
             trick_cards=state.trick_cards,
+            played=state.played,
             last_player=state.last_player,
             done=state.done,
         )
@@ -215,6 +219,7 @@ class Game:
         hands = list(state.hands)
         draw_pile = state.draw_pile
         collected = state.collected + len(state.trick_cards)
+        played = state.played + state.trick_cards
 
         # Refill every seat from the winner's next seat, winner last.
         refilled: list[int] = []
@@ -256,6 +261,7 @@ class Game:
             incumbent=None,
             last_player=None,
             collected=collected,
+            played=played,
             phase=Phase.DONE if dug else Phase.PLAY,
         )
         return after, replace(
@@ -282,11 +288,3 @@ class Game:
             - (total - score) / ((n - 1) * self.rules.total_points)
             for score in state.scores
         )
-
-    def score_winner(self, state: GameState) -> int | None:
-        """Highest-score seat, or ``None`` for a draw (human play / evaluation)."""
-        if not state.done:
-            return None
-        best = max(state.scores)
-        winners = [seat for seat, score in enumerate(state.scores) if score == best]
-        return winners[0] if len(winners) == 1 else None

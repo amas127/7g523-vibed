@@ -12,6 +12,17 @@ def test_default_rules_match_the_documented_variant():
     assert DEFAULT_RULES.consecutive_pairs_min == 3
     assert DEFAULT_RULES.consecutive_pairs_max == 3
     assert DEFAULT_RULES.total_points == 100
+    assert DEFAULT_RULES.comparison == "family"
+
+
+def test_comparison_accepts_the_legacy_tier_mode():
+    assert Rules(comparison="tier").comparison == "tier"
+
+
+@pytest.mark.parametrize("comparison", ["", "flat", "FAMILY", "tiered"])
+def test_rejects_unknown_comparison(comparison):
+    with pytest.raises(ValueError):
+        Rules(comparison=comparison)
 
 
 @pytest.mark.parametrize("num_players", [1, 0, -1])

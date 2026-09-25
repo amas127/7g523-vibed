@@ -13,6 +13,7 @@ dependencies = [
 7g523-play = "seven523.play:main"
 7g523-train = "seven523.train:main"
 7g523-eval = "seven523.eval:main"
+7g523-elo = "seven523.placement:main"
 
 [build-system]
 requires = ["uv_build>=0.12.19,<0.13.0"]

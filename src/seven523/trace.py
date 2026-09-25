@@ -1,14 +1,16 @@
 """Game traces: the on-disk format for a saved 对局.
 
 A trace is the opening :class:`~seven523.game.Deal` plus one entry per move and
-the resulting public scores.  This module owns only the *format* — serialising
-cards, rules and the deal, and reading/writing JSON.  Terminal replay lives in
-:mod:`seven523.play`, which drives the recorded actions back through
-:class:`~seven523.match.Match` and raises on any divergence, so a trace doubles
-as an integrity check of the engine.
+the resulting public scores.  This module owns the *format*: serialising cards,
+rules and the deal; the per-step record (:func:`step_record`); the player
+identity and study-file naming conventions; and reading/writing JSON.  Terminal
+replay lives in :mod:`seven523.play`, which drives the recorded actions back
+through :class:`~seven523.match.Match` and raises on any divergence, so a trace
+doubles as an integrity check of the engine.
 
-Keeping the codec here means the format version and every field name live in one
-module, and it can be tested without a terminal or torch.
+Keeping the codec here means the format version, every field name and every
+naming convention live in one module, and it can be tested without a terminal or
+torch.
 """
 from __future__ import annotations
 
@@ -18,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from .cards import CARD_ORDER, card_id, sorted_cards
-from .game import Deal, Game, GameState
+from .game import Deal, Game, GameState, StepResult
 from .rules import Rules
 
 __all__ = [
@@ -30,13 +32,17 @@ __all__ = [
     "deal_json",
     "initial_snapshot",
     "load_trace",
+    "parse_player_label",
+    "player_label",
     "rules_from_json",
     "rules_json",
     "save_trace",
     "state_from_snapshot",
+    "step_record",
+    "trace_filename",
 ]
 
-TRACE_VERSION = 1
+TRACE_VERSION = 2
 
 
 # -- cards -------------------------------------------------------------------
@@ -53,12 +59,18 @@ def card_from_json(data: dict[str, Any]):
 # -- rules -------------------------------------------------------------------
 
 
-def rules_json(rules: Rules) -> dict[str, int]:
+def rules_json(rules: Rules) -> dict[str, Any]:
     return asdict(rules)
 
 
 def rules_from_json(data: dict[str, Any]) -> Rules:
-    return Rules(**data)
+    # Traces up to TRACE_VERSION 1 predate ``Rules.comparison``: they were
+    # recorded under the flat-tier rules, so a missing key must default to
+    # "tier", not today's "family".  Copy first so reading never mutates the
+    # caller's record.
+    fields = dict(data)
+    fields.setdefault("comparison", "tier")
+    return Rules(**fields)
 
 
 # -- the opening deal --------------------------------------------------------
@@ -95,6 +107,58 @@ def initial_snapshot(state: GameState) -> dict[str, Any]:
 def state_from_snapshot(snapshot: dict[str, Any], rules: Rules) -> GameState:
     """Rebuild the opening :class:`GameState` recorded by :func:`initial_snapshot`."""
     return Game(rules).restore(deal_from_json(snapshot))
+
+
+# -- players, steps and file names -------------------------------------------
+
+
+def player_label(role: str, player_id: str, seat: int) -> str:
+    """The trace's player identity: ``role:id@seatN`` (e.g. ``anchor:greedy@seat1``)."""
+    return f"{role}:{player_id}@seat{seat}"
+
+
+def parse_player_label(label: str) -> tuple[str | None, str, int | None]:
+    """Best-effort inverse of :func:`player_label` → ``(role, id, seat)``.
+
+    Labels written by hand (``human@seat0``, ``贪心 bot``) parse with ``role``
+    and/or ``seat`` set to ``None``, so a new convention never crashes a reader.
+    """
+    role: str | None = None
+    rest = label
+    if ":" in label:
+        role, rest = label.split(":", 1)
+    player_id, _, seat_text = rest.partition("@seat")
+    return role, player_id, int(seat_text) if seat_text.isdigit() else None
+
+
+def step_record(
+    seat: int,
+    action_id: int,
+    suit: int | None,
+    *,
+    text: str,
+    state: GameState,
+    result: StepResult,
+) -> dict[str, Any]:
+    """One trace step, recorded *after* the move; the field names live here."""
+    return {
+        "seat": seat,
+        "action": action_id,
+        "suit": suit,
+        "text": text,
+        "scores": list(state.scores),
+        "hand_sizes": [len(hand) for hand in state.hands],
+        "draw_count": len(state.draw_pile),
+        "trick_over": result.trick_over,
+        "winner": result.winner,
+        "points": result.points_taken,
+        "dug": result.dug,
+    }
+
+
+def trace_filename(index: int, seed: int, human_seat: int, opponent: str) -> str:
+    """The study-file convention: ``g0007__s42__seat1__vsgreedy.json``."""
+    return f"g{index:04d}__s{seed}__seat{human_seat}__vs{opponent}.json"
 
 
 # -- trace documents ---------------------------------------------------------
