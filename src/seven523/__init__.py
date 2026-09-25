@@ -44,6 +44,7 @@ from .cards import (
 from .combos import Combo, ComboKind, beats, classify
 from .env import Seven523Env, observation_dim
 from .game import Game, GameState, Phase, StepResult, View
+from .match import Match
 from .policies import GreedyBot, Policy, RandomBot, make_scripted_policies
 from .rules import DEFAULT_RULES, Rules
 
@@ -78,6 +79,7 @@ __all__ = [
     "classify",
     "Game",
     "GameState",
+    "Match",
     "Phase",
     "StepResult",
     "View",
@@ -95,18 +97,17 @@ __all__ = [
 def main() -> None:
     """Play one demo game between random bots and print the trick log."""
     rng = random.Random(7)
-    game = Game(DEFAULT_RULES)
-    state = game.new(rng)
     bots: list[RandomBot] = [RandomBot(rng) for _ in range(DEFAULT_RULES.num_players)]
-    while not state.done:
-        seat = state.current
-        view = game.view(state, seat)
-        action_id, _suit = split_action(bots[seat].act(view))
+    match = Match(DEFAULT_RULES, bots, rng=rng)
+
+    def on_turn(seat, action_id, suit, view, result):
         print(f"seat {seat}: {CATALOG[action_id]}")
-        state, result = game.step(state, action_id)
         if result.trick_over:
             print(
                 f"  trick -> seat {result.winner} (+{result.points_taken}) "
                 f"dug={result.dug}"
             )
-    print("scores:", state.scores)
+
+    match.on_turn = on_turn
+    match.run_to_end()
+    print("scores:", match.state.scores)

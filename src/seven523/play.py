@@ -24,6 +24,7 @@ from .actions import legal_ids, resolve, split_action, suit_options
 from .cards import CARD_ORDER, SUIT_LABELS, Suit, card_id, card_key, sorted_cards
 from .combos import Combo, ComboKind
 from .game import Game, GameState, Phase, StepResult, View
+from .match import Match
 from .policies import GreedyBot, Policy, RandomBot
 from .rules import DEFAULT_RULES, Rules
 
@@ -265,8 +266,8 @@ def replay_trace(
     different score), which makes a trace an integrity check of the engine.
     """
     rules = rules_from_json(trace["rules"])
-    game = Game(rules)
     state = state_from_snapshot(trace["initial"], rules)
+    match = Match(rules, [None] * rules.num_players, state=state)
     human_seat = int(trace.get("human_seat", 0))
     names = [
         _seat_name(seat, human_seat, rules.num_players)
@@ -293,16 +294,17 @@ def replay_trace(
         if pause:
             if input_fn("回车继续（q 退出回放）> ").strip() in {"q", "quit", "退出"}:
                 raise QuitGame
-        view = game.view(state, step["seat"])
+        view = match.view()
         action_id = int(step["action"])
         suit = step.get("suit")
         if not (view.mask >> action_id) & 1:
             raise ValueError(f"step {index}: recorded action {action_id} is illegal")
         print_fn(
             f"[{index:>3}] {names[step['seat']]}："
-            + action_text(game, action_id, view.hand, suit)
+            + action_text(match.game, action_id, view.hand, suit)
         )
-        state, result = game.step(state, action_id, suit)
+        result = match.step(action_id, suit)
+        state = match.state
         if list(state.scores) != [int(score) for score in step["scores"]]:
             raise ValueError(
                 f"step {index}: scores diverged "
@@ -343,33 +345,23 @@ def play_game(
     ``steps`` (one entry per move), ``final_scores`` and ``winner``.
     Returns the final scores (one per seat).
     """
-    game = Game(rules)
-    state = game.new(random.Random(seed))
+    policies: list[Policy | None] = list(opponents)
+    policies[human_seat] = None
+    match = Match(rules, policies, rng=random.Random(seed))
+    game = match.game
     names = [
         _seat_name(seat, human_seat, rules.num_players)
         for seat in range(rules.num_players)
     ]
     if record is not None:
-        record["initial"] = initial_snapshot(state)
+        record["initial"] = initial_snapshot(match.state)
         record["steps"] = []
-    reveal = " / ".join(
-        f"{names[seat]} {state.revealed[seat]}" for seat in range(rules.num_players)
-    )
-    print_fn(f"亮牌：{reveal}（{names[state.current]}先手）")
 
-    while not state.done:
-        seat = state.current
-        view = game.view(state, seat)
-        if seat == human_seat:
-            action_id, suit = split_action(chooser(game, state, view))
-            print_fn(f"你出了 {action_text(game, action_id, view.hand, suit)}")
-        else:
-            action_id, suit = split_action(opponents[seat].act(view))
-            print_fn(
-                f"{names[seat]}出了 " + action_text(game, action_id, view.hand, suit)
-            )
-        state, result = game.step(state, action_id, suit)
+    def on_turn(seat, action_id, suit, view, result):
+        label = "你" if seat == human_seat else names[seat]
+        print_fn(f"{label}出了 " + action_text(game, action_id, view.hand, suit))
         if record is not None:
+            state = match.state
             record["steps"].append(
                 {
                     "seat": seat,
@@ -388,6 +380,22 @@ def play_game(
         if result.trick_over:
             print_fn(_trick_text(result, names))
 
+    match.on_turn = on_turn
+
+    state = match.state
+    reveal = " / ".join(
+        f"{names[seat]} {state.revealed[seat]}" for seat in range(rules.num_players)
+    )
+    print_fn(f"亮牌：{reveal}（{names[state.current]}先手）")
+
+    while not match.done:
+        if match.seat == human_seat:
+            action_id, suit = split_action(chooser(game, match.state, match.view()))
+            match.step(action_id, suit)
+        else:
+            match.step()
+
+    state = match.state
     best = max(state.scores)
     winners = [seat for seat, score in enumerate(state.scores) if score == best]
     if len(winners) > 1:

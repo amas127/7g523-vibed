@@ -7,11 +7,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import statistics
 from typing import Sequence
 
-from .actions import split_action
-from .env import Seven523Env
+from .match import Match
 from .policies import Policy, make_scripted_policies
 from .rules import DEFAULT_RULES, Rules
 
@@ -31,7 +31,7 @@ def evaluate(
     """Play ``episodes`` games as ``learner`` and aggregate the results."""
     if opponents is None:
         opponents = make_scripted_policies(opponent, rules, seed)
-    env = Seven523Env(rules=rules, opponents=list(opponents), seed=seed, learner=learner)
+    rng = random.Random(seed)
 
     returns: list[float] = []
     lengths: list[int] = []
@@ -40,42 +40,27 @@ def evaluate(
     diffs: list[float] = []
     wins = draws = 0
     illegal = 0
-    steps = 0
+    learner_turns = 0
 
     for _ in range(episodes):
-        env.reset()
-        done = False
-        last_reward = 0.0
-        length = 0
-        while not done:
-            view = env.game.view(env.state, learner)
-            action_id, suit = split_action(policy.act(view))
-            if (
-                not 0 <= action_id < env.action_space_n
-                or not env.action_mask[action_id]
-            ):
-                illegal += 1
-                action_id = next(
-                    index
-                    for index in range(env.action_space_n)
-                    if env.action_mask[index]
-                )
-                suit = None
-            _, last_reward, done, _, _ = env.step((action_id, suit))
-            length += 1
-            steps += 1
+        seat_policies: list[Policy | None] = list(opponents)
+        seat_policies[learner] = policy
+        match = Match(rules, seat_policies, rng=rng)
+        match.run_to_end()
 
-        final = env.state.scores
+        final = match.state.scores
         own = final[learner]
         others = [score for seat, score in enumerate(final) if seat != learner]
         best_other = max(others)
         wins += own > best_other
         draws += own == best_other
-        returns.append(last_reward)
-        lengths.append(length)
+        returns.append(match.returns()[learner])
+        lengths.append(match.turns[learner])
         scores.append(own)
         opp_scores.append(statistics.fmean(others))
         diffs.append(own - statistics.fmean(others))
+        illegal += match.illegal_actions
+        learner_turns += match.turns[learner]
 
     return {
         "episodes": float(episodes),
@@ -87,7 +72,7 @@ def evaluate(
         "loss_rate": 1.0 - (wins + draws) / episodes,
         "mean_return": statistics.fmean(returns),
         "mean_length": statistics.fmean(lengths),
-        "illegal_rate": illegal / steps if steps else 0.0,
+        "illegal_rate": illegal / learner_turns if learner_turns else 0.0,
     }
 
 

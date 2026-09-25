@@ -20,6 +20,7 @@ from .actions import joint_mask_bits, nvec_for, split_action
 from .cards import RANK_INDEX, card_id
 from .combos import ComboKind
 from .game import Game, GameState, View
+from .match import Match
 from .policies import Policy, RandomBot
 from .rules import DEFAULT_RULES, Rules
 
@@ -112,7 +113,7 @@ class Seven523Env(gym.Env):
         self.action_space_n = self.nvec[0]
         self._rng = random.Random(seed)
         self._opponents = opponents
-        self._state: GameState | None = None
+        self._match: Match | None = None
         self.action_mask: list[bool] = [False] * sum(self.nvec)
         self.observation_space = gym.spaces.Box(
             low=0.0, high=1.0, shape=(self.obs_dim,), dtype=np.float32
@@ -130,51 +131,44 @@ class Seven523Env(gym.Env):
                 RandomBot(random.Random(self._rng.random()))
                 for _ in range(self.num_players)
             ]
-        self._state = self.game.new(self._rng)
-        self._advance_opponents()
+        policies: list[Policy | None] = list(self._opponents)
+        policies[self.learner] = None
+        self._match = Match(self.rules, policies, rng=self._rng)
+        self._match.advance()
         return self._publish(), {}
 
     def step(
         self, action: int | np.ndarray | tuple[int, int | None]
     ) -> tuple[np.ndarray, float, bool, bool, dict]:
-        if self._state is None:
-            raise RuntimeError("call reset() first")
+        match = self._require_match()
         action_id, suit = split_action(action)
-        state, _ = self.game.step(self._state, action_id, suit)
-        self._state = state
+        match.step(action_id, suit)
         reward = 0.0
-        if state.done:
-            reward = self.game.returns(state)[self.learner]
+        if match.done:
+            reward = self.game.returns(match.state)[self.learner]
         else:
-            self._advance_opponents()
-            if self._state.done:
-                reward = self.game.returns(self._state)[self.learner]
-        return self._publish(), reward, self._state.done, False, {}
+            match.advance()
+            if match.done:
+                reward = self.game.returns(match.state)[self.learner]
+        return self._publish(), reward, match.done, False, {}
 
     @property
     def state(self) -> GameState:
         """The omniscient engine state; for tests, replays and evaluation."""
-        if self._state is None:
-            raise RuntimeError("call reset() first")
-        return self._state
+        return self._require_match().state
+
+    def view(self, seat: int | None = None) -> View:
+        """The :class:`View` the learner (or ``seat``) would be given."""
+        return self._require_match().view(self.learner if seat is None else seat)
 
     # -- internals -----------------------------------------------------------
-    def _advance_opponents(self) -> None:
-        state = self._state
-        assert state is not None
-        opponents = self._opponents
-        assert opponents is not None
-        while not state.done and state.current != self.learner:
-            seat = state.current
-            view = self.game.view(state, seat)
-            action_id, suit = split_action(opponents[seat].act(view))
-            state, _ = self.game.step(state, action_id, suit)
-        self._state = state
+    def _require_match(self) -> Match:
+        if self._match is None:
+            raise RuntimeError("call reset() first")
+        return self._match
 
     def _publish(self) -> np.ndarray:
-        state = self._state
-        assert state is not None
-        view = self.game.view(state, self.learner)
+        view = self._require_match().view(self.learner)
         # Template head from the legality mask; preference heads stay open
         # (every value is executable: unavailable suits fall back).  ADR-0004.
         self.action_mask = joint_mask_bits(view.mask, self.nvec)
