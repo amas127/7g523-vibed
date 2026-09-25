@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from .elo import Fit, FitConfig, PlayedGame, Prior, expected_score, fit_ratings
-from .policies import Policy, policy_from_spec
+from .policies import Policy, missing_ckpt_path, policy_from_spec
 from .play import QuitGame, interactive_chooser, play_game
 from .rules import DEFAULT_RULES, Rules
 from .study import load_manifest
@@ -138,16 +138,6 @@ class MissingCheckpointWarning(UserWarning):
     """A non-anchor opponent was skipped because its ``ckpt:`` file is gone."""
 
 
-def _missing_ckpt_path(spec: str | None) -> str | None:
-    """The path of a ``ckpt:`` spec when the file is absent, else ``None``."""
-    if spec is None or not spec.startswith("ckpt:"):
-        return None
-    path = spec[len("ckpt:") :]
-    if path and Path(path).is_file():
-        return None
-    return path
-
-
 def load_opponents(
     manifest: Mapping[str, Any],
 ) -> tuple[tuple[Opponent, ...], dict[str, float]]:
@@ -182,7 +172,7 @@ def load_opponents(
         if id_ not in levels:
             raise ValueError(f"anchor {id_!r} is missing from manifest levels")
         spec = spec_for(id_)
-        missing = _missing_ckpt_path(spec)
+        missing = missing_ckpt_path(spec)
         if missing is not None:
             raise ValueError(
                 f"anchor {id_!r} spec {spec!r} points at a missing checkpoint "
@@ -194,7 +184,7 @@ def load_opponents(
     for id_, elo in levels.items():
         id_ = str(id_)
         spec = spec_for(id_)
-        missing = _missing_ckpt_path(spec)
+        missing = missing_ckpt_path(spec)
         if missing is not None:
             skipped.append((id_, str(spec), missing))
             continue

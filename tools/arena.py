@@ -26,13 +26,7 @@ from datetime import datetime
 from glob import glob
 from pathlib import Path
 
-# Run as ``python tools/arena.py``: reuse the spec parsing of the sibling
-# build_ladder CLI without turning tools/ into a package.
-_TOOLS_DIR = Path(__file__).resolve().parent
-if str(_TOOLS_DIR) not in sys.path:
-    sys.path.insert(0, str(_TOOLS_DIR))
-
-from build_ladder import _check_spec, _split_optional_id  # noqa: E402
+# Run as ``python tools/arena.py``: reuse the shared spec grammar.
 
 from seven523.arena import (  # noqa: E402
     arena_document,
@@ -42,8 +36,16 @@ from seven523.arena import (  # noqa: E402
 )
 from seven523.elo import FitConfig  # noqa: E402
 from seven523.ladder import DEFAULT_ANCHOR_ELO, Entrant  # noqa: E402
+from seven523.policies import split_entrant, validate_spec  # noqa: E402
 
 __all__ = ["discover_paths", "main", "parse_args"]
+
+
+def _require_spec(spec: str) -> None:
+    """Exit with the shared grammar's message when ``spec`` is unusable."""
+    error = validate_spec(spec)
+    if error:
+        raise SystemExit(error)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -190,8 +192,8 @@ def main(argv: list[str] | None = None) -> int:
     seen: dict[str, str] = {}
 
     for raw in args.anchor or ["random=random", "greedy=greedy"]:
-        id_, spec = _split_optional_id(raw)
-        _check_spec(spec)
+        id_, spec = split_entrant(raw)
+        _require_spec(spec)
         if id_ not in anchor_elo:
             raise SystemExit(
                 f"anchor {id_!r} has no rating; pass --anchor-elo {id_}=<elo>"
@@ -199,23 +201,14 @@ def main(argv: list[str] | None = None) -> int:
         _add(entrants, seen, id_, spec, pinned=anchor_elo[id_])
 
     for raw in args.entrant:
-        if "=" in raw:
-            id_, spec = raw.split("=", 1)
-            id_, spec = id_.strip(), spec.strip()
-        else:
-            spec = raw.strip()
-            id_ = (
-                auto_id_from_path(spec[len("ckpt:") :])
-                if spec.startswith("ckpt:")
-                else spec
-            )
-        _check_spec(spec)
+        id_, spec = split_entrant(raw)
+        _require_spec(spec)
         _add(entrants, seen, id_, spec)
 
     for pattern in args.glob:
         for path in discover_paths(pattern, args.every, args.last):
             id_ = auto_id_from_path(path)
-            _check_spec(f"ckpt:{path}")
+            _require_spec(f"ckpt:{path}")
             _add(entrants, seen, id_, f"ckpt:{path}")
 
     candidates = [entrant for entrant in entrants if not entrant.is_anchor]

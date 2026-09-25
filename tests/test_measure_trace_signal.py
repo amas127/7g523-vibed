@@ -69,6 +69,45 @@ def test_generate_and_extract_s1_features(tmp_path):
     assert random_seeds == greedy_seeds
 
 
+def test_generate_manifest_keys_and_frozen_levels(tmp_path):
+    study = tmp_path / "study"
+    _generate(study, ["random"], games=2)
+    manifest = json.loads((study / "manifest.json").read_text(encoding="utf-8"))
+    assert set(manifest) == {
+        "version",
+        "created_at",
+        "seed",
+        "games",
+        "num_players",
+        "levels",
+        "subjects",
+        "anchors",
+    }
+    assert manifest["levels"] == {"random": 1000.0, "greedy": 1315.0}
+    assert manifest["subjects"] == [
+        {"id": "random", "spec": "random", "elo": 1000.0}
+    ]
+    assert manifest["anchors"] == [
+        {"id": "random", "elo": 1000.0},
+        {"id": "greedy", "elo": 1315.0},
+    ]
+    # A re-run with an explicit new level does not thaw the frozen label;
+    # the D1 metadata (seed) still refreshes.
+    args = argparse.Namespace(
+        out=str(study),
+        games=2,
+        seed=1,
+        num_players=2,
+        subject=["random"],
+        anchor=None,
+        level=["random=1100"],
+    )
+    assert measure.cmd_generate(args) == 0
+    frozen = json.loads((study / "manifest.json").read_text(encoding="utf-8"))
+    assert frozen["levels"]["random"] == 1000.0
+    assert frozen["seed"] == 1
+
+
 def test_calibrate_reports_m_eff_but_flags_two_levels(tmp_path, capsys):
     study, artifacts = tmp_path / "study", tmp_path / "artifacts"
     _generate(study, ["random", "greedy"], games=6)

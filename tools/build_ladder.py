@@ -23,21 +23,17 @@ from pathlib import Path
 
 from seven523.elo import FitConfig, Prior
 from seven523.ladder import DEFAULT_ANCHOR_ELO, Entrant, build_ladder
+from seven523.policies import split_entrant, validate_spec
 from seven523.study import load_manifest, merge_manifest, save_manifest
 
 __all__ = ["main", "parse_args"]
 
 
-def _split_optional_id(raw: str) -> tuple[str, str]:
-    """``id=spec`` -> ``(id, spec)``; bare specs get an automatic id."""
-    if "=" in raw:
-        id_, spec = raw.split("=", 1)
-        return id_.strip(), spec.strip()
-    spec = raw.strip()
-    if spec.startswith("ckpt:"):
-        path = Path(spec[len("ckpt:") :])
-        return (path.parent.name or path.stem or "ckpt"), spec
-    return spec, spec
+def _require_spec(spec: str) -> None:
+    """Exit with the shared grammar's message when ``spec`` is unusable."""
+    error = validate_spec(spec)
+    if error:
+        raise SystemExit(error)
 
 
 def _parse_spacing(raw: str) -> tuple[float, float]:
@@ -51,19 +47,6 @@ def _parse_spacing(raw: str) -> tuple[float, float]:
     if not 0.0 < low <= high:
         raise SystemExit(f"require 0 < MIN <= MAX, got {raw!r}")
     return low, high
-
-
-def _check_spec(spec: str) -> None:
-    if spec in {"random", "greedy"}:
-        return
-    if spec.startswith("ckpt:"):
-        path = spec[len("ckpt:") :]
-        if not path:
-            raise SystemExit("ckpt: spec needs a checkpoint path")
-        if not Path(path).exists():
-            raise SystemExit(f"checkpoint not found: {path}")
-        return
-    raise SystemExit(f"unknown policy spec {spec!r} (want random / greedy / ckpt:<path>)")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -159,8 +142,8 @@ def main(argv: list[str] | None = None) -> int:
 
     entrants: list[Entrant] = []
     for raw in args.anchor or ["random=random", "greedy=greedy"]:
-        id_, spec = _split_optional_id(raw)
-        _check_spec(spec)
+        id_, spec = split_entrant(raw)
+        _require_spec(spec)
         if id_ not in anchor_elo:
             raise SystemExit(f"anchor {id_!r} has no rating; pass --anchor-elo {id_}=<elo>")
         entrants.append(Entrant(id_, spec, pinned=anchor_elo[id_]))
@@ -168,8 +151,8 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("at least one --candidate is required")
     priors = _parse_priors(args.prior)
     for raw in args.candidate:
-        id_, spec = _split_optional_id(raw)
-        _check_spec(spec)
+        id_, spec = split_entrant(raw)
+        _require_spec(spec)
         entrants.append(Entrant(id_, spec, prior=priors.get(id_)))
 
     min_spacing, max_spacing = _parse_spacing(args.spacing)

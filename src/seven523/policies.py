@@ -8,11 +8,28 @@ from __future__ import annotations
 
 import random
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Protocol
 
 from .actions import catalog_for, index_hand, legal_ids, resolve_indexed
 from .game import View
 from .rules import DEFAULT_RULES, Rules
+
+__all__ = [
+    "EpisodeMixturePolicy",
+    "GreedyBot",
+    "JointAction",
+    "MixturePolicy",
+    "Policy",
+    "RandomBot",
+    "default_id_for_spec",
+    "make_scripted_policies",
+    "missing_ckpt_path",
+    "pfsp_weights",
+    "policy_from_spec",
+    "split_entrant",
+    "validate_spec",
+]
 
 #: ``(template_id, suit | None)``.
 JointAction = tuple[int, int | None]
@@ -286,3 +303,50 @@ def policy_from_spec(
     raise ValueError(
         f"unknown policy spec {spec!r} (want random / greedy / ckpt:<path>)"
     )
+
+
+def default_id_for_spec(spec: str) -> str:
+    """Auto-id for a bare spec: ``ckpt:<path>`` -> parent dir name (fallback
+    stem, then ``'ckpt'``); any other spec is its own id."""
+    if spec.startswith("ckpt:"):
+        path = Path(spec[len("ckpt:") :])
+        return path.parent.name or path.stem or "ckpt"
+    return spec
+
+
+def split_entrant(raw: str) -> tuple[str, str]:
+    """``'ID=SPEC'`` -> ``(ID, SPEC)`` stripped; a bare spec gets an auto-id."""
+    if "=" in raw:
+        id_, spec = raw.split("=", 1)
+        return id_.strip(), spec.strip()
+    spec = raw.strip()
+    return default_id_for_spec(spec), spec
+
+
+def missing_ckpt_path(spec: str | None) -> str | None:
+    """The path of a ``ckpt:`` spec when the file is absent (or the path is
+    empty), else ``None``.  ``random`` / ``greedy`` / other / ``None`` -> ``None``."""
+    if spec is None or not spec.startswith("ckpt:"):
+        return None
+    path = spec[len("ckpt:") :]
+    if path and Path(path).is_file():
+        return None
+    return path
+
+
+def validate_spec(spec: str) -> str | None:
+    """Return an error message when the spec is not usable, else ``None``.
+
+    The spec grammar is ``random`` / ``greedy`` / ``ckpt:<path>``; the messages
+    are kept byte-identical to those the tools raised before this lived here.
+    """
+    if spec in {"random", "greedy"}:
+        return None
+    if spec.startswith("ckpt:"):
+        path = spec[len("ckpt:") :]
+        if not path:
+            return "ckpt: spec needs a checkpoint path"
+        if not Path(path).is_file():
+            return f"checkpoint not found: {path}"
+        return None
+    return f"unknown policy spec {spec!r} (want random / greedy / ckpt:<path>)"

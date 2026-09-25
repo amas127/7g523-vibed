@@ -27,17 +27,11 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-# Run as ``python tools/head_to_head.py``: reuse the spec grammar of the
-# sibling build_ladder CLI without turning tools/ into a package.  The insert
-# also makes ``_load_tool`` in tests resolve the sibling import.
-_TOOLS_DIR = Path(__file__).resolve().parent
-if str(_TOOLS_DIR) not in sys.path:
-    sys.path.insert(0, str(_TOOLS_DIR))
-
-from build_ladder import _check_spec, _split_optional_id  # noqa: E402
+# Run as ``python tools/head_to_head.py``: reuse the shared spec grammar.
 
 from seven523.duel import combine_duel_seeds, paired_duel_stats, plan_duel_schedule  # noqa: E402
 from seven523.ladder import Entrant, play_games  # noqa: E402
+from seven523.policies import split_entrant, validate_spec  # noqa: E402
 
 __all__ = ["main", "parse_args", "run_duel_seeds"]
 
@@ -122,8 +116,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _entrant(raw: str, side: str) -> Entrant:
-    id_, spec = _split_optional_id(raw)
-    _check_spec(spec)
+    id_, spec = split_entrant(raw)
+    error = validate_spec(spec)
+    if error:
+        raise SystemExit(error)
     if not id_:
         raise SystemExit(f"--{side} needs a non-empty id, got {raw!r}")
     return Entrant(id_, spec)

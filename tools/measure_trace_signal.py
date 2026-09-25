@@ -46,10 +46,10 @@ import numpy as np
 
 from seven523.actions import catalog_for
 from seven523.combos import ComboKind
-from seven523.policies import Policy, policy_from_spec
+from seven523.policies import Policy, policy_from_spec, split_entrant
 from seven523.play import play_game, replay_trace
 from seven523.rules import Rules
-from seven523.study import load_manifest
+from seven523.study import load_manifest, merge_manifest, save_manifest
 from seven523.trace import (
     build_trace,
     load_trace,
@@ -172,12 +172,7 @@ def _resolve_levels(raw: Sequence[str]) -> dict[str, float]:
 
 def _parse_subject(raw: str, levels: dict[str, float]) -> tuple[str, str]:
     """``random`` / ``lvl3=ckpt:runs/.../agent.pt`` -> ``(level_id, spec)``."""
-    if "=" in raw:
-        name, spec = raw.split("=", 1)
-        name = name.strip()
-        spec = spec.strip()
-    else:
-        name = spec = raw.strip()
+    name, spec = split_entrant(raw)
     if name not in levels:
         if spec in DEFAULT_LEVEL_ELO:
             levels[name] = DEFAULT_LEVEL_ELO[spec]
@@ -197,11 +192,6 @@ def build_policy(spec: str, rules: Rules, seed: int) -> Policy:
 
 
 # -- generation --------------------------------------------------------------
-
-
-def _load_manifest(path: Path) -> dict[str, Any]:
-    """Study manifest reader; the schema is owned by :mod:`seven523.study`."""
-    return load_manifest(path)
 
 
 def cmd_generate(args: argparse.Namespace) -> int:
@@ -269,30 +259,30 @@ def cmd_generate(args: argparse.Namespace) -> int:
             save_trace(path, trace)
         print(f"  {subject_id}: {args.games} games -> {subject_dir}")
 
-    manifest = _load_manifest(out / "manifest.json")
-    merged_levels = {**manifest.get("levels", {}), **levels}
-    known = {entry["id"]: entry for entry in manifest.get("subjects", [])}
-    for subject_id, subject_spec in subjects:
-        known[subject_id] = {
-            "id": subject_id,
-            "spec": subject_spec,
-            "elo": merged_levels[subject_id],
-        }
-    manifest.update(
+    document = load_manifest(out / "manifest.json")
+    document = merge_manifest(
+        document,
+        levels=levels,
+        subjects=[
+            {
+                "id": subject_id,
+                "spec": subject_spec,
+                "elo": levels[subject_id],
+            }
+            for subject_id, subject_spec in subjects
+        ],
+        anchors=[{"id": anchor, "elo": levels[anchor]} for anchor in anchors],
+    )
+    document.update(
         {
             "version": 1,
             "created_at": created_at,
             "seed": args.seed,
             "games": args.games,
             "num_players": rules.num_players,
-            "levels": merged_levels,
-            "subjects": list(known.values()),
-            "anchors": [{"id": a, "elo": merged_levels[a]} for a in anchors],
         }
     )
-    (out / "manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    save_manifest(out / "manifest.json", document)
     print(
         f"generated {len(subjects)} subject(s) x {args.games} games "
         f"(anchors: {', '.join(anchors)}) -> {out}"
@@ -462,7 +452,7 @@ def _cell(value: Any) -> str:
 
 def cmd_features(args: argparse.Namespace) -> int:
     study = Path(args.study)
-    manifest = _load_manifest(study / "manifest.json")
+    manifest = load_manifest(study / "manifest.json")
     levels = dict(manifest.get("levels", {}))
     levels.update(_resolve_levels(args.level))
     rows, failed = _feature_rows(study, levels, verify=args.verify)
