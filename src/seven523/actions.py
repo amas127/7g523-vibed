@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Iterable
+from typing import Iterable, Sequence
 
 from .cards import NATURAL_ORDER, RANK_LABELS, STANDARD_RANKS, Card, Rank, Suit, card_key
 from .combos import Combo, ComboKind, beats, classify
@@ -92,6 +92,31 @@ def catalog_for(rules: Rules) -> tuple[Action, ...]:
 
 CATALOG: tuple[Action, ...] = catalog_for(DEFAULT_RULES)
 PASS_ID: int = len(CATALOG) - 1
+
+
+def nvec_for(rules: Rules = DEFAULT_RULES) -> tuple[int, ...]:
+    """Head sizes of the ``MultiDiscrete`` action space (ADR-0004).
+
+    One template head plus the preference heads (today just the top-card suit
+    head).  Owning the shape here keeps ``env`` and ``networks`` from each
+    knowing how the action space is laid out.
+    """
+    return (len(catalog_for(rules)), SUIT_N)
+
+
+def joint_mask_bits(template_mask: int, nvec: Sequence[int]) -> list[bool]:
+    """Flat per-head mask: template legality, then preference heads all open.
+
+    Heads after the template (the suit head today, ADR-0004) are preferences:
+    every value is executable — an unavailable or weaker choice falls back to
+    the strongest realisation — so they stay open and per-head sampling remains
+    valid.  Taking ``nvec`` rather than ``rules`` lets the old single-head
+    checkpoints reuse this too.
+    """
+    bits = [bool((template_mask >> index) & 1) for index in range(int(nvec[0]))]
+    for size in nvec[1:]:
+        bits.extend([True] * int(size))
+    return bits
 
 
 def index_hand(hand: Iterable[Card]) -> dict[Rank, list[Card]]:
@@ -185,14 +210,25 @@ def resolve(
     An unavailable suit falls back to the strongest realisation.  Returns
     ``None`` when the hand cannot realise the template (PASS included).
     """
+    return resolve_indexed(action, index_hand(hand), rules, suit)
+
+
+def resolve_indexed(
+    action: Action,
+    by_rank: dict[Rank, list[Card]],
+    rules: Rules = DEFAULT_RULES,
+    suit: Suit | int | None = None,
+) -> Combo | None:
+    """Like :func:`resolve`, but reuses an index from :func:`index_hand`.
+
+    Bots that scan many templates against one hand build the index once instead
+    of rebuilding it per lookup.
+    """
     if action.kind is None:
         return None
-    by_rank = index_hand(hand)
     target = top_rank(action)
-    if suit is None:
+    if suit is None or target is None:
         return _resolve_indexed(action, by_rank, rules, target, None)
-    if target is None:  # bombs: suit is irrelevant, keep the strongest cards
-        return _resolve_indexed(action, by_rank, rules)
     return _resolve_indexed(action, by_rank, rules, target, Suit(int(suit)))
 
 
@@ -206,7 +242,18 @@ def action_mask(
     Legality is checked on the strongest-suit realisation: ``beats`` orders by
     ``(rank, suit)`` within a kind, so if any suit arrangement beats the
     incumbent, the strongest one does too.
+
+    Memoised on the immutable inputs: a seat's mask is rebuilt by both the
+    projection and the engine's validation, and a bounded cache collapses that
+    duplicate to one computation.
     """
+    return _action_mask_cached(frozenset(hand), incumbent, rules)
+
+
+@lru_cache(maxsize=4096)
+def _action_mask_cached(
+    hand: frozenset[Card], incumbent: Combo | None, rules: Rules
+) -> int:
     catalog = catalog_for(rules)
     by_rank = index_hand(hand)
     mask = 0
@@ -215,7 +262,7 @@ def action_mask(
             if incumbent is not None:
                 mask |= 1 << index
             continue
-        combo = _resolve_indexed(action, by_rank, rules, top_rank(action), None)
+        combo = resolve_indexed(action, by_rank, rules)
         if combo is not None and beats(combo, incumbent, rules):
             mask |= 1 << index
     return mask

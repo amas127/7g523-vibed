@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 from torch.distributions.categorical import Categorical
 
+from .actions import joint_mask_bits
 from .env import encode_observation
 from .game import View
 from .rules import DEFAULT_RULES, Rules
@@ -205,12 +206,13 @@ class NeuralPolicy:
         """Pick ``(template_id, suit | None)``; ``suit`` is ``None`` on the old
         single-head checkpoints so they keep working."""
         nvec = self.agent.nvec.tolist()
-        bits = [(view.mask >> index) & 1 for index in range(nvec[0])]
-        for size in nvec[1:]:
-            # Extra heads are preference-only: every value is executable because
-            # the engine falls back to the strongest realisation (ADR-0004).
-            bits.extend([1] * size)
-        mask = torch.tensor([bits], dtype=torch.bool, device=self.device)
+        # Preference heads (the suit head, ADR-0004) stay open; the shared
+        # layout keeps this identical to what the environment publishes.
+        mask = torch.tensor(
+            [joint_mask_bits(view.mask, nvec)],
+            dtype=torch.bool,
+            device=self.device,
+        )
         if not bool(mask[:, : nvec[0]].any()):
             raise ValueError("NeuralPolicy was asked to act with no legal action")
         obs = torch.as_tensor(

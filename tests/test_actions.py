@@ -6,11 +6,16 @@ import pytest
 from seven523.actions import (
     CATALOG,
     PASS_ID,
+    _action_mask_cached,
     action_mask,
     build_catalog,
     catalog_for,
+    index_hand,
+    joint_mask_bits,
     legal_ids,
+    nvec_for,
     resolve,
+    resolve_indexed,
 )
 from seven523.cards import Card, Rank, Suit, make_deck
 from seven523.combos import ComboKind, beats, classify
@@ -345,3 +350,42 @@ def test_mask_includes_joker_bomb_against_a_small_bomb():
     mask = action_mask(hand, incumbent)
     index = CATALOG.index(joker_bomb)
     assert (mask >> index) & 1
+
+
+# -- head layout / memoisation (ADR-0004) -----------------------------------
+
+
+def test_nvec_matches_catalog_and_suit_head():
+    assert nvec_for(DEFAULT_RULES) == (len(CATALOG), 4)
+    custom = Rules(num_players=3, straight_max=13)
+    assert nvec_for(custom) == (len(catalog_for(custom)), 4)
+
+
+def test_joint_mask_bits_lay_out_template_then_preference_head():
+    template = (1 << 5) | (1 << PASS_ID)
+    bits = joint_mask_bits(template, (len(CATALOG), 4))
+    assert len(bits) == len(CATALOG) + 4
+    assert bits[5] and bits[PASS_ID]
+    assert not bits[0]
+    assert bits[len(CATALOG):] == [True] * 4
+
+
+def test_joint_mask_bits_handles_old_single_head_checkpoints():
+    assert joint_mask_bits(1, (3,)) == [True, False, False]
+
+
+def test_resolve_indexed_reuses_the_index_and_matches_resolve():
+    hand = [Card(Rank.R7, suit) for suit in Suit]
+    by_rank = index_hand(hand)
+    for action in CATALOG:
+        assert resolve_indexed(action, by_rank) == resolve(action, hand)
+
+
+def test_action_mask_reuses_the_immutable_inputs():
+    hand = frozenset([Card(Rank.R7, Suit.SPADE), Card(Rank.R7, Suit.HEART)])
+    _action_mask_cached.cache_clear()
+    first = action_mask(hand, None)
+    second = action_mask(hand, None)
+    info = _action_mask_cached.cache_info()
+    assert first == second
+    assert info.misses == 1 and info.hits == 1

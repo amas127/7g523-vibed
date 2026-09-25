@@ -28,7 +28,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from .actions import SUIT_N, catalog_for
+from .actions import nvec_for
 from .env import Seven523Env, observation_dim
 from .eval import evaluate
 from .networks import Agent, NeuralPolicy, load_agent, save_agent, warm_start_into
@@ -297,7 +297,7 @@ def train(args: argparse.Namespace) -> Path:
     rules = Rules(num_players=args.num_players)
     learner = 0
     obs_dim = observation_dim(rules.num_players)
-    nvec = np.asarray([len(catalog_for(rules)), SUIT_N], dtype=np.int64)
+    nvec = np.asarray(nvec_for(rules), dtype=np.int64)
 
     agent = Agent(obs_dim, nvec, hidden=args.hidden_size).to(device)
     if args.load_checkpoint:

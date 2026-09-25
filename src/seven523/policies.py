@@ -9,7 +9,7 @@ from __future__ import annotations
 import random
 from typing import Protocol
 
-from .actions import catalog_for, legal_ids, resolve
+from .actions import catalog_for, index_hand, legal_ids, resolve_indexed
 from .game import View
 from .rules import DEFAULT_RULES, Rules
 
@@ -42,10 +42,11 @@ class GreedyBot:
     def act(self, view: View) -> JointAction:
         best_id = self.pass_id
         best_key: tuple | None = None
+        by_rank = index_hand(view.hand)
         for action_id in legal_ids(view.mask):
             if action_id == self.pass_id:
                 continue
-            combo = resolve(self.catalog[action_id], view.hand, self.rules)
+            combo = resolve_indexed(self.catalog[action_id], by_rank, self.rules)
             if combo is None:
                 continue
             key = (combo.is_bomb, combo.strength)

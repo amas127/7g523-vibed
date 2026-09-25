@@ -4,7 +4,7 @@ import gymnasium as gym
 import numpy as np
 import pytest
 
-from seven523.actions import CATALOG, SUIT_N, catalog_for
+from seven523.actions import CATALOG, SUIT_N, catalog_for, joint_mask_bits
 from seven523.env import Seven523Env, encode_observation, observation_dim
 from seven523.game import Game
 from seven523.policies import GreedyBot, RandomBot
@@ -107,9 +107,7 @@ def test_env_action_mask_matches_the_learner_view():
     env = Seven523Env(seed=3)
     env.reset()
     view = env.game.view(env.state, env.learner)
-    assert env.action_mask == [
-        bool((view.mask >> index) & 1) for index in range(env.action_space_n)
-    ] + [True] * SUIT_N
+    assert env.action_mask == joint_mask_bits(view.mask, env.nvec)
     # the published mask is never empty in a playable state
     assert any(env.action_mask) or view.done
 

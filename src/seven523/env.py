@@ -16,7 +16,7 @@ from collections import Counter
 import gymnasium as gym
 import numpy as np
 
-from .actions import SUIT_N, split_action
+from .actions import joint_mask_bits, nvec_for, split_action
 from .cards import RANK_INDEX, card_id
 from .combos import ComboKind
 from .game import Game, GameState, View
@@ -108,15 +108,16 @@ class Seven523Env(gym.Env):
         self.num_players = rules.num_players
         self.learner = learner
         self.obs_dim = observation_dim(self.num_players)
-        self.action_space_n = len(self.game.catalog)
+        self.nvec = nvec_for(rules)
+        self.action_space_n = self.nvec[0]
         self._rng = random.Random(seed)
         self._opponents = opponents
         self._state: GameState | None = None
-        self.action_mask: list[bool] = [False] * (self.action_space_n + SUIT_N)
+        self.action_mask: list[bool] = [False] * sum(self.nvec)
         self.observation_space = gym.spaces.Box(
             low=0.0, high=1.0, shape=(self.obs_dim,), dtype=np.float32
         )
-        self.action_space = gym.spaces.MultiDiscrete([self.action_space_n, SUIT_N])
+        self.action_space = gym.spaces.MultiDiscrete(list(self.nvec))
 
     # -- gymnasium API -------------------------------------------------------
     def reset(
@@ -174,11 +175,8 @@ class Seven523Env(gym.Env):
         state = self._state
         assert state is not None
         view = self.game.view(state, self.learner)
-        # Template head from the legality mask; the suit head is a preference
-        # (every value is executable: unavailable suits fall back), so it is
-        # always open.  See ADR-0004.
-        self.action_mask = [
-            bool((view.mask >> index) & 1) for index in range(self.action_space_n)
-        ] + [True] * SUIT_N
+        # Template head from the legality mask; preference heads stay open
+        # (every value is executable: unavailable suits fall back).  ADR-0004.
+        self.action_mask = joint_mask_bits(view.mask, self.nvec)
         return np.asarray(encode_observation(view, self.rules), dtype=np.float32)
 
