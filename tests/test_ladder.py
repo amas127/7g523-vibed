@@ -282,6 +282,63 @@ def test_play_games_parallel_results_out_appends(tmp_path):
     assert not list(tmp_path.glob(".*shard*"))
 
 
+def test_play_games_results_dir_serial_rerun_replaces_stale_shards(tmp_path):
+    entrants = [*anchors(), Entrant("g1", "greedy")]
+    schedule = plan_games(entrants, games_per_anchor=2, seed=5)
+    out_dir = tmp_path / "shards"
+    results = play_games(schedule, entrants, results_dir=out_dir, workers=1)
+    assert len(results) == len(schedule)
+    assert [path.name for path in sorted(out_dir.glob("shard_*.jsonl"))] == [
+        "shard_00000.jsonl"
+    ]
+    first = _jsonl(out_dir / "shard_00000.jsonl")
+    assert len(first) == len(schedule)
+    assert [line["seed"] for line in first] == [game.seed for game in schedule]
+
+    stale = out_dir / "shard_00009.jsonl"
+    stale.write_text('{"stale":1}\n', encoding="utf-8")
+    play_games(schedule, entrants, results_dir=out_dir, workers=1)
+    assert not stale.exists()  # a wider previous run's shard must not linger
+    assert [path.name for path in sorted(out_dir.glob("shard_*.jsonl"))] == [
+        "shard_00000.jsonl"
+    ]
+    assert _jsonl(out_dir / "shard_00000.jsonl") == first  # replaced, not appended
+
+
+def test_play_games_results_dir_parallel_matches_serial(tmp_path):
+    entrants, schedule = _parallel_schedule()
+    serial_dir = tmp_path / "serial"
+    parallel_dir = tmp_path / "parallel"
+    serial = play_games(schedule, entrants, results_dir=serial_dir, workers=1)
+    parallel = play_games(schedule, entrants, results_dir=parallel_dir, workers=4)
+    assert parallel == serial
+
+    shard_files = sorted(parallel_dir.glob("shard_*.jsonl"))
+    assert [path.name for path in shard_files] == [
+        f"shard_{index:05d}.jsonl" for index in range(4)
+    ]
+    serial_text = (serial_dir / "shard_00000.jsonl").read_text(encoding="utf-8")
+    parallel_text = "".join(
+        path.read_text(encoding="utf-8") for path in shard_files
+    )
+    # Shards are contiguous, so concatenating them restores schedule order and
+    # matches the single-process JSONL byte for byte.
+    assert parallel_text == serial_text
+
+
+def test_play_games_results_out_and_dir_are_exclusive(tmp_path):
+    entrants, schedule = _parallel_schedule()
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        play_games(
+            schedule,
+            entrants,
+            results_out=tmp_path / "games.jsonl",
+            results_dir=tmp_path / "shards",
+        )
+    assert not (tmp_path / "games.jsonl").exists()
+    assert not (tmp_path / "shards").exists()
+
+
 def test_play_games_parallel_empty_schedule(tmp_path):
     entrants = [*anchors(), Entrant("g1", "greedy")]
     assert play_games((), entrants, workers=4) == []
@@ -289,6 +346,9 @@ def test_play_games_parallel_empty_schedule(tmp_path):
     assert play_games((), entrants, results_out=path, workers=4) == []
     assert path.exists()
     assert path.read_bytes() == b""
+    # results_dir is the fresh-layout mode: an empty schedule must not mkdir.
+    assert play_games((), entrants, results_dir=tmp_path / "shards", workers=4) == []
+    assert not (tmp_path / "shards").exists()
 
 
 def test_play_games_workers_validation():
@@ -301,6 +361,14 @@ def test_play_games_parallel_warns_on_cuda(capsys):
     entrants, schedule = _parallel_schedule()
     # random/greedy never touch torch, so this exercises the warning alone.
     play_games(schedule, entrants, workers=2, device="cuda")
+    err = capsys.readouterr().err
+    assert "CUDA context" in err
+    assert "device='cuda'" in err
+
+
+def test_play_games_results_dir_warns_on_cuda(tmp_path, capsys):
+    entrants, schedule = _parallel_schedule()
+    play_games(schedule, entrants, workers=2, device="cuda", results_dir=tmp_path)
     err = capsys.readouterr().err
     assert "CUDA context" in err
     assert "device='cuda'" in err

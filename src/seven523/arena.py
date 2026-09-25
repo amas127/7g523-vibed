@@ -8,14 +8,14 @@ one joint :func:`elo.fit_ratings` MAP turns all of it into a common Elo scale.
 
 Two things this module adds over ``build_ladder``:
 
-* **Parallelism** — :func:`play_parallel` is now a thin compatibility wrapper
-  over the shard machinery in :mod:`seven523.ladder` (``split_schedule``,
-  ``_ShardJob``, ``_run_shards``): the schedule is split into contiguous
-  shards played by a spawn-based :class:`ProcessPoolExecutor` (spawn avoids
-  forking a CUDA context).  Each worker keeps its own ``policies._AGENT_CACHE``,
-  so a checkpoint is loaded from disk once per worker, not once per game.
-  Every policy is seeded from its game, so ``workers=1`` and ``workers>1``
-  return bit-identical ``PlayedGame`` lists — the regression test pins this.
+* **Parallelism** — :func:`play_parallel` is a thin compatibility wrapper
+  over :func:`seven523.ladder.play_games`, which owns the shard machinery: the
+  schedule is split into contiguous shards played by a spawn-based
+  :class:`ProcessPoolExecutor` (spawn avoids forking a CUDA context).  Each
+  worker keeps its own ``policies._AGENT_CACHE``, so a checkpoint is loaded from
+  disk once per worker, not once per game.  Every policy is seeded from its
+  game, so ``workers=1`` and ``workers>1`` return bit-identical ``PlayedGame``
+  lists — the regression test pins this.
 * **Joining** — one joint :func:`elo.fit_ratings` over the whole league.
 
 The module is pure Python except for the lazy torch import behind a ``ckpt:``
@@ -30,15 +30,7 @@ from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 from .elo import Fit, FitConfig, PlayedGame, expected_score, fit_ratings
-from .ladder import (
-    Entrant,
-    ScheduledGame,
-    _ShardJob,
-    _run_shards,
-    _warn_cuda_workers,
-    plan_games,
-    split_schedule,
-)
+from .ladder import Entrant, ScheduledGame, plan_games, play_games
 from .rules import DEFAULT_RULES, Rules
 
 __all__ = [
@@ -51,7 +43,6 @@ __all__ = [
     "play_parallel",
     "ranking_rows",
     "run_arena",
-    "split_schedule",
     "write_tensorboard",
 ]
 
@@ -79,48 +70,22 @@ def play_parallel(
 ) -> list[PlayedGame]:
     """Play ``schedule`` with ``workers`` spawn processes, merged in schedule order.
 
-    Thin compatibility wrapper over the parallel machinery in
-    :mod:`seven523.ladder` (``split_schedule`` / ``_ShardJob`` /
-    ``_run_shards``); the arena CLI and its regression test speak this name.
-    Per-game policy seeds only depend on the game, never on which shard runs it,
-    so the returned list is identical for every ``workers``.  With ``games_out``
-    (a directory) each shard appends its own ``shard_NNNNN.jsonl``; existing
-    shard files are removed first so a rerun does not duplicate rows.
+    Thin compatibility wrapper over :func:`seven523.ladder.play_games`, which
+    now owns the shard machinery; the arena CLI and its regression test speak
+    this name.  Per-game policy seeds only depend on the game, never on which
+    shard runs it, so the returned list is identical for every ``workers``.
+    With ``games_out`` (a directory) each shard writes its own
+    ``shard_NNNNN.jsonl`` directly; existing ``shard_*.jsonl`` files are
+    removed first so a rerun replaces rather than duplicates rows.
     """
-    schedule = tuple(schedule)
-    entrants = tuple(entrants)
-    if workers < 1:
-        raise ValueError(f"workers must be at least 1, got {workers}")
-    if not schedule:
-        return []
-    output_dir = Path(games_out) if games_out is not None else None
-    n_shards = max(1, min(workers, len(schedule)))
-    _warn_cuda_workers(n_shards, device)
-    chunks = split_schedule(schedule, n_shards)
-    if output_dir is not None:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        for index in range(n_shards):
-            (output_dir / f"shard_{index:05d}.jsonl").unlink(missing_ok=True)
-    jobs = tuple(
-        _ShardJob(
-            index=index,
-            offset=0,  # no traces here, so the global index is irrelevant
-            schedule=chunks[index],
-            entrants=entrants,
-            rules=rules,
-            factory=None,
-            out=None,
-            results_out=(
-                str(output_dir / f"shard_{index:05d}.jsonl")
-                if output_dir is not None
-                else None
-            ),
-            created_at=None,
-            device=device,
-        )
-        for index in range(n_shards)
+    return play_games(
+        schedule,
+        entrants,
+        rules=rules,
+        workers=workers,
+        device=device,
+        results_dir=games_out,
     )
-    return _run_shards(jobs)
 
 
 @dataclass(frozen=True, slots=True)

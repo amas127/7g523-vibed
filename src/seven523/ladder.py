@@ -270,6 +270,18 @@ def _merge_shard_results(temp_paths: Sequence[Path], results_path: Path) -> None
                 temp.unlink()
 
 
+def _prepare_shard_dir(results_dir: Path) -> None:
+    """Create the shard directory and drop every previous ``shard_*.jsonl``.
+
+    A rerun with fewer workers must not leave stale shards behind, so the glob
+    (not just the files this run will write) is removed; the worker files are
+    opened in append mode afterwards, which is now the same as truncate.
+    """
+    results_dir.mkdir(parents=True, exist_ok=True)
+    for stale in results_dir.glob("shard_*.jsonl"):
+        stale.unlink()
+
+
 def _play_games_range(
     schedule: Sequence[ScheduledGame],
     entrants: Sequence[Entrant],
@@ -367,10 +379,12 @@ def _play_games_parallel(
     factory: Callable[[str, Rules, int], Policy],
     out_path: Path | None,
     results_path: Path | None,
+    results_dir: Path | None,
     stamp: str | None,
     device: str,
 ) -> list[PlayedGame]:
-    """Shard, spawn and merge; see :func:`play_games` for the contract."""
+    """Shard, spawn and collect; see :func:`play_games` for the contract."""
+    assert results_path is None or results_dir is None
     n_shards = min(workers, len(schedule))
     chunks = split_schedule(schedule, n_shards)
     _warn_cuda_workers(n_shards, device)
@@ -396,6 +410,12 @@ def _play_games_parallel(
         )
         for temp in temp_paths:
             temp.unlink(missing_ok=True)  # a crashed run must not leak old rows
+    direct_paths: tuple[Path, ...] = ()
+    if results_dir is not None:  # each shard is final: no temp, no merge
+        direct_paths = tuple(
+            results_dir / f"shard_{index:05d}.jsonl" for index in range(n_shards)
+        )
+    job_paths = temp_paths or direct_paths
     jobs = tuple(
         _ShardJob(
             index=index,
@@ -405,7 +425,7 @@ def _play_games_parallel(
             rules=rules,
             factory=factory,
             out=str(out_path) if out_path is not None else None,
-            results_out=str(temp_paths[index]) if temp_paths else None,
+            results_out=str(job_paths[index]) if job_paths else None,
             created_at=stamp,
             device=device,
         )
@@ -426,6 +446,7 @@ def play_games(
     factory: Callable[[str, Rules, int], Policy] | None = None,
     out: str | Path | None = None,
     results_out: str | Path | None = None,
+    results_dir: str | Path | None = None,
     created_at: str | None = None,
     device: str = "cpu",
     workers: int = 1,
@@ -446,6 +467,14 @@ def play_games(
     join against the fitting schedule later.  ``None`` (the default) keeps the
     old behaviour: nothing is written.
 
+    ``results_dir`` is the sharded alternative: each worker writes its own
+    ``shard_NNNNN.jsonl`` directly into the directory (no temp file and no
+    merge), and any existing ``shard_*.jsonl`` is removed first, so a rerun
+    replaces the previous rows instead of appending them.  With one worker the
+    single file is ``shard_00000.jsonl``.  ``results_dir`` and ``results_out``
+    are mutually exclusive; :func:`seven523.arena.play_parallel` forwards its
+    ``games_out`` here.
+
     ``workers > 1`` shards the schedule into contiguous chunks played by spawn
     processes and merged back into schedule order.  Per-game policy seeds depend
     only on the game, so the returned list is identical for every ``workers``.
@@ -456,16 +485,25 @@ def play_games(
     """
     if workers < 1:
         raise ValueError(f"workers must be at least 1, got {workers}")
+    if results_out is not None and results_dir is not None:
+        raise ValueError("results_out and results_dir are mutually exclusive")
     schedule = tuple(schedule)
     entrants = tuple(entrants)
     out_path = Path(out) if out is not None else None
     results_path = Path(results_out) if results_out is not None else None
+    shard_dir = Path(results_dir) if results_dir is not None else None
     stamp = created_at
     if out_path is not None and stamp is None:
         stamp = datetime.now().isoformat(timespec="seconds")
     if factory is None:
         factory = make_factory(device=device)
+    if not schedule and shard_dir is not None:
+        return []  # nothing to shard: leave a fresh directory untouched
+    if shard_dir is not None:
+        _prepare_shard_dir(shard_dir)
     if workers == 1 or len(schedule) <= 1:
+        if shard_dir is not None:
+            results_path = shard_dir / "shard_00000.jsonl"
         return _play_games_range(
             schedule,
             entrants,
@@ -483,6 +521,7 @@ def play_games(
         factory=factory,
         out_path=out_path,
         results_path=results_path,
+        results_dir=shard_dir,
         stamp=stamp,
         device=device,
     )
