@@ -223,16 +223,15 @@ def cmd_generate(args: argparse.Namespace) -> int:
             seat = index % n
             anchor = anchors[(index // n) % len(anchors)]
             policy = build_policy(subject_spec, rules, game_seed)
-            opponents: list[Policy | None] = [None] * n
+            policies: list[Policy] = [policy] * n
             for other in range(n):
                 if other != seat:
-                    opponents[other] = build_policy(
+                    policies[other] = build_policy(
                         anchor, rules, (game_seed + 101 * (other + 1)) & 0xFFFF_FFFF
                     )
             record: dict[str, Any] = {}
             play_game(
-                opponents,  # type: ignore[arg-type]
-                lambda game, state, view, _p=policy: _p.act(view),
+                policies,
                 rules=rules,
                 human_seat=seat,
                 seed=game_seed,

@@ -36,6 +36,7 @@ from .policies import (
     EpisodeMixturePolicy,
     MixturePolicy,
     Policy,
+    WeightedPolicy,
     make_scripted_policies,
     pfsp_weights,
     policy_from_spec,
@@ -609,7 +610,8 @@ def train(args: argparse.Namespace) -> Path:
         ordered = [weights[member_id] for member_id in member_ids]
         for env_mixtures in episode_mixtures:
             for policy in env_mixtures:
-                policy.set_weights(ordered)
+                if isinstance(policy, WeightedPolicy):
+                    policy.set_weights(ordered)
         for member_id in member_ids:
             wins, draws, losses = pfsp_records[member_id]
             games = wins + draws + losses
@@ -767,6 +769,8 @@ def train(args: argparse.Namespace) -> Path:
                                     episode_return < 0.0
                                 )
                             for policy in episode_mixtures[int(idx)]:
+                                if not isinstance(policy, WeightedPolicy):
+                                    continue
                                 member_id = policy.finished_id
                                 if member_id is None:
                                     continue

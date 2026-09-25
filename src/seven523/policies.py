@@ -9,7 +9,7 @@ from __future__ import annotations
 import random
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from .actions import catalog_for, index_hand, legal_ids, resolve_indexed
 from .game import View
@@ -17,11 +17,13 @@ from .rules import DEFAULT_RULES, Rules
 
 __all__ = [
     "EpisodeMixturePolicy",
+    "EpisodePolicy",
     "GreedyBot",
     "JointAction",
     "MixturePolicy",
     "Policy",
     "RandomBot",
+    "WeightedPolicy",
     "default_id_for_spec",
     "make_scripted_policies",
     "missing_ckpt_path",
@@ -37,6 +39,19 @@ JointAction = tuple[int, int | None]
 
 class Policy(Protocol):
     def act(self, view: View) -> JointAction: ...
+
+
+@runtime_checkable
+class EpisodePolicy(Protocol):
+    def start_episode(self) -> str: ...
+    """Draw the opponent for the episode; called once per env reset."""
+
+
+@runtime_checkable
+class WeightedPolicy(Protocol):
+    def set_weights(self, weights: Sequence[float]) -> None: ...
+    current_id: str | None
+    finished_id: str | None
 
 
 class RandomBot:

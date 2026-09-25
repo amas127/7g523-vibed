@@ -64,7 +64,7 @@ def test_legacy_v1_trace_replays_under_family_semantics(tmp_path):
     record = {}
     play_game(
         [GreedyBot(), GreedyBot()],
-        lambda game, state, view: legal_ids(view.mask)[0],
+        chooser=lambda game, state, view: legal_ids(view.mask)[0],
         rules=DEFAULT_RULES,
         seed=11,
         print_fn=lambda *args, **kwargs: None,

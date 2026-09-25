@@ -302,8 +302,7 @@ def _play_games_range(
             human = game.seats.index(game.subject)
             record: dict[str, object] = {}
             play_game(
-                list(policies),
-                lambda game_obj, state, view, policy=policies[human]: policy.act(view),
+                policies,
                 rules=rules,
                 human_seat=human,
                 seed=game.seed,

@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from .actions import legal_ids, resolve, split_action, suit_options
+from .actions import legal_ids, resolve, suit_options
 from .cards import SUIT_LABELS, Suit, card_key
 from .combos import Combo, ComboKind
 from .game import Game, GameState, StepResult, View
@@ -39,6 +39,7 @@ from .trace import (
 
 __all__ = [
     "HELP",
+    "ChooserPolicy",
     "QuitGame",
     "action_text",
     "combo_text",
@@ -272,26 +273,54 @@ def replay_trace(
     return True
 
 
+class ChooserPolicy:
+    """Adapter from the legacy ``(game, state, view)`` chooser to ``Policy``.
+
+    The interactive/scripted chooser needs the live :class:`Game` and
+    :class:`GameState`, which a :class:`~seven523.policies.Policy` never sees;
+    :meth:`bind` attaches the :class:`Match` that owns them before play starts.
+    """
+
+    def __init__(self, chooser: Callable[[Game, GameState, View], Any]) -> None:
+        self.chooser = chooser
+        self._match: Match | None = None
+
+    def bind(self, match: Match) -> None:
+        self._match = match
+
+    def act(self, view: View) -> Any:
+        if self._match is None:
+            raise RuntimeError("ChooserPolicy.act() before bind(match)")
+        return self.chooser(self._match.game, self._match.state, view)
+
+
 def play_game(
-    opponents: Sequence[Policy],
-    chooser: Callable[[Game, GameState, View], int],
+    policies: Sequence[Policy],
     *,
+    chooser: Callable[[Game, GameState, View], Any] | None = None,
     rules: Rules = DEFAULT_RULES,
     human_seat: int = 0,
     seed: int | None = None,
     print_fn: Callable[..., None] = print,
     record: dict[str, Any] | None = None,
 ) -> tuple[int, ...]:
-    """Deal and play one game; ``chooser`` decides every human action.
+    """Deal and play one game; every seat is a :class:`Policy`.
 
-    ``chooser`` may raise :class:`QuitGame` to abandon the game.
-    When ``record`` is given it is filled with ``initial`` (the deal),
-    ``steps`` (one entry per move) and ``final_scores``.
+    With ``chooser`` given, seat ``human_seat`` is wrapped in a bound
+    :class:`ChooserPolicy` (interactive or scripted); otherwise the seat's own
+    entry in ``policies`` acts.  ``chooser`` may raise :class:`QuitGame` to
+    abandon the game.  When ``record`` is given it is filled with ``initial``
+    (the deal), ``steps`` (one entry per move) and ``final_scores``.
     Returns the final scores (one per seat).
     """
-    policies: list[Policy | None] = list(opponents)
-    policies[human_seat] = None
-    match = Match(rules, policies, rng=random.Random(seed))
+    seat_policies: list[Policy | None] = list(policies)
+    chooser_policy: ChooserPolicy | None = None
+    if chooser is not None:
+        chooser_policy = ChooserPolicy(chooser)
+        seat_policies[human_seat] = chooser_policy
+    match = Match(rules, seat_policies, rng=random.Random(seed))
+    if chooser_policy is not None:
+        chooser_policy.bind(match)
     game = match.game
     names = [
         _seat_name(seat, human_seat, rules.num_players)
@@ -327,12 +356,7 @@ def play_game(
     )
     print_fn(f"亮牌：{reveal}（{names[state.current]}先手）")
 
-    while not match.done:
-        if match.seat == human_seat:
-            action_id, suit = split_action(chooser(game, match.state, match.view()))
-            match.step(action_id, suit)
-        else:
-            match.step()
+    match.run_to_end()
 
     state = match.state
     best = max(state.scores)
@@ -460,7 +484,7 @@ def main(argv: list[str] | None = None) -> None:
         policy = GreedyBot(rules)
         opponent_name = "贪心 bot"
 
-    opponents = [policy] * rules.num_players
+    policies = [policy] * rules.num_players
     chooser = interactive_chooser(args.seat)
     role, identity = opponent_identity(args.checkpoint, args.opponent)
     print(f"对手：{opponent_name}；你坐 {args.seat} 号位。输入 h 看帮助。")
@@ -475,8 +499,8 @@ def main(argv: list[str] | None = None) -> None:
             )
             record: dict[str, Any] = {}
             play_game(
-                opponents,
-                chooser,
+                policies,
+                chooser=chooser,
                 rules=rules,
                 human_seat=args.seat,
                 seed=seed,

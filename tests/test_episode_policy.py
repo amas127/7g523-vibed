@@ -12,9 +12,11 @@ import pytest
 from seven523.env import Seven523Env
 from seven523.policies import (
     EpisodeMixturePolicy,
+    EpisodePolicy,
     GreedyBot,
     MixturePolicy,
     RandomBot,
+    WeightedPolicy,
     pfsp_weights,
 )
 from seven523.rules import DEFAULT_RULES
@@ -38,6 +40,20 @@ def _members():
 
 
 # -- EpisodeMixturePolicy ----------------------------------------------------
+
+
+def test_policy_protocols_separate_plain_bots_from_episode_mixtures():
+    # The env/trainer seams are opt-in: a plain bot implements neither hook,
+    # while the episode mixture is the reference implementation of both.
+    assert not isinstance(RandomBot(random.Random(0)), EpisodePolicy)
+    assert not isinstance(RandomBot(random.Random(0)), WeightedPolicy)
+
+    mixture = EpisodeMixturePolicy(
+        [(1.0, GreedyBot(), "greedy"), (0.0, RandomBot(random.Random(1)), "random")],
+        random.Random(0),
+    )
+    assert isinstance(mixture, EpisodePolicy)
+    assert isinstance(mixture, WeightedPolicy)
 
 
 def test_episode_mixture_act_forwards_only_to_the_frozen_member():

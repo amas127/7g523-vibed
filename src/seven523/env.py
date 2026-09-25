@@ -22,7 +22,7 @@ from .cards import RANK_INDEX, card_id, make_deck, point_value
 from .combos import ComboKind
 from .game import Game, GameState, View, seat_outcome
 from .match import Match
-from .policies import Policy, RandomBot
+from .policies import EpisodePolicy, Policy, RandomBot
 from .rules import DEFAULT_RULES, Rules
 
 #: The observation layout is v5 (``119 + 21n``): the slim S1 family plus the
@@ -306,13 +306,12 @@ class Seven523Env(gym.Env):
                 RandomBot(random.Random(self._rng.random()))
                 for _ in range(self.num_players)
             ]
-        # Episode-scoped opponents (EpisodeMixturePolicy) freeze their member
-        # here, once per reset, instead of re-drawing every decision.  Plain
-        # policies have no such hook and are untouched (duck typing).
+        # Episode-scoped opponents (EpisodePolicy) freeze their member here,
+        # once per reset, instead of re-drawing every decision.  Plain policies
+        # do not implement the hook and are untouched.
         for opponent in self._opponents:
-            start_episode = getattr(opponent, "start_episode", None)
-            if callable(start_episode):
-                start_episode()
+            if isinstance(opponent, EpisodePolicy):
+                opponent.start_episode()
         policies: list[Policy | None] = list(self._opponents)
         policies[self.learner] = None
         self._match = Match(self.rules, policies, rng=self._rng)

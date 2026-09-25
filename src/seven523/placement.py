@@ -717,15 +717,18 @@ class PlacementSession:
         index: int,
         seat: int,
         seed: int,
-        chooser: Callable[..., Any],
+        human_policy: Policy | None = None,
+        chooser: Callable[..., Any] | None = None,
         print_fn: Callable[..., None],
     ) -> tuple[dict[str, Any], Path]:
         policy = self._opponent_policy(opponent, (seed + 101 * (index + 1)) & 0xFFFF_FFFF)
-        opponents = [policy] * self.rules.num_players
+        policies: list[Policy] = [policy] * self.rules.num_players
+        if human_policy is not None:
+            policies[seat] = human_policy
         record: dict[str, Any] = {}
         play_game(
-            opponents,
-            chooser,
+            policies,
+            chooser=chooser,
             rules=self.rules,
             human_seat=seat,
             seed=seed,
@@ -983,17 +986,24 @@ class PlacementSession:
 
     def run(
         self,
-        chooser_factory: Callable[[int], Callable[..., Any]],
+        chooser_factory: Callable[[int], Callable[..., Any]] | None = None,
         *,
+        human_policy_factory: Callable[[int], Policy] | None = None,
         print_fn: Callable[..., None] = print,
     ) -> dict[str, Any] | None:
         """Play the scheduled games, persist everything, return the report.
 
-        ``chooser_factory(seat)`` returns the chooser handed to ``play_game``
-        for the human seat of that game (interactive terminal, a scripted
-        policy, or a test double).  Returns ``None`` when the player quit
+        Exactly one human-seat driver must be given.  ``chooser_factory(seat)``
+        returns the ``(game, state, view)`` chooser passed to ``play_game``
+        (interactive terminal or a test double); ``human_policy_factory(seat)``
+        returns the :class:`Policy` placed in the seat's slot in the policy
+        sequence (a scripted human).  Returns ``None`` when the player quit
         before finishing a single game.
         """
+        if (chooser_factory is None) == (human_policy_factory is None):
+            raise ValueError(
+                "run() needs exactly one of chooser_factory / human_policy_factory"
+            )
         self.directory.mkdir(parents=True, exist_ok=True)
         self._write_rungs()
         self._persist()
@@ -1016,7 +1026,14 @@ class PlacementSession:
                     index=index,
                     seat=seat,
                     seed=seed,
-                    chooser=chooser_factory(seat),
+                    human_policy=(
+                        human_policy_factory(seat)
+                        if human_policy_factory is not None
+                        else None
+                    ),
+                    chooser=(
+                        chooser_factory(seat) if chooser_factory is not None else None
+                    ),
                     print_fn=print_fn,
                 )
             except (QuitGame, KeyboardInterrupt):
@@ -1151,14 +1168,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             human = policy_from_spec(
                 args.simulate, session.rules, seed=args.seed, device=args.device
             )
-            chooser_factory: Callable[[int], Callable[..., Any]] = (
-                lambda seat, _policy=human: (
-                    lambda game, state, view: _policy.act(view)
-                )
+            report = session.run(
+                human_policy_factory=lambda _seat, _policy=human: _policy,
+                print_fn=print_fn,
             )
         else:
             chooser_factory = lambda seat: interactive_chooser(seat, print_fn=print_fn)  # noqa: E731
-        report = session.run(chooser_factory, print_fn=print_fn)
+            report = session.run(chooser_factory, print_fn=print_fn)
     except (FileNotFoundError, ValueError, KeyError, OSError) as exc:
         print(f"7g523-elo: {exc}", file=sys.stderr)
         return 1

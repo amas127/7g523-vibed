@@ -87,7 +87,7 @@ def test_play_game_with_scripted_chooser_always_terminates(human_seat):
 
     scores = play_game(
         opponents,
-        chooser,
+        chooser=chooser,
         rules=rules,
         human_seat=human_seat,
         seed=11,
@@ -103,7 +103,7 @@ def test_play_game_accepts_random_opponents():
     opponents = [RandomBot(random.Random(0)), RandomBot(random.Random(1))]
     scores = play_game(
         opponents,
-        lambda game, state, view: legal_ids(view.mask)[0],
+        chooser=lambda game, state, view: legal_ids(view.mask)[0],
         rules=rules,
         seed=5,
         print_fn=lambda *args, **kwargs: None,
@@ -121,7 +121,7 @@ def test_play_game_propagates_quit():
     with pytest.raises(QuitGame):
         play_game(
             opponents,
-            chooser,
+            chooser=chooser,
             rules=rules,
             seed=0,
             print_fn=lambda *args, **kwargs: None,
@@ -153,7 +153,7 @@ def _played_trace(chooser=None, *, rules=DEFAULT_RULES):
     record = {}
     scores = play_game(
         opponents,
-        chooser
+        chooser=chooser
         or (lambda game, state, view: legal_ids(view.mask)[0]),
         rules=rules,
         seed=21,
