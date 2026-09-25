@@ -28,7 +28,6 @@ the rating math.  ``run()`` takes any chooser factory, so tests and the
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import math
 import random
@@ -42,6 +41,8 @@ from typing import Any, Callable, Mapping, Sequence
 from .elo import Fit, FitConfig, PlayedGame, Prior, expected_score, fit_ratings
 from .policies import Policy, missing_ckpt_path, policy_from_spec
 from .play import QuitGame, interactive_chooser
+from .prior import SCHEMA as TRACE_PRIOR_SCHEMA
+from .prior import TracePrior, session_mean
 from .record import play_recorded, policy_seed
 from .rules import DEFAULT_RULES, Rules
 from .study import load_manifest
@@ -66,7 +67,6 @@ __all__ = [
     "channel_weights",
     "fit_session",
     "load_opponents",
-    "load_prior_tools",
     "main",
     "nearest_level",
     "new_session_id",
@@ -81,7 +81,6 @@ __all__ = [
 #: Document tags; readers reject anything else.
 SESSION_SCHEMA = "seven523.placement-session"
 REPORT_SCHEMA = "seven523.placement-report"
-TRACE_PRIOR_SCHEMA = "seven523.trace-prior"
 VERSION = 1
 
 
@@ -327,110 +326,6 @@ def session_player_labels(
         else player_label(role, opponent.id, seat)
         for seat in range(num_players)
     ]
-
-
-# -- the M1 trace prior as an online channel ---------------------------------
-
-
-_TOOLS_CACHE: Any = None
-
-
-def load_prior_tools() -> Any:
-    """Import ``tools/fit_trace_prior.py`` lazily (it owns the prior schema).
-
-    ``placement`` deliberately does not re-implement ``predict_elo`` /
-    ``prior_for_session`` / the S1 extractor: the M1 tool is the single owner
-    of the artifact semantics.  The import is lazy so ``--help`` and
-    ``--no-trace-prior`` sessions never need numpy.
-    """
-    global _TOOLS_CACHE
-    if _TOOLS_CACHE is None:
-        path = Path(__file__).resolve().parents[2] / "tools" / "fit_trace_prior.py"
-        if not path.exists():
-            raise FileNotFoundError(
-                f"the M1 prior tool is missing: {path} "
-                "(run from the repository, or pass --no-trace-prior)"
-            )
-        spec = importlib.util.spec_from_file_location(
-            "seven523_fit_trace_prior", path
-        )
-        if spec is None or spec.loader is None:
-            raise ImportError(f"cannot load {path}")
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)
-        _TOOLS_CACHE = module
-    return _TOOLS_CACHE
-
-
-class TracePrior:
-    """The M1 ``prior.json`` artifact as used online.
-
-    ``_tools`` is injectable so tests can drive a session with a synthetic
-    predictor instead of the numpy-backed calibration tool.
-    """
-
-    def __init__(
-        self,
-        doc: Mapping[str, Any],
-        *,
-        path: str | Path | None = None,
-        _tools: Any = None,
-    ) -> None:
-        if doc.get("schema") != TRACE_PRIOR_SCHEMA:
-            raise ValueError(
-                f"not a {TRACE_PRIOR_SCHEMA} artifact, got {doc.get('schema')!r}"
-            )
-        self.doc = doc
-        self.path = Path(path) if path is not None else None
-        self._tools = _tools
-
-    @classmethod
-    def load(cls, path: str | Path) -> TracePrior:
-        tools = load_prior_tools()
-        return cls(tools.load_prior(path), path=path, _tools=tools)
-
-    def _impl(self) -> Any:
-        if self._tools is None:
-            self._tools = load_prior_tools()
-        return self._tools
-
-    def predict_elo(self, row: Mapping[str, Any], *, opponent_elo: float) -> float:
-        return float(
-            self._impl().predict_elo(self.doc, row, opponent_elo=float(opponent_elo))
-        )
-
-    def prior_for_session(self, mu_traj: float, n: int) -> Prior:
-        return self._impl().prior_for_session(self.doc, float(mu_traj), int(n))
-
-    def features(self, trace: Mapping[str, Any], *, verify: bool = False) -> dict[str, Any]:
-        return dict(self._impl().extract_features(trace, verify=verify))
-
-    @property
-    def cold_start(self) -> Prior:
-        prior = self.doc.get("prior") or {"mean": 1500.0, "sd": 300.0}
-        return Prior(float(prior["mean"]), float(prior["sd"]))
-
-    @property
-    def labels(self) -> dict[str, float]:
-        """Elos the prior was calibrated against (opponent-strength feature)."""
-        data = self.doc.get("data") or {}
-        return {
-            str(name): float(value)
-            for name, value in (data.get("labels") or {}).items()
-        }
-
-    def meta(self) -> dict[str, Any]:
-        return {
-            "path": str(self.path) if self.path is not None else None,
-            "schema": self.doc.get("schema"),
-            "version": self.doc.get("version"),
-            "kind": self.doc.get("kind"),
-            "labels": self.doc.get("labels"),
-            "created_at": self.doc.get("created_at"),
-            "scheme": self.doc.get("scheme"),
-            "deshrink": dict(self.doc.get("deshrink") or {}),
-        }
 
 
 # -- estimation --------------------------------------------------------------
@@ -777,10 +672,11 @@ class PlacementSession:
             opponent_elo = self._records[-1].opponent_elo
             row = self.trace_prior.features(self._last_trace, verify=self.feature_verify)
             self._rows.append((row, opponent_elo))
-            self._mu_traj = sum(
-                self.trace_prior.predict_elo(row, opponent_elo=elo)
-                for row, elo in self._rows
-            ) / len(self._rows)
+            self._mu_traj = session_mean(
+                self.trace_prior.doc,
+                [row for row, _elo in self._rows],
+                opponent_elos=[elo for _row, elo in self._rows],
+            )
             self._human_prior = self.trace_prior.prior_for_session(
                 self._mu_traj, len(self._games)
             )

@@ -1,9 +1,9 @@
 """M2/M3 tests: placement scheduling, D3 estimator, report and CLI.
 
 The sessions here never load torch: the tiny manifest's rung specs are the
-scripted bots, and the trace channel is either disabled or driven by an
-injected fake tool module.  One test exercises the shipped M1 ``prior.json``
-end to end (skipped when the artifact is absent).
+scripted bots, and the trace channel is either disabled or driven by a
+monkeypatched synthetic predictor.  One test exercises the shipped M1
+``prior.json`` end to end (skipped when the artifact is absent).
 """
 from __future__ import annotations
 
@@ -439,23 +439,8 @@ def test_empty_session_returns_no_report(tmp_path):
 # -- trace prior integration -------------------------------------------------
 
 
-class _FakeTools:
-    """Pure-Python stand-in for ``tools/fit_trace_prior.py``."""
-
-    @staticmethod
-    def predict_elo(doc, row, opponent_elo=None):
-        return 1000.0 + float(row["shift"])
-
-    @staticmethod
-    def prior_for_session(doc, mu, n):
-        return Prior(float(mu), float(doc["sigma_traj"][str(n)]))
-
-    @staticmethod
-    def extract_features(trace, verify=True):
-        return {"shift": float(trace["seed"] % 100)}
-
-
 def _fake_prior() -> TracePrior:
+    """A synthetic prior document; the tests patch its predictor."""
     doc = {
         "schema": TRACE_PRIOR_SCHEMA,
         "version": 1,
@@ -464,10 +449,22 @@ def _fake_prior() -> TracePrior:
         "sigma_traj": {"1": 90.0, "2": 70.0, "3": 55.0, "4": 55.0},
         "data": {"labels": {}},
     }
-    return TracePrior(doc, _tools=_FakeTools)
+    return TracePrior(doc)
 
 
-def test_trace_prior_channel_updates_mu_and_sigma(tmp_path):
+def test_trace_prior_channel_updates_mu_and_sigma(tmp_path, monkeypatch):
+    from seven523 import prior as prior_core
+
+    monkeypatch.setattr(
+        prior_core,
+        "extract_features",
+        lambda trace, verify=True: {"shift": float(trace["seed"] % 100)},
+    )
+    monkeypatch.setattr(
+        prior_core,
+        "predict_elo",
+        lambda doc, row, opponent_elo=None: 1000.0 + float(row["shift"]),
+    )
     session, report, _directory = _run_session(
         tmp_path, games=4, trace_prior=_fake_prior()
     )
@@ -531,6 +528,23 @@ def test_cli_help_smoke(capsys):
     assert excinfo.value.code == 0
     out = capsys.readouterr().out
     assert "--simulate" in out and "--no-trace-prior" in out
+
+
+def test_cli_missing_prior_reports_on_stderr(tmp_path, capsys):
+    manifest = _manifest_file(tmp_path)
+    code = main(
+        [
+            "--manifest",
+            str(manifest),
+            "--prior",
+            str(tmp_path / "missing.json"),
+            "--games",
+            "2",
+            "--quiet",
+        ]
+    )
+    assert code == 1
+    assert "7g523-elo:" in capsys.readouterr().err
 
 
 def test_cli_simulate_smoke(tmp_path, capsys):

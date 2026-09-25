@@ -1,7 +1,7 @@
 """Study manifests: the one owner of the ``traces/study`` document schema.
 
 Both ends of the M2 ladder workflow cross this seam: ``ladder.build_ladder``
-writes measured ratings into it, and ``tools/measure_trace_signal.py`` reads
+writes measured ratings into it, and the D1 calibration reads
 ``levels`` (``id -> measured Elo``) to label the S1 feature rows.  Keeping the
 schema — and the freeze rule — here means neither side re-implements it.
 
@@ -59,7 +59,7 @@ def merge_manifest(
 ) -> dict[str, Any]:
     """Merge a fit result into an existing manifest and return the new document.
 
-    ``levels`` is the contract ``tools/measure_trace_signal.py`` reads; it is
+    ``levels`` is the contract the D1 calibration reads; it is
     frozen per id unless ``refit`` is set.  ``subjects`` merge by id with the
     same rule for their ``elo``, while their other metadata refreshes (games,
     spec, ``se``).  All unrelated keys (D1 metadata such as ``seed``/``games``/

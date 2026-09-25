@@ -3,7 +3,7 @@
 The plan (``docs/human-elo-plan.md`` §3.1) needs a set of bot levels whose Elo
 is *measured*, not trained: every candidate plays each pinned anchor enough
 times for a usable rating, and the result is frozen into the study manifest so
-``tools/measure_trace_signal.py`` reads the same ratings as labels.
+the D1 calibration reads the same ratings as labels.
 
 This module is the orchestration around the pure core in :mod:`seven523.elo`:
 :func:`plan_games` is a pure schedule (paired deals, seat-balanced twins), and

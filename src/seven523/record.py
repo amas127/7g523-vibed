@@ -1,6 +1,6 @@
 """One 牌局 → trace + scores: the single batch-recording seam.
 
-``ladder``, ``placement`` and ``tools/measure_trace_signal`` all need the same
+``ladder``, ``placement`` and the trace-prior feature extractor all need the same
 three steps — deal and play a game through :func:`seven523.play.play_game`,
 assemble the trace with :func:`seven523.trace.build_trace`, and save it with
 :func:`seven523.trace.save_trace`.  Before this module each harness wrote that

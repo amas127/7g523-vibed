@@ -44,20 +44,20 @@ from typing import Any, Iterable, Sequence
 
 import numpy as np
 
-from seven523.actions import catalog_for
-from seven523.combos import ComboKind
-from seven523.elo import DEFAULT_ELO_SCALE
 from seven523.policies import Policy, policy_from_spec, split_entrant
-from seven523.play import replay_trace
+from seven523.prior import (
+    SINGLE_GAME_SE,
+    expand,
+    extract_features,
+    ridge_fit,
+    ridge_predict,
+    silent,
+    trace_paths,
+)
 from seven523.record import play_recorded, policy_seed
 from seven523.rules import Rules
 from seven523.study import load_manifest, merge_manifest, save_manifest
-from seven523.trace import (
-    load_trace,
-    parse_player_label,
-    player_label,
-    rules_from_json,
-)
+from seven523.trace import load_trace, parse_player_label, player_label
 
 __all__ = [
     "DEFAULT_LEVEL_ELO",
@@ -73,15 +73,7 @@ __all__ = [
 #: bots; re-derive once the M2 ladder exists and record it in the manifest).
 DEFAULT_LEVEL_ELO: dict[str, float] = {"random": 1000.0, "greedy": 1315.0}
 
-#: 400-point Elo scale and the SE of one single-game Bernoulli observation at
-#: p=0.5 (the plan's ``347``); ``m_eff = (SINGLE_GAME_SE / s) ** 2``.
-BETA = math.log(10.0) / DEFAULT_ELO_SCALE
-SINGLE_GAME_SE = 1.0 / (BETA * math.sqrt(0.25))
 Z95 = 1.959963984540054
-
-BOMB_KINDS: frozenset[ComboKind] = frozenset(
-    {ComboKind.SMALL_BOMB, ComboKind.BIG_BOMB}
-)
 
 #: S1 features used by the ridge calibration (all per game, subject view).
 S1_MODEL_FEATURES: tuple[str, ...] = (
@@ -146,21 +138,9 @@ DISPLAY_FEATURES: tuple[str, ...] = (
 )
 
 
-def _silent(*_args: object, **_kwargs: object) -> None:
-    """print_fn for the reuse of ``play_game`` / ``replay_trace`` without noise."""
-
-
-def _expand(values: Sequence[str] | None) -> list[str]:
-    """Flatten repeated flags and comma-separated lists into one list."""
-    out: list[str] = []
-    for value in values or ():
-        out.extend(part.strip() for part in value.split(",") if part.strip())
-    return out
-
-
 def _resolve_levels(raw: Sequence[str]) -> dict[str, float]:
     levels = dict(DEFAULT_LEVEL_ELO)
-    for item in _expand(raw):
+    for item in expand(raw):
         if "=" not in item:
             raise SystemExit(f"--level expects NAME=ELO, got {item!r}")
         name, value = item.split("=", 1)
@@ -196,9 +176,9 @@ def cmd_generate(args: argparse.Namespace) -> int:
     rules = Rules(num_players=args.num_players)
     levels = _resolve_levels(args.level)
     subjects = [
-        _parse_subject(item, levels) for item in (_expand(args.subject) or ["random"])
+        _parse_subject(item, levels) for item in (expand(args.subject) or ["random"])
     ]
-    anchors = _expand(args.anchor) or ["random", "greedy"]
+    anchors = expand(args.anchor) or ["random", "greedy"]
     for anchor in anchors:
         if anchor not in levels:
             raise SystemExit(
@@ -245,7 +225,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
                 trace_dir=subject_dir,
                 trace_index=index,
                 opponent=anchor,
-                print_fn=_silent,
+                print_fn=silent,
             )
         print(f"  {subject_id}: {args.games} games -> {subject_dir}")
 
@@ -283,98 +263,6 @@ def cmd_generate(args: argparse.Namespace) -> int:
 # -- S1 features -------------------------------------------------------------
 
 
-def extract_features(trace: dict[str, Any], *, verify: bool = True) -> dict[str, Any]:
-    """The S1 per-game feature row for the trace's subject (``human_seat``) seat.
-
-    Everything is read from the recorded steps; ``verify`` first re-runs the
-    trace through :func:`seven523.play.replay_trace`, the same strict path as
-    ``7g523-play --replay``, so a corrupted trace fails instead of feeding the
-    calibration silently.
-    """
-    if verify:
-        replay_trace(trace, print_fn=_silent)
-    rules = rules_from_json(trace["rules"])
-    catalog = catalog_for(rules)
-    pass_id = len(catalog) - 1
-    subject = int(trace["human_seat"])
-    steps = trace["steps"]
-    final = [int(value) for value in trace["final_scores"]]
-
-    tricks: list[dict[str, Any]] = []
-    subject_steps: list[dict[str, Any]] = []
-    leads = 0
-    leader = int(trace["initial"]["starter"])
-    for step in steps:
-        seat = int(step["seat"])
-        if seat == subject:
-            subject_steps.append(step)
-            if seat == leader:
-                leads += 1
-        if step["trick_over"]:
-            tricks.append(
-                {
-                    "winner": int(step["winner"]),
-                    "points": int(step["points"]),
-                    "dug": bool(step["dug"]),
-                }
-            )
-            leader = int(step["winner"])
-
-    total_tricks = len(tricks)
-    tricks_won = sum(1 for trick in tricks if trick["winner"] == subject)
-    won_no_dug = [
-        trick
-        for trick in tricks
-        if trick["winner"] == subject and not trick["dug"]
-    ]
-    trick_points_won = sum(trick["points"] for trick in won_no_dug)
-    pot_total = sum(trick["points"] for trick in tricks if not trick["dug"])
-    dug_trick = next((trick for trick in tricks if trick["dug"]), None)
-
-    def win_rate(part: Sequence[dict[str, Any]]) -> float:
-        if not part:
-            return math.nan
-        return sum(1 for trick in part if trick["winner"] == subject) / len(part)
-
-    cut1, cut2 = total_tricks // 3, (2 * total_tricks) // 3
-
-    decisions = len(subject_steps)
-    passes = sum(int(step["action"]) == pass_id for step in subject_steps)
-    bombs = sum(catalog[int(step["action"])].kind in BOMB_KINDS for step in subject_steps)
-
-    own = final[subject]
-    others = [score for seat, score in enumerate(final) if seat != subject]
-    best_other = max(others)
-    result = "win" if own > best_other else ("draw" if own == best_other else "loss")
-
-    def rate(numerator: float, denominator: float) -> float:
-        return numerator / denominator if denominator else math.nan
-
-    return {
-        "result": result,
-        "final_score_own": own,
-        "score_diff": own - sum(others) / len(others),
-        "tricks_total": total_tricks,
-        "tricks_won": tricks_won,
-        "trick_win_rate": rate(tricks_won, total_tricks),
-        "decisions": decisions,
-        "pass_rate": rate(passes, decisions),
-        "bomb_rate": rate(bombs, decisions),
-        "lead_rate": rate(leads, decisions),
-        "trick_points_won": trick_points_won,
-        "dug": int(dug_trick is not None),
-        "dug_won": int(dug_trick is not None and dug_trick["winner"] == subject),
-        "dug_points": int(dug_trick["points"]) if dug_trick is not None else 0,
-        "mean_points_per_won_trick": rate(trick_points_won, len(won_no_dug)),
-        "trick_point_share": rate(trick_points_won, pot_total),
-        "early_trick_win_rate": win_rate(tricks[:cut1]),
-        "mid_trick_win_rate": win_rate(tricks[cut1:cut2]),
-        "late_trick_win_rate": win_rate(tricks[cut2:]),
-        "first_trick_won": int(bool(tricks) and tricks[0]["winner"] == subject),
-        "decisions_per_trick": rate(decisions, total_tricks),
-    }
-
-
 def _opponent_info(
     trace: dict[str, Any], subject: int, levels: dict[str, float]
 ) -> tuple[str, float]:
@@ -394,15 +282,7 @@ def _feature_rows(
     study: Path, levels: dict[str, float], verify: bool
 ) -> tuple[list[dict[str, Any]], int]:
     study = Path(study)
-    paths = sorted(
-        path
-        for path in study.glob("*/*.json")
-        if path.name != "manifest.json"
-    )
-    if not paths:  # flat layout: human traces saved straight into the directory
-        paths = sorted(
-            path for path in study.glob("*.json") if path.name != "manifest.json"
-        )
+    paths = trace_paths(study)
     rows: list[dict[str, Any]] = []
     failed = 0
     for path in paths:
@@ -478,27 +358,6 @@ def _fold_ids(groups: Sequence[Any], folds: int, seed: int) -> np.ndarray:
     return np.array([fold_of[group] for group in groups], dtype=int)
 
 
-def _ridge_fit(
-    x: np.ndarray, y: np.ndarray, alpha: float
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
-    mean = x.mean(axis=0)
-    scale = x.std(axis=0)
-    scale = np.where(scale < 1e-12, 1.0, scale)
-    z = (x - mean) / scale
-    center = float(y.mean())
-    weights = np.linalg.solve(
-        z.T @ z + alpha * np.eye(x.shape[1]), z.T @ (y - center)
-    )
-    return mean, scale, weights, center
-
-
-def _ridge_predict(
-    model: tuple[np.ndarray, np.ndarray, np.ndarray, float], x: np.ndarray
-) -> np.ndarray:
-    mean, scale, weights, center = model
-    return ((x - mean) / scale) @ weights + center
-
-
 def _select_alpha(
     x: np.ndarray,
     y: np.ndarray,
@@ -513,8 +372,8 @@ def _select_alpha(
         predictions = np.empty_like(y)
         for index in range(folds):
             train = fold != index
-            model = _ridge_fit(x[train], y[train], alpha)
-            predictions[~train] = _ridge_predict(model, x[~train])
+            model = ridge_fit(x[train], y[train], alpha)
+            predictions[~train] = ridge_predict(model, x[~train])
         mse = float(np.mean((y - predictions) ** 2))
         if mse < best_mse:
             best_alpha, best_mse = float(alpha), mse
@@ -539,8 +398,8 @@ def _out_of_fold(
             alphas, folds, seed + index + 1,
         )
         alphas_used.append(inner)
-        model = _ridge_fit(x[train], y[train], inner)
-        predictions[~train] = _ridge_predict(model, x[~train])
+        model = ridge_fit(x[train], y[train], inner)
+        predictions[~train] = ridge_predict(model, x[~train])
     return predictions, alphas_used
 
 
@@ -710,8 +569,8 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         m_lo, m_hi = (SINGLE_GAME_SE / s_hi) ** 2, (SINGLE_GAME_SE / s_lo) ** 2
 
         full_alpha = _select_alpha(x, y, groups, alphas, args.folds, args.seed)
-        full_model = _ridge_fit(x, y, full_alpha)
-        fitted = _ridge_predict(full_model, x)
+        full_model = ridge_fit(x, y, full_alpha)
+        fitted = ridge_predict(full_model, x)
         r2 = 1.0 - float(np.sum((y - fitted) ** 2)) / float(np.sum((y - y.mean()) ** 2))
         rmse = float(np.sqrt(np.mean(residual**2)))
 
