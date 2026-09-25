@@ -24,9 +24,9 @@
 | W5 | `docs/experiments/wave5-500k-report.md` | §4.2、§5（结论与下一步） |
 | ALS | `docs/experiments/activation-loss-sweep-report.md` | §5（结论/限制）、§6（后续建议） |
 | EXPR | `docs/experiments/README.md` | §0（结论总表）、§1（索引）、§2（PENDING）、§3（命令与判定规则） |
-| DES | `DESIGN.md` | §7（训练计划）、§8（实施状态） |
+| DES | `DESIGN.md` | §7（训练计划）、§8（模块清单） |
 | TRN | `docs/training.md` | 评估/定级/开关口径 |
-| ADR-n | `docs/adr/0001`–`0008` | 约束与已决事项（见 §1.3）；0007=牌型族比较，重标定见 T15；0008=观测布局 v5（S1+B0+B1 默认、v4 前缀） |
+| ADR-n | `docs/adr/0001`–`0010` | 约束与已决事项（见 §1.3）；0007=牌型族比较，重标定见 T15；0008=观测布局 v5；0009=v5 与牌型族成为唯一实现（v1–v4 与 `tier` 回放退役）；0010=单一 owner 接缝 |
 
 二手引用（本路线图只转引上述来源对它们的一手引用，未直接通读）：`ladder-report.md`（LAD，经 SD §6 / W5 §1）、`trace-signal-report.md`（TSR，经 HEP §4 / HR §2）、`elo-breakthrough-report.md`（EBO，经 SD §0 / ALS §1 / W5 §1）。
 
@@ -36,7 +36,7 @@
 - **去重**：同一事项在多份报告出现时合并为一条并列出全部出处（例：逐局 JSONL、联合 Hessian、manifest refit、SAME_STEP、座位配对）。
 - **冲突已裁定（2026-09-25 文档治理）**：§7 的 7 处冲突已按各来源报告证据全局裁定并落地（§7 现为「裁定结果」表），本路线图不再有「待统一」项；不属 §7 的争议（refit 批准、spacing、牌堆 UX）已于 §4 裁决记录落地（2026-09-25），真人招募（D-3）等仍列 §4 等待 owner。
 - **交付更新（2026-09-25）**：`tournament-arena.md` 已定稿并归档进 §5；T1/T2/T3/T5/T6 结果均已回填（T5 C 为 null、T6 F 已关闭）、T13-M1–M3 已交付，§2 当前无 in-flight（T2 B0 null、T3 B1 未确认、T5 C 三效应 null、T6 F 不可分且更差，见各自现状）。
-- 代码状态核对截止本整理时刻（工作区有未提交改动；`tests` 口径 264 passed 见 EPV §4）。文中「现状」一栏以源码 grep 为准。
+- 代码状态核对截止本整理时刻（当前 `uv run --group train pytest -q` 收集 464 项）。文中「现状」一栏以源码 grep 为准。
 
 ## 1. 状态图例、使用说明与统一验收口径
 
@@ -66,7 +66,7 @@
 
 - 查阅计划先看 §3/§4；写结论回填时同步更新 `README §0/§1` 与对应报告，避免第二套真相。
 - 术语别名（C-3，2026-09-25 统一；完整表见 `experiments/README.md` §0.2）：**轨迹 S1** = HEP/HR 的逐墩轨迹特征（评分先验）；**观测 S1** = OS 的 103 维精简观测布局；同类加前缀——轨迹 S2（决策 regret）/ 轨迹 S3（策略一致度）、观测 S2（68 维，已否）。**裸 S1 视为歧义，不得用于新文本。**
-- 已决约束（ADR，不要重开）：ADR-0001 模板动作空间（134）；ADR-0002 唯一投影接缝 `Game.view`（差分泄漏测试兜底）；ADR-0003 gymnasium+torch 忠实移植（**SAME_STEP**）；ADR-0004 花色头 `MultiDiscrete([134,4])`；ADR-0005 `Match` 唯一对局驱动；ADR-0006 `elo.py` 评分接缝 + `ladder.py` 编排 + `study.py` manifest owner，结果似然是最终权威、轨迹先验只加速（ADR-0006 后果条款）；ADR-0007 牌型族比较（`"tier"` 变体仅回放旧 trace）；ADR-0008 观测布局 v5（默认 v5 = 观测 S1+B0+B1；v4 保留为逐位前缀；跨版本热启动按段级列重映射、不可映射方向显式拒绝）。
+- 已决约束（ADR，不要重开）：ADR-0001 模板动作空间（134）；ADR-0002 唯一投影接缝 `Game.view`（差分泄漏测试兜底）；ADR-0003 gymnasium+torch 忠实移植（**SAME_STEP**）；ADR-0004 花色头 `MultiDiscrete([134,4])`；ADR-0005 `Match` 唯一对局驱动；ADR-0006 `elo.py` 评分接缝 + `ladder.py` 编排 + `study.py` manifest owner，结果似然是最终权威、轨迹先验只加速（ADR-0006 后果条款）；ADR-0007 牌型族比较（`"tier"` 回放变体已随 ADR-0009 退役）；ADR-0008 观测布局 v5（v5 = 观测 S1+B0+B1）；ADR-0009 v5 与牌型族为唯一实现：v1–v4、`--obs-version`、段级列重映射与 `tier` 变体全部退役，旧 ckpt 必须重训；ADR-0010 单一 owner 接缝（`record`/spec 语法/manifest/`prior`/`metrics`/`league`/`placement/`）。
 
 ## 2. 进行中（in-flight）
 
@@ -78,89 +78,19 @@
 
 > 排序依据：SD §0 优先级表（A > B > C > F > D；E 仅组合）+ SD §2.5 的证伪逻辑（A 若 <10 Elo 则 B 升第一）+ 任务确定的统一验收口径（EPV §9）。评估工程（T9–T12）可与训练结构并行，不阻塞 A/B。
 
-### T1. 结构性 A：奖励重构（逐墩 telescoping ± 胜负臂）——证伪第一步
+> **已收束的实验轴 T1–T6 已归档进 §5，本节不再重复**：A 奖励重构（A1 未复现、A2/γ 消融）、B0 观测增广（`warm_start_into` 旧首层拷贝 + 新列置 0，null）、B1 已出牌历史（未确认）、T4 观测 S1/v5 迁移（已落地）、C 逐局对手 + PFSP（三效应 null）、F 双塔（负/关闭）。细节、数字与回填报告见 §5 对应行。
 
-| 字段 | 内容 |
-|---|---|
-| 目标 | A1 `trick_diff` 把终局回报沿时间重分配（`r_t=Φ(s_{t+1})−Φ(s_t)`，总和不变）；A2 `win` 终局改 ±1/0 对齐天梯似然；检验「信用分配/分差口径错位」假设 |
-| 依据 | SD §0、§2.1、§2.4、§2.5；W5 §5；EBO §5c（经 SD 引用） |
-| 依赖 | 无（obs/动作/ckpt 全部不动） |
-| 实现要点 | `env.py`：`reward_shaping: str`（`terminal/trick_diff/win/trick_diff_win`）+ `_potential()`（同 `returns()` 式子）；`train.py` `--reward-shaping` 并透传 `make_env`；测试：A1 一局塑形奖励和==终局回报（含撬底局）、默认模式逐位等于旧行为、非零步比例 ~10× |
-| 成本 | ~50 LOC + 3–4 测试；500k ≈ 6 min/臂（~1370 SPS）；3×400 h2h ≈45 s/对 |
-| 验收 | 母版协议（500k、greedy、seed 1，SAME_STEP）；A1/A2 分开跑，A1 内附 `--gamma 1.0` 消融；机制检查：训练 EV + 离线复测分桶 EV（目标 0.065 → >0.3，SD §1.1/§2.4）；主端点 3 seed × 400 vs `base680k` 与 `w5_ctrl`；判定按 §1.2；若 500k 后 Δ<10，则「信用分配」假设被否、B 升第一 |
-| 现状 | **✅ 已完成/收束（2026-09-25）**：`reward_shaping` 四模式已实现并 500k ×3 臂跑完（A1/A1γ1/A2）；A1 的 seed 1 四个 h2h 比较 CI 全排 0（+9.99…+12.75），但补训 seed 2/3/4 后**未复现**（4-seed 平均 +4.47/+6.77，8 个比较仅 seed 1 的两个 CI 排 0）→ 按 <10 不追口径 **A 独立杠杆收束**；γ1 不优、A2 null；D0/D2 critic 判别不干净支持 H1/H0。结果回填 [`experiments/reward-shaping-500k.md`](./experiments/reward-shaping-500k.md)；后续 B 线（T2/T3）与 C 线（T5）也均已完成（B0 null、B1 未确认、C 三效应 null）；下一优先见 §8（T6 F） |
-
-### T2. 结构性 B0：观测增广（3 维点分量，先做）
-
-| 字段 | 内容 |
-|---|---|
-| 目标 | 只加 `View` 可推的量：当前墩分 / 剩余分 / 手牌分，obs 191 → 194；最便宜的信息下注 |
-| 依据 | SD §3.2（B0）、§3.5 |
-| 依赖 | 与 T3/T4 共用「编码器版本 + 热启动列填充」设计（否则旧 ckpt 推理/热启动形状报错，SD §3.3） |
-| 实现要点 | `_SEGMENTS` 只追加 3 段 + `encode_observation`；`NeuralPolicy` 按 `agent.obs_dim` 截断旧向量；`save_agent` 写 `obs_schema`/版本；`warm_start_pad_features`（旧首层权重拷贝、新列置 0）——这一层与 T3/T4 合并实现一次 |
-| 成本 | 3 维本身极小；兼容层合并计（见 T3/T4）；500k ≈6 min/臂 |
-| 验收 | B0 与 B1 分臂；3 seed × 400 vs `base680k`；B0 vs B1 同牌直接对比；若 <10 Elo 需 1500+ 副牌才可定性（SD §3.4） |
-| 现状 | **✅ 完成（null，2026-09-25）**：`obs_version=2`（191→194，`trick_points`/`remaining_points`/`point_hold`）+ 版本化兼容层已实现，500k run `runs/t2_b0__1__1790330513` 跑满 499,712 步；h2h 3×400 vs `base680k` +1.74 [−7.94,+11.42]、vs `w5_ctrl` +4.92 [−6.72,+16.56] 均跨 0 → 不单独采用；兼容层保留；T3/B1 后续已完成（未确认，见 T3 现状）。回填 [`experiments/observation-augmentation-b0.md`](./experiments/observation-augmentation-b0.md) |
-
-### T3. 结构性 B1：已出牌历史 + unseen + last_player（主力）
-
-| 字段 | 内容 |
-|---|---|
-| 目标 | 补平均 24.7 张（最多 54）已打掉且观测不可见的牌：`unseen` 54 维（54 − 手牌 − 亮牌 − played − 当前墩）+ `last_player` 1 维；obs 191 → 249（与 B0 合计 +58） |
-| 依据 | SD §1.2、§3.2（B1）、§3.3 |
-| 依赖 | T2 的兼容层；引擎加公开历史（`GameState.played`、`View.played`）、`trace` 恢复补 `played=()` |
-| 实现要点 | `game.py:_end_trick` 累积 `played`；`env.py` 新段；`trace.py` 不受影响；扩 ADR-0002 差分泄漏测试（只编码公开可推量）；B1 内可叠 hidden 256 一臂（不算独立轴） |
-| 成本 | ~120 LOC + 测试；500k ≈6 min/臂 |
-| 验收 | 泄漏测试：「仅隐藏字段不同」的两个 state → 公开字段/`View`/obs 逐位相同；3 seed × 400 vs `base680k`；组合臂 B0+B1；与 T4 的组合布局：观测 S1+B0=106、观测 S1+B0+B1=161（OS §3.4） |
-| 现状 | **✅ 完成（未确认，2026-09-25）**：v3 实现（`OBS_VERSION=3`，`unseen`/`last_player`，243+3n = v2+55）+ 引擎 `played` 公开历史已落地并测试（355 passed）；500k run `runs/t3_b1__1__1790331840` 跑满 499,712 步、无 NaN；h2h 3×400 主端点 vs `base680k` +4.20 [−6.75,+15.15]（CI 跨 0、点估计 <+10 → 失败）、vs `w5_ctrl` +13.04 [+1.93,+24.15]、相对 B0 +0.73 [−18.98,+20.43]（增量 ≈0）→ **未确认、不采用**；单训练 seed、seed 间方差大。回填 [`experiments/observation-augmentation-b1.md`](./experiments/observation-augmentation-b1.md) |
-
-### T4. 观测 S1 103 维精简（工程支撑；优先级低于增广）
-
-| 字段 | 内容 |
-|---|---|
-| 目标 | 按信息无损重编码把 191 压到 103（删 `rank_counts` ⊂ `hand`、`current` 常量、自身 `hand_counts`；`incumbent_top`/`revealed` 54→19 rank+suit；自中心旋转）；首层参数 −46%、总参数 −19.1%；**为 B 腾出输入预算** |
-| 依据 | OS §3.1、§5.3、§6、§7；组合空间见 OS §3.4 |
-| 依赖 | 与 T2/T3 共用 `obs_version` 兼容层（建议一次做完：`_SEGMENTS_V2` + `observation_dim(..., version)` + ckpt `obs_version` + `--obs-version` + 工具按 ckpt dispatch；约 100–150 LOC，OS §6 兼容方案 A）；**D-4 前提已满足（B0/B1 已定稿，2026-09-25）：与增广一次性合并已可执行，不先单独动默认值** |
-| 实现要点 | 保留 v1 不动；旧 ckpt 无字段→v1，行为逐位不变；跨版本 `--load-checkpoint` 明确拒绝或只拷 trunk；测试参数化 191/`185+3n`/差分泄漏 |
-| 成本 | 100–150 LOC + 测试；200k 从零 ≈3–4 GPU-min/run（OS §7.3） |
-| 验收 | 200k pilot 已做：观测 S1 vs full 合并 **+4.4 [−18.3,+27.0]**（不损失可分辨强度）、观测 S2 68 维落后 ~15 Elo（OS §5.2/§5.3）；「无损失」声称需 **≥3 training seed × 3 deal seed**（已做过）；「有提升」需 ≥1500 副牌（OS §7.3）；`rank_counts` 可选保留 118 维仅在 500k 追认出现样本效率问题时回退 |
-| 现状 | **✅ 已实施 v5（2026-09-25）**：默认观测切 **v5 = 观测 S1+B0+B1（`119+21n`，2 家 161）**，同时落地 **v4 = 观测 S1+B0（`64+21n`，2 家 106）** 作为 v5 的逐位前缀；v1–v3 全部兼容保留，`NeuralPolicy` 按 ckpt `obs_version` 推理，跨版本热启动走段级列重映射、不可映射方向显式拒绝（决策与兼容契约见 [ADR-0008](./adr/0008-observation-layout-v5.md)；实现记录见 [observation-slimming.md](./experiments/observation-slimming.md)「落地记录（2026-09-25）」）。组合臂的 500k warm-start 验收协议见 OS 实现分析 §5 |
-
-### T5. 结构性 C：逐局对手 + PFSP + 至少一个 ≥学习者的对手
-
-| 字段 | 内容 |
-|---|---|
-| 目标 | 把「联赛」做真：(i) 逐局选成员（非逐决策重抽）；(ii) 按实测胜率 PFSP 加权 `w_i ∝ (1−wr_i)² + ε` 混均匀；(iii) 池内至少一个 ≥ 学习者（采样版 base680k / Greedy 变体 / 1-ply 价值搜索 bot） |
-| 依据 | SD §1.3、§4.1–§4.4、§10 Q2；W5 §5；EBO §2/§5d（经 SD 引用） |
-| 依赖 | 无训练侧前置；强对手候选可先只读测强度再入池；与 T12 的 PFSP 权重接口对接 |
-| 实现要点 | `policies.py` 新增 `EpisodeMixturePolicy`（`start_episode()` 冻结本局成员、暴露 `current_id/finished_id`）；`env.reset` 调 `start_episode`；`train.py` 按 env/seat 记录 `(member_id, outcome)`、每 K 局重算权重、Beta 先验收缩；测试逐局不变/权重单调/关闭 PFSP 时光滑等价 |
-| 成本 | ~200 LOC；500k ≈11–12 min/臂（746 SPS） |
-| 验收 | 臂 `C_u`（逐局均匀，控制）/`C_p`（+PFSP）/`C_s`（+强成员）；主端点 `C_p vs C_u`、`C_s vs C_u`、各自 vs `base680k`，均 3 seed × 400；**池外对手**（greedy + 未入池强成员）胜率检查防过拟合；`\|Δ\|<10` 且 CI 重叠判 null；`w5_pool4g` 只能当反面参照，不能当控制 |
-| 现状 | **✅ 完成（null）2026-09-25**：`EpisodeMixturePolicy`（逐局冻结）+ `pfsp_weights`（每 K=100 局 `w∝(1−wr)²+ε`、Beta(prior=10) 收缩、平局计半、与均匀 0.5 混合）+ `--pool-episode/--pfsp*` 开关已实现（T5 新增 17 项测试，当时全套 372 passed）；三臂 500k（`C_u` 逐局均匀 / `C_p` +PFSP / `C_s` +强成员 `base680k`；obs v1、seed 1、499,712 步、无 NaN；`runs/t5_*__1__1790332696`）；h2h 3×400 的 8 个比较 CI 全含 0、点估计 \|Δ\|≤7（PFSP 效应 `C_p−C_u` +1.88 [−17.93,+21.69]、强成员效应 `C_s−C_u` +2.90 [−17.32,+23.12]）→ 逐局冻结/PFSP/强成员三效应 **null**；Greedy 1500 62.5–63.4% 平台带内。结果回填 [`experiments/opponent-distribution-500k.md`](./experiments/opponent-distribution-500k.md) |
-
-### T6. 结构性 F：独立 actor/critic 双塔
-
-| 字段 | 内容 |
-|---|---|
-| 目标 | `arch="towers"` 两个同规格 MLP，消除共享主干的 policy/value 梯度干扰；必须隔离变量（主臂＝双塔+ReLU；「双塔+Tanh」只作附加臂） |
-| 依据 | SD §0（第 4 序）、§6A；PAA §4.2（A5 是有意偏差） |
-| 依赖 | 无；建议在 A/B 出结果后投（低预期、低成本、可证伪） |
-| 实现要点 | `networks.py:Agent(arch=)` + `save/load_agent` 加 `arch` + `warm_start_into` 跨架构拷贝（shared→towers 拷两份、towers→shared 取 actor 塔并注明）；`train.py --arch`；测试 forward/replay/ckpt 往返与旧 ckpt 缺省 shared |
-| 成本 | ~40–60 LOC + 测试，半天；~6 min/臂 |
-| 验收 | 3 seed × 400 vs `base680k` 与 `w5_ctrl`；附加从零 500k towers 对照（对 `w5_scratch 1412.4`）；机制检查 policy/value loss 与梯度范数、早期分桶 EV；若不可分或更差，明确关闭「架构忠实度」线 |
-| 现状 | **✅ 完成（负 / 关闭）2026-09-25**：`arch="towers"` + 跨架构热启动 + `--arch` 已实现（+13 测试；全套 418 passed）；三臂 500k（obs v1、seed 1、499,712 步、无 NaN，`runs/t6/health.json`）与 6 组 h2h 3×400 跑完：主臂 vs `base680k` −9.13 [−20.57,+2.31]、vs `w5_ctrl` +5.21 [−5.93,+16.36]（不可分），交互臂 vs A1 **−15.51 [−27.10,−3.92]**、从零 vs `w5_scratch` **−20.89 [−33.81,−7.97]**；梯度 `cos(g_pol,g_val)=+0.049` 证伪干扰前提、critic 照旧塌缩 → 按 SD §6A.5 **关闭「架构忠实度」线**（不做 E/Tanh）。结果回填 [`experiments/twin-towers-500k.md`](./experiments/twin-towers-500k.md) |
-
-### T7. 结构性 D：>2 家训练（低优先，前置工程重）
+### T7. 结构性 D：>2 家训练（未来工作；低优先，前置工程重）
 
 | 字段 | 内容 |
 |---|---|
 | 目标 | 多人博弈的结构性改变；唯一产品价值在「跨 N 统一 obs 后迁回 2 家」 |
 | 依据 | SD §1.5、§5、§9.8、§10 Q6 |
-| 依赖 | 热启动修 obs_dim 分支 → 座席轮换（learner=`i%N`）→ N 家评估（`plan_games`/`fit_ratings`/`duel` 泛化、多人 Elo 或 Plackett-Luce）→ 跨 N 统一 obs（per-player 段固定到 max_players + seat mask）→ `build_ladder --num-players` |
-| 实现要点 | `train.py:357-366` 先比 `obs_dim` 再走列填充；`ladder.py:135-141`、`elo.py:246-249`、`duel.py:149-150`、`tools/build_ladder.py:256` 的 2 家硬编码逐项泛化 |
+| 依赖 | 热启动跨玩家数分支（现为显式拒绝）→ 座席轮换（learner=`i%N`）→ N 家评估（`plan_games`/`fit_ratings`/`duel` 泛化、多人 Elo 或 Plackett-Luce）→ 跨 N 统一 obs（per-player 段固定到 max_players + seat mask）→（未来新增）`build_ladder --num-players` |
+| 实现要点 | `train.py` 热启动当前对 `obs_dim` 不同直接抛 `WarmStartLayoutError`（需改为按玩家数分支）；`ladder.plan_games`、`elo.fit_ratings`、`duel.plan_duel_schedule`、`tools/build_ladder.py` 的 2 家硬编码逐项泛化 |
 | 成本 | ~300–500 LOC（含评估）；3 家训练 20–40 min/臂 |
 | 验收 | 先内部 N 家相对端点；**产品端点是迁回 2 家 vs `base680k` 3×400**；无跨 N 统一 obs 则只作独立研究项、不进产品优先级 |
-| 现状 | 3 家 PPO 冒烟可跑；2 家 ckpt 热启动到 3 家 **RuntimeError**（`obs_dim 191→194`）；评估链固定 2 家 |
+| 现状 | 3 家 PPO 冒烟可跑（`--num-players 3`）；2 家 ckpt 热启动到 3 家被 **`WarmStartLayoutError`** 显式拒绝（2 家 161 → 3 家 182）；评估链固定 2 家；`tools/build_ladder.py` 目前**没有** `--num-players` 开关（属本项未来工作） |
 
 ### T8. 结构性 E：容量/更长预算组合（条件项，不单列）
 
@@ -227,10 +157,10 @@
 | 目标 | 轨迹先验 + 结果似然的 BT-MAP 定级：10 局输出「点估计 + 诚实 CI + 最近档 + provisional」，后台继续对局直到 CI≤50 |
 | 依据 | HEP 顶部修订节（M1–M4、改动计划、不做清单）；HR §5（估计器规格）、§8（实现映射）、§9（验证计划）。**默认标签基准 = T2/去收缩标定（HR §1/§5.2），不是 manifest T1**；T1 仅作历史/契约引用（refit 前带相位偏移；2026-09-25 已 refit，见 LRP §4.4），新标定与 D3 先验不得以 T1 为目标 |
 | 依赖 | **真人标定是硬前置**（≥8 人、10 局定级 + 60–100 局参考局，HR §9.1）；**manifest refit 已执行（2026-09-25，LRP §4.4）**——先验仍默认 T2/去收缩标定（HR §5.2），不要改用 manifest T1 直接取数（HEP 修订节前置） |
-| 实现要点 | M1 `tools/fit_trace_prior.py` + `artifacts/human-elo/prior.json`（岭回归 + 去收缩 `(a,b)` + `σ_traj(n)` 表，默认 LOLO+去收缩）；M2 `src/seven523/placement.py`（会话状态 + `select_opponent` info/Thompson + 10 副不同牌 + 5/5 座位轮换调度 + 逐局座位写入 trace + 停止规则 + 报告）；M3 `7g523-elo` CLI（`pyproject.toml [project.scripts]`）+ `play.py` 把对手 rung id 写进 `players` 标签（现仅 `"贪心 bot"`）；M4 真人试点。`elo.py` 数学不改；轨迹 S2 逐决策 regret 模块与轨迹 S3 评分不做 |
+| 实现要点 | M1 `tools/fit_trace_prior.py` + `artifacts/human-elo/prior.json`（岭回归 + 去收缩 `(a,b)` + `σ_traj(n)` 表，默认 LOLO+去收缩）；M2 `src/seven523/placement/`（包：会话状态 + `select_opponent` info/Thompson + 10 副不同牌 + 5/5 座位轮换调度 + 逐局座位写入 trace + 停止规则 + 报告）；M3 `7g523-elo` CLI（`pyproject.toml [project.scripts]`）+ `play.py` 把对手 rung id 写进 `players` 标签（现已写 `anchor:greedy@seatN` / `opponent:<id>@seatN`），支持 bot/checkpoint/NeuralPolicy；M4 真人试点。`elo.py` 数学不改；轨迹 S2 逐决策 regret 模块与轨迹 S3 评分不做 |
 | 成本 | M1 1 天；M2 1 天；M3 0.5 天；M4 2–3 天 |
 | 验收 | M1/M2/M3：`select_opponent` Fisher/单调性单测、`fit_trace_prior` 留一等级标定回归（锁定 `(a,b)`/`σ_traj` 表）、CLI 冒烟；M4 按 HR §9.1：一半真人标定、一半评估，报 RMSE / P50 / P100 / CI 覆盖率 / 最近档命中。预期（HR §7.1/§10）：10 局 RMSE 54–72、P100 83–93%、CI ±100–133；**不要把 10 局标成 ±50** |
-| 现状 | **M1 ✅ 完成（2026-09-25）**：`tools/fit_trace_prior.py` + `artifacts/human-elo/prior.json`（默认 T2 标签，sha256 `1895af98…`）与对照 `prior_manifest_labels.json`（`78e3535c…`）+ 6 项测试（`tests/test_fit_trace_prior.py`）；**M2 ✅ / M3 ✅（2026-09-25）**：`src/seven523/placement.py`（会话编排 + `main`，24 测试）、`7g523-elo` CLI + `play.py` rung 标签（+3 测试）、冒烟 `定级：1287 ± 182，最近档 greedy（1315），provisional`（`traces/sessions/smoke_m23/`），全套 418 passed，`elo.py` 零改动（sha256 `80641f13…`）；M4 真人试点**等 D-3**。结果回填 [`experiments/trace-prior-m1.md`](./experiments/trace-prior-m1.md) / [`experiments/placement-m2m3.md`](./experiments/placement-m2m3.md) |
+| 现状 | **M1 ✅ 完成（2026-09-25）**：`tools/fit_trace_prior.py` + `artifacts/human-elo/prior.json`（默认 T2 标签，sha256 `1895af98…`）与对照 `prior_manifest_labels.json`（`78e3535c…`）+ 6 项测试（`tests/test_fit_trace_prior.py`）；**M2 ✅ / M3 ✅（2026-09-25）**：`src/seven523/placement/`（包：会话编排 + `main`；全套 464 passed）、`7g523-elo` CLI + `play.py` rung 标签（+3 测试）、冒烟 `定级：1287 ± 182，最近档 greedy（1315），provisional`（`traces/sessions/smoke_m23/`），`elo.py` 零改动（sha256 `80641f13…`）；M4 真人试点**等 D-3**。结果回填 [`experiments/trace-prior-m1.md`](./experiments/trace-prior-m1.md) / [`experiments/placement-m2m3.md`](./experiments/placement-m2m3.md) |
 
 ### T14. PPO 审计剩余小项（防御性）
 
@@ -266,13 +196,13 @@
 | D-1 | **manifest refit** | 换座配对 5 seed 复测：lvl4 旧 1489.4 → 合并 **1429.7 ±7.1**（高估 ~60）、lvl1 1146.3（低估 ~26）；步骤见 LRP §4.2（多 seed → combined fit + 不确定性 → 写 scratch study → 批准同步 → spacing 另案） | **D1/study owner 批准**（LRP §4.2 step 4；ERA §5.4；`study.py` 默认冻结） | ✅ **已执行（2026-09-25，LRP §4.4）**：备份 `runs/archive/manifest-frozen-2026-09-25.json`；后续 D1 重标定（`trace-signal-report` 数字重跑）依赖 D-3 |
 | D-2 | **spacing 契约如何处置** | 实测合并间距 **73 / 144 / 66**（旧 113/126/130）；`select_rungs` 5/5 seed 只选出 lvl1、lvl3 两个 rung，`ok=False`；D1 需要的是单调等级而非均匀 100–150 | 方案：接受实测间距 / 补测一个 ~1290 的 rung 填缝；**不要为满足 spacing 调标签**（LRP §4.2 step 5） | ✅ 已按此写入 refit manifest（`rungs` = lvl1/lvl3，LRP §4.4） |
 | D-3 | **真人试点招募** | ≥8 人、覆盖 1000–1600；每人 10 局定级（冻结牌堆 + twin 座位 + 自适应选档）+ 60–100 局参考局；一半标定一半评估 | study owner / 产品（HR §9.1；HEP 里程碑 M4） | 阻塞 D3 上线与真人 OOD 校正 |
-| D-4 | **观测 S1 103 是否实施、何时** | OS 结论：值得做但优先级低于增广；与 B 的组合布局（观测 S1+B0=106、观测 S1+B0+B1=161）需一次定稿 | 工程/训练 owner（OS §7；本文件 §3 T2–T4） | ✅ **已裁定并实施（2026-09-25）：选观测 S1+B0+B1 = v5 = `119+21n`（2 家 161）为默认**；v4 = 观测 S1+B0 = `64+21n`（2 家 106）作为逐位前缀中间版本保留；v1–v3 兼容；热启动段级列重映射与拒绝集见 [ADR-0008](./adr/0008-observation-layout-v5.md) |
+| D-4 | **观测 S1 103 是否实施、何时** | OS 结论：值得做但优先级低于增广；与 B 的组合布局（观测 S1+B0=106、观测 S1+B0+B1=161）需一次定稿 | 工程/训练 owner（OS §7；本文件 §3 T2–T4） | ✅ **已裁定并实施（2026-09-25）：选观测 S1+B0+B1 = v5 = `119+21n`（2 家 161）为默认**；v4/v1–v3 与热启动重映射随后在架构清理中退役（[ADR-0009](./adr/0009-single-observation-and-comparison.md)） |
 | D-6 | **10 局牌堆 UX** | **✅ 已裁定（2026-09-25）：选 (b)**；代价：保留座位相位残差，10 局精度可能略差于研究 (a) 口径；human-elo 计划 M2 需按轮换调度更新（背景：冻结 twin 相位干净但只见 5 副；轮换体验好但留残差） | 产品/研究（HR §6.3；HEP 修订节）；owner 2026-09-25 裁定 | 阻塞 M2 调度与真人试点设计：M2 按 (b) 更新 |
 | D-7 | **`rank_counts` 118 维可选臂** | 仅当 500k 追认出现样本效率问题时回退；观测 S1 已证不必要 | 工程（OS §7.1） | 不阻塞 |
 
 > D-5（统一判定阈值）已于 2026-09-25 按 EPV §6/§9 证据裁定并回填（见 §7 C-1）；不再属待决，原编号保留以免交叉引用悬空。
 >
-> **裁决记录（2026-09-25，owner）**：D-1 ✅ **已执行（2026-09-25）**（按 LRP §4.2 分阶段：scratch candidate → 备份冻结 manifest → 覆盖，见 LRP §4.4）；D-2 ✅ **接受实测间距 73/144/66**（不为凑 spacing 调标签）；D-3 ⏸ **暂缓**（真人招募；D3 上线顺延）；D-4 ✅ **已裁定并实施（2026-09-25）**：默认切 v5 = 观测 S1+B0+B1 = `119+21n`（2 家 161），v4 = 观测 S1+B0 = `64+21n`（2 家 106）作为逐位前缀保留；一次迁移包含 v1–v5 兼容与 warm-start 段级列重映射（不可映射方向显式拒绝），见 [ADR-0008](./adr/0008-observation-layout-v5.md)；D-6 ✅ **(b)**（10 副不同牌 + 5/5 座位轮换；选项与代价见下）；D-7 ✅ **关闭：坚持观测 S1 103 维**（`rank_counts` 118 仅作 500k 追认的应急回退）。
+> **裁决记录（2026-09-25，owner）**：D-1 ✅ **已执行（2026-09-25）**（按 LRP §4.2 分阶段：scratch candidate → 备份冻结 manifest → 覆盖，见 LRP §4.4）；D-2 ✅ **接受实测间距 73/144/66**（不为凑 spacing 调标签）；D-3 ⏸ **暂缓**（真人招募；D3 上线顺延）；D-4 ✅ **已裁定并实施（2026-09-25）**：默认切 v5 = 观测 S1+B0+B1 = `119+21n`（2 家 161）；随后的架构清理把 v1–v4、跨版本热启动重映射与 `tier` 回放变体一并退役（[ADR-0009](./adr/0009-single-observation-and-comparison.md)）；D-6 ✅ **(b)**（10 副不同牌 + 5/5 座位轮换；选项与代价见下）；D-7 ✅ **关闭：坚持观测 S1 103 维**（`rank_counts` 118 仅作 500k 追认的应急回退）。
 
 > **D-6 说明（2026-09-25 已裁定 (b)）**：10 局真人定级的牌堆/座位调度。(a) **冻结牌堆 twin**：5 副牌 × 双座位 = 10 局；座位相位在牌内抵消，评分干净；代价是玩家会重复看到同样 5 副牌。(b) **10 副不同牌 + 5/5 轮换**：体验更自然，但留座位相位残差（审计实测跨序 sd≈√2×SE，10 局下不可忽略）。(c) **双模式**：体验局用轮换牌、计分局只用冻结 twin，评分标 provisional。研究口径（HR §6.3）倾向 (a)。**owner 裁定 (b)**：保留座位相位残差，10 局精度可能略差于 (a) 口径；human-elo 计划 M2 需按轮换调度更新。
 
@@ -289,13 +219,14 @@
 | 激活/损失/LR 扫描（wave4，12 run）：全部不赢；tanh 显著更差 | ALS §5 |
 | wave5 统一 500k 六臂：全部不可分；父模型跨 seed sd=37、父子偏移翻符号 | W5 §4.2/§5 |
 | 结构性 A / T1：奖励重构（`reward_shaping` 四模式 + A1/A1γ1/A2 各 500k + 4 组 h2h + 机制探针 + seed 2/3/4 复现 + D0/D2 判别；seed 1 正信号未复现、A 线收束） | [`experiments/reward-shaping-500k.md`](./experiments/reward-shaping-500k.md) §1–§7；SD §2.5 |
-| 结构性 B / T2 B0：观测增广 3 维 + 版本化兼容层（191→194，测试通过；500k null、h2h 均跨 0；兼容层保留） | [`experiments/observation-augmentation-b0.md`](./experiments/observation-augmentation-b0.md) §1–§7；SD §3.2/§3.4 |
-| 结构性 B / T3 B1：已出牌历史 + `unseen` + `last_player`（v3=v2+55、2 家 249；355 passed；500k 499,712 步；主端点 h2h vs `base680k` +4.20 [−6.75,+15.15] 跨 0 → 未确认；B 线收束） | [`experiments/observation-augmentation-b1.md`](./experiments/observation-augmentation-b1.md) §1–§8；SD §3.2–§3.5 |
-| 观测布局 v5/v4 落地：默认 v5 = 观测 S1+B0+B1 = `119+21n`（2 家 161），v4 = 观测 S1+B0 = `64+21n`（2 家 106）为逐位前缀；v1–v3 兼容；段级列重映射热启动与不可映射方向拒绝 | [ADR-0008](./adr/0008-observation-layout-v5.md)；OS 实现分析 §1–§4 +「落地记录（2026-09-25）」 |
+| 结构性 B / T2 B0：观测增广 3 维 + 版本化兼容层（191→194，测试通过；500k null、h2h 均跨 0；兼容层当时保留，后随 [ADR-0009](./adr/0009-single-observation-and-comparison.md) 退役） | [`experiments/observation-augmentation-b0.md`](./experiments/observation-augmentation-b0.md) §1–§7；SD §3.2/§3.4 |
+| 结构性 B / T3 B1：已出牌历史 + `unseen` + `last_player`（v3=v2+55、2 家 249；当时 355 passed；500k 499,712 步；主端点 h2h vs `base680k` +4.20 [−6.75,+15.15] 跨 0 → 未确认；B 线收束） | [`experiments/observation-augmentation-b1.md`](./experiments/observation-augmentation-b1.md) §1–§8；SD §3.2–§3.5 |
+| 观测布局 v5/v4 落地：默认 v5 = 观测 S1+B0+B1 = `119+21n`（2 家 161），v4 = 观测 S1+B0 = `64+21n`（2 家 106）为逐位前缀；v1–v3 兼容；段级列重映射热启动与不可映射方向拒绝（v4/v1–v3 与重映射后随 [ADR-0009](./adr/0009-single-observation-and-comparison.md) 退役，v5 成为唯一布局） | [ADR-0008](./adr/0008-observation-layout-v5.md)；OS 实现分析 §1–§4 +「落地记录（2026-09-25）」 |
 | 结构性 C / T5：逐局对手 + PFSP + 强成员（`EpisodeMixturePolicy`/`pfsp_weights`/`--pfsp*`，+17 测试；三臂 500k `runs/t5_*__1__1790332696`；8 个 h2h 3×400 CI 全含 0、PFSP +1.88、强成员 +2.90 → 三效应 null） | [`experiments/opponent-distribution-500k.md`](./experiments/opponent-distribution-500k.md) §1–§8；SD §4 |
 | T13-M1：轨迹 S1 先验 `tools/fit_trace_prior.py` + `artifacts/human-elo/prior.json`（T2 默认：a=−890.92、b=1.7122、σ(5/10/20)=80.6/69.6/64.6、LOLO RMSE 133.9；manifest 对照；6 项测试） | [`experiments/trace-prior-m1.md`](./experiments/trace-prior-m1.md)；HEP 里程碑 M1；HR §5.2；ADR-0006 |
-| 结构性 F / T6：独立 actor/critic 双塔（`arch`/跨架构热启动/`--arch`，+13 测试、418 passed；三臂 500k `runs/t6_*__1__1790334485`；h2h 主臂不可分、交互臂 −15.51 vs A1、从零 −20.89 vs `w5_scratch`；梯度 cos +0.049、critic 仍塌缩 → 关闭该线） | [`experiments/twin-towers-500k.md`](./experiments/twin-towers-500k.md) §1–§8；SD §6A.5 |
-| T13-M2/M3：10 局定级会话 + `7g523-elo` CLI（`placement.py` + 24 测试；`play.py` rung 标签 +3 测试；`elo.py` 零改动；冒烟 1287 ± 182/最近档 greedy/418 passed；M4 等 D-3） | [`experiments/placement-m2m3.md`](./experiments/placement-m2m3.md)；HEP 里程碑 M2/M3；HR §5/§8 |
+| 结构性 F / T6：独立 actor/critic 双塔（`arch`/跨架构热启动/`--arch`，+13 测试、464 passed；三臂 500k `runs/t6_*__1__1790334485`；h2h 主臂不可分、交互臂 −15.51 vs A1、从零 −20.89 vs `w5_scratch`；梯度 cos +0.049、critic 仍塌缩 → 关闭该线） | [`experiments/twin-towers-500k.md`](./experiments/twin-towers-500k.md) §1–§8；SD §6A.5 |
+| T13-M2/M3：10 局定级会话 + `7g523-elo` CLI（`placement/` 包；全套 464 passed；`play.py` rung 标签 +3 测试；`elo.py` 零改动；冒烟 1287 ± 182/最近档 greedy；M4 等 D-3） | [`experiments/placement-m2m3.md`](./experiments/placement-m2m3.md)；HEP 里程碑 M2/M3；HR §5/§8 |
+| 架构清理（2026-09-25，phase 2–7b）：单一观测 v5 + 单一牌型族比较（ADR-0009；v1–v4/`--obs-version`/段级重映射/`tier` 变体退役），单一 owner 接缝（ADR-0010：`record` 批量录制、`policies` spec 语法、`study` manifest writer、`prior` 核心上移、`metrics`/`league` 拆出 `train`、`ladder.play_games` 分片接口、`placement/` 包拆分）；`train.py` 877→668 行；全套 464 passed | [ADR-0009](./adr/0009-single-observation-and-comparison.md)/[ADR-0010](./adr/0010-single-owner-seams.md)；DES §1/§8 |
 | 观测精简静态审计 + 敏感性消融 + 200k 从零 pilot（观测 S1 不损失、观测 S2 落后） | OS §2–§5 |
 | 新评估口径独立验证（座位配对/聚簇 bootstrap/√N/功率） | EPV §0/§5/§6/§9 |
 | 锦标赛竞技场（W=1 vs W>1 逐位一致；6 worker 22,620 局 37.8s；bf16 实测无收益已移除；两 seed 排名 ρ=0.54 → 单 seed 排名不可靠；进度曲线 lvlbase ~184k 后平台、lvlsp 全程平） | TA §0/§2/§5/§6 |
@@ -307,7 +238,7 @@
 | M2 机器人阶梯（lvl1–lvl4 训练/评级/manifest 冻结） | LAD §2（经 LRP §2 引用）；DES §8 |
 | `--cross>0` 联合 Hessian 修复（历史 stageB ±4.8 不可复用，已记录） | ERA §2.3；EPV §4/§8 |
 | ADR-0006 评分接缝 + `study.py` manifest owner；wave1–4 run 归档 tarball | ADR-0006；DES §8；W5 头部 |
-| 测试面：座位配对/JSONL/合并/联合 Hessian/激活兼容等回归；套件 264 passed | EPV §4；DES §8（263 基线） |
+| 测试面：座位配对/JSONL/合并/联合 Hessian/激活兼容等回归；当前全套 464 passed | EPV §4；`uv run --group train pytest -q` |
 
 ## 6. 已否决 / 不要再做（负结果清单）
 
@@ -364,12 +295,12 @@
   T12 arena 周期性定级 + PFSP 权重（T5 已用对局胜率版；arena Elo 接入未做）
 
 工程支撑线（并行）
-  obs_version 兼容层（T2/T3/T4 共用一次设计）→ T4 观测 S1 迁移 ✅ 已实施 v5/v4（2026-09-25；ADR-0008）
+  v5 观测迁移 ✅ 已收口为唯一布局（2026-09-25；v1–v4/重映射/`tier` 变体已退役，ADR-0009）
   T14 PPO 防御性小项（不期待 Elo）
 
 人类定级独立轨（受真人数据门控）
   T13 M1 fit_trace_prior（T2/去收缩标定）✅ 已完成 2026-09-25（experiments/trace-prior-m1.md）
-        → M2 placement ✅ + M3 CLI/play.py rung 标签 ✅（2026-09-25，experiments/placement-m2m3.md）
+        → M2 placement 包 ✅ + M3 CLI/play.py rung 标签 ✅（2026-09-25，experiments/placement-m2m3.md）
         ── 等 D-3 真人招募（D-1 refit 已执行）──→ M4 真人试点（RMSE/CI/档位命中）
 
 远期（后置）

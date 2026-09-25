@@ -1,9 +1,15 @@
 # 真人 Elo 快速定级实验计划（轨迹信号）
 
-> 探索原型（一次性，未提交）：
-> [`elo_prototype.html`](../src/seven523/elo_prototype.html)（评分规则）、
-> [`elo_calibration_prototype.html`](../src/seven523/elo_calibration_prototype.html)（真人定级流程）、
-> [`elo_placement_prototype.html`](../src/seven523/elo_placement_prototype.html)（窗口 + 密集梯级 + 20 局结算）。
+> **状态横幅（2026-09-25 架构清理）**：本文是历史计划，部分已被取代——M2/M3 已交付为
+> [`seven523/placement/`](../src/seven523/placement/) 包与 `7g523-elo` CLI（细节见
+> [`experiments/placement-m2m3.md`](./experiments/placement-m2m3.md)），实验报告集中在
+> [`docs/experiments/`](./experiments/)，仍未完成的 M4 真人试点（等 D-3 招募）由
+> [`plans.md`](./plans.md) §3 T13/§4 D-3 跟踪。本文保留作计划与背景记录，不再逐条更新。
+
+> 探索原型（一次性，未提交）：`elo_prototype.html`（评分规则）、
+> `elo_calibration_prototype.html`（真人定级流程）、
+> `elo_placement_prototype.html`（窗口 + 密集梯级 + 20 局结算）；三个文件已在
+> 2026-09-25 架构清理中删除。
 > 本文件只写计划；实验报告另见 `docs/experiments/`（已建）。
 >
 > **规则口径（2026-09-25）**：非炸弹比较已改为牌型族（[ADR-0007](./adr/0007-family-comparison.md)）。本文引用的 `traces/study` T2 标签、`prior.json` 与全部 RMSE/Elo 数字均为旧 `tier` 口径产物；在 [plans.md](./plans.md) T15 重标定完成前，不得与新规则结果混比，也不得直接用于新规则下的定级。
@@ -45,9 +51,9 @@
    `prior_manifest_labels.json`（sha256 `78e3535c…`）a=−879.40、b=1.7060、
    σ=70.1/57.8/51.4、RMSE 128.6；6 项测试 `tests/test_fit_trace_prior.py`。
    细节与 C-6 口径见 [`experiments/trace-prior-m1.md`](./experiments/trace-prior-m1.md)。
-2. 新增 `src/seven523/placement.py`：会话状态 + `select_opponent`（info/Thompson）+ 10 副
+2. 新增 `src/seven523/placement/`（包）：会话状态 + `select_opponent`（info/Thompson）+ 10 副
    不同牌 + 5/5 轮换调度（owner D-6=(b)）+ 停止规则（`CI≤50` 或 10 局）+ 报告（点估计/CI/最近档/provisional/
-   两通道权重）。**✅ 已落地（2026-09-25）**：+ 24 项测试；冒烟产物 `traces/sessions/smoke_m23/`；
+   两通道权重）。**✅ 已落地（2026-09-25）**：全套 464 passed；冒烟产物 `traces/sessions/smoke_m23/`；
    细节见 [`experiments/placement-m2m3.md`](./experiments/placement-m2m3.md)。
 3. 新增 `7g523-elo` CLI（`pyproject.toml [project.scripts]` + 薄壳）。**✅ 已落地（2026-09-25）**：
    `7g523-elo = "seven523.placement:main"`；`--help` 与 `--simulate` 冒烟通过。
@@ -72,8 +78,8 @@
 | 里程碑 | 内容 | 预估 |
 |---|---|---|
 | M1 | `tools/fit_trace_prior.py` + prior.json（离线标定 + LOLO 自测）**✅ 已交付（2026-09-25）**：T2 默认 `prior.json` + manifest 对照 + 6 项测试；σ(5/10/20)=80.6/69.6/64.6、LOLO RMSE 133.9（见 [`experiments/trace-prior-m1.md`](./experiments/trace-prior-m1.md)）| 1 天 |
-| M2 | `src/seven523/placement.py` + 单测（含 10 副不同牌 + 5/5 轮换调度、逐局座位记录）**✅ 已交付（2026-09-25）**：24 项测试；info/Thompson 选档、两通道 BT-MAP（margin=(0.143,89)）、逐局 trace + `session.json`；产物 `traces/sessions/smoke_m23/`（见 [`experiments/placement-m2m3.md`](./experiments/placement-m2m3.md)）| 1 天 |
-| M3 | `7g523-elo` CLI + `play.py` rung 标签 + 冒烟 **✅ 已交付（2026-09-25）**：`7g523-elo` 入口 + `opponent_identity`（`anchor:greedy@seatN`/`opponent:lvlN@seatN`）+3 测试；冒烟 `定级：1287 ± 182，最近档 greedy（1315），provisional`；全套 418 passed；`elo.py` 零改动（sha256 `80641f13…`）| 0.5 天 |
+| M2 | `src/seven523/placement/`（包）+ 单测（含 10 副不同牌 + 5/5 轮换调度、逐局座位记录）**✅ 已交付（2026-09-25）**：全套 464 passed；info/Thompson 选档、两通道 BT-MAP（margin=(0.143,89)）、逐局 trace + `session.json`；产物 `traces/sessions/smoke_m23/`（见 [`experiments/placement-m2m3.md`](./experiments/placement-m2m3.md)）| 1 天 |
+| M3 | `7g523-elo` CLI + `play.py` rung 标签 + 冒烟 **✅ 已交付（2026-09-25）**：`7g523-elo` 入口 + `opponent_identity`（`anchor:greedy@seatN`/`opponent:lvlN@seatN`）+3 测试；冒烟 `定级：1287 ± 182，最近档 greedy（1315），provisional`；全套 464 passed；`elo.py` 零改动（sha256 `80641f13…`）| 0.5 天 |
 | M4 | 真人试点 ≥8 人（10 局定级 + 参考局），标定/评估拆分，出 RMSE/覆盖/档位命中；**仍等 D-3 招募** | 2–3 天 |
 
 ## 0. 摘要

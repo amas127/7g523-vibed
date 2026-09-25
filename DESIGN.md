@@ -28,45 +28,45 @@
 依赖只能向内，规则层零 RL 依赖：
 
 ```
-        train.py ── ppo.py ── networks.py ── gymnasium.vector
-           │                        │
-        eval.py                     │
-           │                        │
-        play.py ── trace.py         │
-           │                        │
-           └──── match.py ──────────┤
-                    │               │
-                  env.py ───────────┘
-                    │
-                  game.py
-                    │
-                actions.py
-                    │
-                combos.py
-                    │
-            cards.py / rules.py
+（箭头指向被依赖方：右侧模块依赖左侧模块）
+规则核心:  cards.py / rules.py ← combos.py ← actions.py ← game.py
+对局驱动:  policies.py ← match.py ← env.py          （env → gymnasium）
+轨迹录制:  trace.py ← play.py ← record.py
+训练栈:    ppo.py / networks.py / league.py / metrics.py ← train.py（torch + gymnasium）
+评分编排:  elo.py ← ladder.py / duel.py（duel 另依赖 ladder）；arena.py 依赖 ladder + elo
+先验定级:  prior.py（numpy）← placement/（包；torch 惰性）
+清单:      study.py（无内部依赖）
+tools/*.py → src/seven523（src 不反向依赖 tools）
 
-        全部经 Rules 配置；纯规则层可独立单测
+全部经 Rules 配置；纯规则层可独立单测
 ```
 
 | 模块 | 角色 | 依赖类别 | 说明 |
 |------|------|----------|------|
 | `cards.py` / `rules.py` | 值对象 | in-process | 无外部依赖 |
-| `combos.py` | **deep module（核心）** | in-process | `classify`/`beats` 两个入口藏全部比较语义 |
+| `combos.py` | **deep module（核心）** | in-process | `classify`/`beats` 两个入口藏全部比较语义；`TIER` 只服务炸弹层级与 `Combo.strength` 排序 |
 | `actions.py` | 动作空间 | in-process | 固定 134 目录 + 头布局，`action_mask` 唯一合法性权威 |
-| `game.py` | 流程状态机 | in-process | 纯函数式 `GameState` 转移 + `View` 投影 + `Deal` |
-| `policies.py` | 接缝 | 2+ adapters | Random/Greedy；`make_scripted_policies` |
+| `game.py` | 流程状态机 | in-process | 纯函数式 `GameState` 转移 + `View` 投影 + `Deal` + `seat_outcome` 唯一胜负定义 |
+| `policies.py` | 接缝 + spec 语法 | 2+ adapters | Random/Greedy/NeuralPolicy adapter；`Policy`/`EpisodePolicy`/`WeightedPolicy` 协议与 `split_entrant`/`validate_spec` 等 spec 助手 |
 | `match.py` | 对局驱动 | in-process | 轮转 + 策略派发 + 合法性回退；唯一的多座位循环 |
-| `env.py` | RL adapter | 依赖 gymnasium | 唯一知道观测张量形状的模块；驱动委托给 `Match` |
+| `env.py` | RL adapter | 依赖 gymnasium | 唯一知道观测张量形状的模块（单一 v5 布局，ADR-0009）；驱动委托给 `Match`，终局 info 带 `scores`/`outcome` |
 | `ppo.py` | 算法 | 依赖 torch | `compute_gae` / `ppo_update` 两个入口 |
 | `trace.py` | 编解码 | in-process | 轨迹格式（`Deal` + 每步 + 分数 + 标签/文件名约定），版本与字段只此一处 |
-| `networks.py` | 训练适配 | 依赖 torch | `Agent`/`CategoricalMasked`/`NeuralPolicy`/checkpoint 读写 |
-| `train.py` | 装配/CLI | torch + gymnasium (+tensorboardX) | cleanrl PPO 移植：阶段 1 bot、阶段 2 冻结自博弈、CSV + TensorBoard 指标、checkpoint |
-| `eval.py` | 评估/CLI | torch 惰性 | 得分/分差/胜率/非法动作率 |
-| `play.py` | 终端人机对战 | 规则层 + 可选 torch | `7g523-play`：列表合法出牌、输入编号；对手可为 bot/checkpoint；`--save-trace`/`--replay` 轨迹持久化与回放校验 |
+| `record.py` | 批量录制 | in-process | `play_recorded`/`policy_seed`/`RecordedGame`：ladder/placement/measure 共用的唯一批量录制接缝 |
+| `networks.py` | 训练适配 | 依赖 torch | `Agent`/`CategoricalMasked`/`NeuralPolicy`/checkpoint（`load_agent` 只收 v5）/`warm_start_from` |
+| `metrics.py` | 指标 sink | in-process | `LOG_FIELDS`/`TB_TAGS`/`MetricsLogger`/`TensorboardLogger` |
+| `league.py` | 联赛装配 | torch + numpy | `LeagueConfig`/`League`/`build_league`/`parse_pool_member`/`pool_member_ids`/`PfspController` |
+| `train.py` | 装配/CLI | torch + gymnasium | rollout/update 循环；指标、联赛、热启动已拆出 |
+| `eval.py` | 评估/CLI | 规则层 | 得分/分差/胜率/非法动作率；胜负走 `game.seat_outcome` |
+| `play.py` | 终端人机对战 | 规则层 + 可选 torch | `7g523-play`；`play_game` 每个座位都经 `Match`/`Policy`，交互 chooser 由 `ChooserPolicy` 适配；轨迹持久化与回放校验 |
 | `elo.py` | **评分核心（deep）** | in-process | `fit_ratings`/`select_rungs`/`expected_score` 藏 BT-MAP、阻尼牛顿、窗口、分差似然与信息 SE；不依赖 torch/numpy/IO |
-| `ladder.py` | M2 阶梯编排 | 规则层 + torch 惰性 | `plan_games`/`play_games`/`build_ladder`：成对牌局、座位轮换、≥2 锚点；轨迹与人类对局同格式 |
-| `study.py` | 清单 schema | in-process | `load/merge/save_manifest`；`levels` 是 D1 契约，评分默认冻结（`refit` 显式覆盖） |
+| `ladder.py` | M2 阶梯编排 + 分片 | 规则层 + torch 惰性 | `plan_games`/`play_games`（`results_dir=` 是分片唯一接口）/`build_ladder`：成对牌局、座位轮换、≥2 锚点；轨迹与人类对局同格式 |
+| `duel.py` | 双人配对比较 | in-process | `plan_duel_schedule`/`paired_duel_stats`/`combine_duel_seeds`：同牌 twin + 按牌聚簇 bootstrap |
+| `arena.py` | 联盟赛 | 规则层 + torch 惰性 | `run_arena`；`play_parallel` 是 `ladder.play_games` 的薄包装；排名/成对诊断/TensorBoard |
+| `study.py` | manifest schema | in-process | `load/merge/save_manifest`；`levels` 是 D1 契约，唯一 writer owner，评分默认冻结（`refit` 显式覆盖） |
+| `prior.py` | 轨迹 S1 先验核心 | 依赖 numpy | 特征、岭回归、`prior.json` schema、`TracePrior`、`session_mean`；`tools/*` 只做 CLI |
+| `placement/` | 真人定级包 | numpy + 可选 torch | `opponents`/`estimator`/`session`/`cli`；`__init__` 再导出公开 API，`7g523-elo` 入口不变 |
+| `tools/*.py` | CLI | 只依赖 `seven523` | 薄壳：解析参数、调库、打印；src 不反向依赖 tools |
 
 ---
 
@@ -153,7 +153,7 @@ class Deal:                          # 开局发牌（可脱离 RNG 重建）
 @dataclass(frozen=True, slots=True)
 class View:                          # agent/bot 唯一能看到的投影
     seat; hand; mask; incumbent; current; scores; counts;
-    draw_count; revealed; trick_cards; last_player; done
+    draw_count; revealed; trick_cards; played; last_player; done
 
 class Game:
     def __init__(self, rules=DEFAULT_RULES): ...
@@ -162,6 +162,8 @@ class Game:
     def view(self, state, seat) -> View: ...
     def step(self, state, action_id, suit=None) -> tuple[GameState, StepResult]: ...
     def returns(self, state) -> tuple[float, ...]: ...        # terminal-only
+
+def seat_outcome(scores, seat) -> int: ...                    # +1 胜 / 0 平 / −1 负（与最强对手比）
 ```
 
 契约：`step` 只接受 `view(...).mask` 为真的动作，非法动作抛 `ValueError`；
@@ -173,22 +175,33 @@ class Game:
 ```python
 class Policy(Protocol):
     def act(self, view: View) -> tuple[int, int | None]: ...
+class EpisodePolicy(Protocol):        # 逐局对手：env.reset 时 start_episode() 冻结本局成员
+    def start_episode(self) -> str: ...
+class WeightedPolicy(Protocol):       # PFSP 可调权：set_weights + current_id/finished_id
+    def set_weights(self, weights: Sequence[float]) -> None: ...
 class RandomBot(Policy): ...
 class GreedyBot(Policy): ...          # 最弱合法跟牌，优先非炸弹；无牌可跟才 PASS
+
+def policy_from_spec(spec, rules=DEFAULT_RULES, seed=None, device="cpu") -> Policy
+    # random / greedy / ckpt:<path>；torch 只在 ckpt: 分支惰性导入
+# spec 语法唯一 owner（ID=SPEC 拆分、auto-id、存在性检查、错误文案）：
+def split_entrant(raw) -> (str, str); def default_id_for_spec(spec) -> str
+def missing_ckpt_path(spec) -> str | None; def validate_spec(spec) -> str | None
 
 class Seven523Env(gym.Env):            # gymnasium 5 元组 API（env 唯一碰张量形状）
     action_mask: list[bool]           # 138 = 134 模板 + 4 花色，永远对应刚返回的 obs
     action_space: MultiDiscrete([134, 4]) # 模板头 + 花色头（ADR-0004；目录规模随 Rules）
-    observation_space: Box(OBS_DIM,)   # OBS_DIM = 119 + 21 * num_players（默认 v5；v1–v4 见 §4 的 segment schema）
+    observation_space: Box(OBS_DIM,)   # OBS_DIM = observation_dim(n) = 119 + 21n（唯一 v5 布局，ADR-0009）
+    reward_shaping: str                # terminal / trick_diff / win / trick_diff_win
     def reset(self, *, seed=None, options=None) -> (obs, info)
-    def step(self, action) -> (obs, reward, terminated, truncated, info)
+    def step(self, action) -> (obs, reward, terminated, truncated, info)  # 终局 info: {"scores", "outcome"}
     def view(self, seat=None) -> View  # 投影（默认 learner），对局驱动委托给 Match
 
 class NeuralPolicy:                    # Policy 接缝的神经 adapter（networks.py）
-    def act(self, view: View) -> tuple[int, int | None]  # (模板, 花色)；旧单头 ckpt 花色为 None
+    def act(self, view: View) -> tuple[int, int | None]  # (模板, 花色)
 ```
 
-### 2.6 `match.py` / `trace.py` / `ppo.py`
+### 2.6 `match.py` / `trace.py` / `play.py` / `record.py` / `ppo.py`
 
 ```python
 class Match:                          # 唯一的多座位对局循环
@@ -211,6 +224,21 @@ def build_trace(rules, *, seed, human_seat, players, created_at, **record)
 def save_trace(path, trace); def load_trace(path) -> dict
 TRACE_VERSION: int
 
+# play.py —— 终端对局与回放（每个座位都经 Match/Policy）
+def play_game(policies, *, chooser=None, rules=DEFAULT_RULES, human_seat=0,
+              seed=None, print_fn=print, record=None) -> tuple[int, ...]
+class ChooserPolicy:                  # 旧 (game, state, view) chooser -> Policy；bind(match)
+def interactive_chooser(human_seat, print_fn=print) -> chooser
+def replay_trace(trace, *, print_fn=print, pause=False, input_fn=input) -> bool
+def opponent_identity(checkpoint, opponent="greedy") -> (role, id)
+
+# record.py —— 批量录制唯一接缝（ladder / placement / measure 共用）
+def policy_seed(seed, seat) -> int    # (seed + 101 * (seat + 1)) & 0xFFFF_FFFF
+def play_recorded(policies, *, rules=DEFAULT_RULES, seed=None, human_seat=0,
+                  players=None, created_at=None, trace_dir=None, trace_index=0,
+                  opponent="", chooser=None, print_fn=print) -> RecordedGame
+class RecordedGame: seed; human_seat; scores; trace; trace_path  # 不落盘时 trace_path=None
+
 # ppo.py —— PPO 数学（忠实参考实现，ADR-0003）
 def compute_gae(rewards, values, dones, next_value, next_done, *, gamma, gae_lambda, use_gae=True)
 def ppo_update(agent, optimizer, batch, config) -> dict[str, float]
@@ -220,7 +248,8 @@ class RolloutBatch: ...             # RolloutBatch.flatten(...) + .size
 
 契约：`step(action_id)` 走引擎严格校验（非法抛 `ValueError`）；`step()` 由策略出牌，非法则 clamp
 到首个合法并计入 `illegal_actions`。`advance`/`run_to_end` 只驱动有策略的座位；`None` 座位由
-调用方用 `step` 驱动（env 暂停 learner）。
+调用方用 `step` 驱动（env 暂停 learner）。`play_game` 把 `chooser` 包成 `ChooserPolicy` 后
+所有座位统一走 `Match`；`play_recorded` 负责逐局 seed、trace 组装与落盘命名。
 
 ### 2.7 `elo.py` / `ladder.py` / `study.py`（ADR-0006）
 
@@ -243,11 +272,13 @@ class Entrant: id; spec; pinned: float | None; prior: Prior | None
 class ScheduledGame: seed; seats; subject
 class Ladder: entrants; fit; selection; schedule
 def plan_games(entrants, *, games_per_anchor=100, cross=0, seed=0) -> tuple[ScheduledGame, ...]
-def play_games(schedule, entrants, *, rules, factory=policy_from_spec,
-               out=None, created_at=None) -> list[PlayedGame]
-def build_ladder(entrants, *, games_per_anchor=100, cross=0, seed=0, rules, out=None,
-                 created_at=None, count=5, min_spacing=100.0, max_spacing=150.0,
-                 window=None, config=FitConfig(), factory=policy_from_spec) -> Ladder
+def play_games(schedule, entrants, *, rules=DEFAULT_RULES, factory=None,
+               out=None, results_out=None, results_dir=None, created_at=None,
+               device="cpu", workers=1) -> list[PlayedGame]
+def build_ladder(entrants, *, games_per_anchor=100, cross=0, seed=0, rules=DEFAULT_RULES,
+                 out=None, games_out=None, created_at=None, count=5, min_spacing=100.0,
+                 max_spacing=150.0, window=None, config=FitConfig(), factory=None,
+                 device="cpu", workers=1) -> Ladder
 
 # study.py —— manifest schema 唯一 owner（D1 的 features/calibrate 读 levels）
 def load_manifest(path) -> dict; def save_manifest(path, document) -> Path
@@ -258,7 +289,49 @@ def merge_manifest(document, *, levels, subjects, anchors=None, rungs=None,
 契约：`PlayedGame` 一局一条记录（锚点 `se = 0`；`window` 按 id 取最近 W 局）；`fit_ratings`
 是纯函数（无 RNG/IO，先验与锚点都是数据）；`select_rungs` 的间距缺口用 `ok`/`wide_gaps`/
 `tail_gap` 显式上报，从不静默放宽；`ladder` 要求 ≥2 个 pinned 锚点；D3 以
-`priors={id: Prior(μ_traj, σ_traj)}` 进入同一评分，不新增接缝。
+`priors={id: Prior(μ_traj, σ_traj)}` 进入同一评分，不新增接缝。`play_games(workers>1)`
+把 schedule 切成连续分片、spawn 进程执行，逐局 policy seed 只依赖对局本身，`workers=1` 与
+`>1` 逐位一致；`results_dir` 让每个 worker 直接写 `shard_NNNNN.jsonl`（与 `results_out`
+互斥），`arena.play_parallel` 只是把 `games_out` 转发到这里。
+
+### 2.8 `duel.py` / `arena.py` / `prior.py` / `placement/`（ADR-0006/0010）
+
+```python
+# duel.py —— 双人同牌换座比较（纯统计，无 IO）
+def plan_duel_schedule(left, right, *, pairs, seed) -> tuple[ScheduledGame, ...]
+def paired_duel_stats(games, *, left_id, right_id, bootstrap=4000, rng,
+                      confidence=0.95) -> dict      # 按 deal 聚簇 bootstrap + 符号检验
+def combine_duel_seeds(per_seed, *, seeds=None, z=1.96) -> dict  # ≥2 seed 合并
+
+# arena.py —— 联盟赛（工具层；并行只是 ladder.play_games 的包装）
+def play_parallel(schedule, entrants, *, workers=1, device="cpu", rules=DEFAULT_RULES,
+                  games_out=None) -> list[PlayedGame]
+def run_arena(entrants, *, games_per_anchor=60, cross=60, seed=0, workers=1,
+              device="cpu", rules=DEFAULT_RULES, games_out=None, window=None,
+              config=FitConfig()) -> ArenaResult
+
+# prior.py —— 轨迹 S1 先验核心（tools 只做 CLI）
+def extract_features(trace, *, verify=True) -> dict          # 每局 S1 特征行
+def extract_row(path, levels, *, verify=True); def load_rows(study, levels, ...)
+def ridge_fit(x, y, alpha); def ridge_predict(model, x)      # 标准化岭回归
+def build_prior(...); def load_prior(path); def save_prior(doc, path, *, created_at=None)
+def predict_elo(doc, row, *, opponent_elo=None) -> float
+def session_mean(doc, rows, *, opponent_elos=None) -> float
+def prior_for_session(doc, mu_traj, n) -> Prior
+class TracePrior: load/predict_elo/prior_for_session/features/cold_start/labels/meta
+
+# placement/ —— 10 局真人定级包（__init__ 再导出；`main` = 7g523-elo）
+class SessionConfig: games=10; stop_ci=50.0; min_games_before_stop=1;
+                     explore_games=2; z=1.96; seat_start=0; human_id="human";
+                     margin_c=0.143; margin_sigma=44.5; trace_margin_factor=2.0; rung_prior_sd=30.0
+class Opponent: id; elo; se; spec; anchor
+def load_opponents(manifest) -> (opponents, anchors)   # 缺 ckpt 的 rung 告警跳过；锚点缺失报错
+def plan_seats(games, *, start=0); def plan_deals(rng, games); def select_opponent(...)
+def fit_session(games, *, human_id, human_prior, opponents, anchors, margin,
+                rung_prior_sd=30.0, rung_centers=None) -> Fit
+class PlacementSession: run(chooser_factory=None, *, human_policy_factory=None, print_fn=print)
+def main(argv=None) -> int
+```
 
 ---
 
@@ -284,65 +357,34 @@ def merge_manifest(document, *, levels, subjects, anchors=None, rungs=None,
 
 ## 4. 观测与奖励
 
-观测由 `env.encode_observation` 构造（core 不知道）。维度与编码都由 `env.py` 的段表
-（`_SEGMENTS_V1`…`_SEGMENTS_V5`，经 `_SEGMENTS_BY_VERSION` 索引）一份布局求和与游走
-（`observation_dim`、`encode_observation`、`segment_spans` 都从它推导），段与维度不会漂移。
-版本是 checkpoint 身份的一部分（payload 存 `obs_version`，旧 ckpt 缺省 v1），不能只凭宽度推断：
+观测由 `env.encode_observation` 构造（core 不知道）。**只有一份布局**：`env.py` 的
+`_SEGMENTS` 段表是唯一真源，`observation_dim` 与 `encode_observation` 都从它推导，段与
+维度不会漂移。v5 是 `119 + 21n`（2 家 161）；`OBS_VERSION = 5` 仍写进 checkpoint payload，
+`networks.load_agent` 对缺失或非 5 的 payload 直接拒绝。v1–v4 已随兼容层退役
+（[ADR-0009](./docs/adr/0009-single-observation-and-comparison.md)）。
 
-| 版本 | 布局 | 维度公式 | 2 家 |
-|------|------|---------|------|
-| v1 | 原始 10 段 | `185 + 3n` | 191 |
-| v2 | v1 + B0 | `188 + 3n` | 194 |
-| v3 | v2 + B1 | `243 + 3n` | 249 |
-| v4 | 观测 S1 + B0 | `64 + 21n` | 106 |
-| **v5（默认）** | 观测 S1 + B0 + B1 | **`119 + 21n`** | **161** |
-
-`v1 ⊂ v2 ⊂ v3` 与 `v4 ⊂ v5` 各自是逐位前缀；两族之间是重排 + 压缩，不互为前缀，不能逐列互读。
-版本选择、热启动重映射与拒绝集见 [ADR-0008](./docs/adr/0008-observation-layout-v5.md)。
-
-**v1–v3（旧链路，只追加）：**
-
-| 段 | 维度 | 内容 |
-|----|------|------|
-| `hand` | 54 | 自己手牌 `card_id` multi-hot |
-| `rank_counts` | 15 | 自己每点数计数 / 4 |
-| `incumbent_top` | 54 | incumbent 顶牌 `card_id` multi-hot（公开） |
-| `incumbent_kind` | 6 | `ComboKind` one-hot |
-| `incumbent_size` | 1 | 张数 / `hand_size` |
-| `draw_count` | 1 | 底牌堆张数 / 54 |
-| `scores` | n | 各家分数 / `total_points`（绝对座位序） |
-| `hand_counts` | n | 各家手牌数 / `hand_size`（绝对座位序） |
-| `current` | n | 当前座位 one-hot（绝对座位序） |
-| `revealed` | 54 | 亮牌 multi-hot（公开，开局每座一张） |
-| `trick_points` | 1 | B0：当前墩已落桌分 / `total_points`（v2 追加） |
-| `remaining_points` | 1 | B0：未被赢走分 / `total_points`（v2 追加） |
-| `point_hold` | 1 | B0：自己手牌分 / `total_points`（v2 追加） |
-| `unseen` | 54 | B1：54 − 手牌 − 亮牌 − `played` − 当前墩 multi-hot（v3 追加） |
-| `last_player` | 1 | B1：incumbent 归属座位的归一化槽（绝对序；无 incumbent = 0；v3 追加） |
-
-**v4/v5（观测 S1 家族，自中心旋转）：**
+**v5（唯一布局，观测 S1 + B0 + B1，自中心旋转）：**
 
 | # | 段 | 维度 | 内容 |
 |---|---|------|------|
-| 1 | `hand` | 54 | 自己手牌 `card_id` multi-hot（同 v1） |
+| 1 | `hand` | 54 | 自己手牌 `card_id` multi-hot |
 | 2 | `inc_rank` | 15 | incumbent 顶牌 rank one-hot（王由 rank 判别） |
 | 3 | `inc_suit` | 4 | incumbent 顶牌花色 one-hot（王 = 全零） |
-| 4 | `inc_kind` | 6 | `ComboKind` one-hot（同 v1） |
-| 5 | `inc_size` | 1 | 张数 / `hand_size`（同 v1） |
-| 6 | `draw` | 1 | 底牌堆张数 / 54（同 `draw_count`） |
+| 4 | `inc_kind` | 6 | `ComboKind` one-hot |
+| 5 | `inc_size` | 1 | 张数 / `hand_size` |
+| 6 | `draw` | 1 | 底牌堆张数 / 54 |
 | 7 | `scores` | n | 自中心：`scores[(seat+k) % n] / total_points` |
 | 8 | `opp_count` | n−1 | 对手手牌数 / `hand_size`（自中心，无自己维） |
 | 9 | `opp_revealed` | 19(n−1) | 每对手亮牌 rank15 + suit4（自中心） |
-| 10 | `trick_points` | 1 | B0，复用 v2 writer |
-| 11 | `remaining_points` | 1 | B0，复用 v2 writer |
-| 12 | `point_hold` | 1 | B0，复用 v2 writer |
-| 13 | `unseen` | 54 | B1，复用 v3 writer（仅 v5） |
-| 14 | `last_player` | 1 | B1，复用 v3 writer（仅 v5） |
+| 10 | `trick_points` | 1 | B0：当前墩已落桌分 / `total_points` |
+| 11 | `remaining_points` | 1 | B0：未被赢走分 / `total_points` |
+| 12 | `point_hold` | 1 | B0：自己手牌分 / `total_points` |
+| 13 | `unseen` | 54 | B1：54 − 手牌 − 亮牌 − `played` − 当前墩 multi-hot |
+| 14 | `last_player` | 1 | B1：incumbent 归属座位的归一化槽（无 incumbent = 0） |
 
-v4 = 段 1–12；v5 = 段 1–14（v4 的逐位前缀）。观测 S1 相对 v1 删除 `rank_counts`/`current`/自身
-`hand_counts`，把 `incumbent_top`/`revealed` 压成 rank+suit 并按 acting seat 旋转。
-
-奖励（RL-2）：终局 `own_score/100 − mean(others)/100`，terminal-only；训练只看分数。
+奖励（RL-2）：终局 `own_score/100 − mean(others)/100`；`reward_shaping` 可选
+`terminal`（默认，逐位旧行为）/ `trick_diff` / `win` / `trick_diff_win`，终局 info 另带
+`{"scores", "outcome"}`。
 
 ---
 
@@ -377,11 +419,13 @@ v4 = 段 1–12；v5 = 段 1–14（v4 的逐位前缀）。观测 S1 相对 v1 
 5. `game` 不变量：牌张守恒、分数守恒、手牌 ≤7、随机对局必终止、终局 `sum(scores)==100`。
 6. **差分泄漏测试**：两份仅隐藏字段不同的 `GameState`，`view(seat)` 的公开字段与 mask 必须逐位相同（ADR-0002）。
 7. `env`：gymnasium 空间/5 元组 API、obs 形状、mask 与 obs 同步。
-8. `train`/`eval`：masked categorical 不采样非法动作、Agent 前向/replay 形状、checkpoint 往返、极小训练与自博弈冒烟、评估指标恒等式（`mean_return == score_diff / 100`）。
+8. `train`/`eval`：masked categorical 不采样非法动作、Agent 前向/replay 形状、checkpoint 往返与非 v5 payload 拒绝、极小训练与自博弈冒烟、评估指标恒等式（`mean_return == score_diff / 100`）。
 9. `match`：全策略跑到终局、外部座位停在 `advance`、非法策略动作被 clamp 并计数、外部动作严格抛错、`on_turn` 逐回合触发。
 10. `trace`：card/rules/deal 往返、开局重建、`build_trace` 版本戳、步骤 schema、标签/文件名约定、存取往返（无需终端）。
 11. `ppo`：GAE 手算对照（含 bootstrap/gamma/非 GAE 分支）、`RolloutBatch.flatten` 形状、`ppo_update` 参数确实更新且 loss 有限。
 12. `actions` 头布局：`nvec_for`、`joint_mask_bits`（含旧单头 ckpt）、`resolve_indexed` 与 `resolve` 一致、`action_mask` 记忆化。
+
+当前 `uv run --group train pytest -q` 收集 **464 项**；具体用例以 `tests/` 为准。
 
 ---
 
@@ -402,19 +446,27 @@ v4 = 段 1–12；v5 = 段 1–14（v4 的逐位前缀）。观测 S1 相对 v1 
    胜/平/负、非法动作率（应为 0）；训练中可用 `--eval-interval` 周期评估。
 6. 指标写 `runs/<name>/metrics.csv`（纯文本、无额外依赖）；训练默认同时写
    `runs/<name>/tb/` 的 TensorBoard event（`--tensorboard False` 可关，`tensorboard --logdir runs` 看曲线）；checkpoint 为
-   `agent.pt` / `checkpoint.pt`（`torch.save`，含 `obs_dim`/`nvec`/`hidden`）。
+   `agent.pt` / `checkpoint.pt`（`torch.save`，含 `obs_dim`/`nvec`/`hidden`/`activation`/`arch`/`obs_version`）。
 
 ---
 
-## 8. 实施状态
+## 8. 模块清单
 
 代码在 `src/seven523/`（发行名 `7g523`；`uv run 7g523` 跑演示）。
 
-- [x] 核心：`cards` / `rules` / `combos` / `actions` / `game` / `policies` / `match` / `env`（gymnasium 5 元组 API）
-- [x] 训练/工具：`ppo` / `networks` / `train` / `eval` / `play` / `trace`
-- [x] 测试 263 项：Golden cases、目录规模 134、mask↔resolve↔beats 一致、2–7 家随机/贪心对局不变量、撬底/补牌顺序/空手留局定向用例、`Rules` 校验、自定义 `Rules` 下的目录/环境尺寸回归、差分泄漏、masked categorical 不越奖、Agent 前向/replay、checkpoint 往返、训练/自博弈/评估冒烟、人机对战渲染、轨迹保存/回放与篡改检测、TensorBoard event 断言、花色头 `resolve`/`suit_options`/合法性回退/warm-start/旧 ckpt 兼容、`Match` 轮转/回退/外部座位 11 项、`trace` 编解码 6 项、`ppo` GAE/update 7 项、头布局 `nvec_for`/`joint_mask_bits` 5 项、评分/阶梯/清单 34 项（BT-MAP 阻尼与钳制、窗口、分差、间距缺口、座位配对牌局、联合 Hessian SE、CLI→D1 链路）、duel/多 seed/逐局 JSONL 15 项、激活四变体与旧 ckpt 兼容
-- [x] 性能（单线程纯 Python）：2 家 ~6.0k steps/s、3/4 家 ~6.4k steps/s；`action_mask` ~75µs/次；PPO 端到端（8 env）：阶段 1 ~1.8k、自博弈 ~1.4k learner steps/s（均含周期评估）
-- [x] 训练验证：300k 步阶段 1（vs GreedyBot）后 500 局评估：分差 **+21.3**、胜率 64%（随机基线 -53.6 / 14%）；再 150k 步自博弈热启动后分差 +19.2、胜率 63%；非法动作率均为 0
-- [x] PPO 训练/评估：`networks.py`（Agent/NeuralPolicy/checkpoint）+ `train.py`（cleanrl 忠实移植、两阶段、`--eval-interval`）+ `eval.py` + `play.py`（人机对战）；动作空间 `(模板, top_suit)` 见 [ADR-0004](./docs/adr/0004-suit-head.md)，框架决议见 [ADR-0003](./docs/adr/0003-training-stack.md)
-- [x] M2 评分/阶梯（[ADR-0006](./docs/adr/0006-elo-rating-seam.md)）：`elo.py`（纯 BT-MAP：阻尼牛顿、[400,2600] 钳制、逐 id 窗口、可选分差似然、自由 id 联合 Hessian SE、`select_rungs` 显式报缺口）、`ladder.py`（成对牌局 + **候选内换座配对**（每副牌双座位、`games_per_anchor` 偶数）、≥2 锚点、轨迹与人类对局同格式）、`duel.py`（候选对候选同牌换座 + 按牌聚簇配对 bootstrap）、`study.py`（manifest schema + frozen/refit）、`policies.policy_from_spec`（唯一 spec 解析，torch 惰性）；`tools/build_ladder.py`、`tools/head_to_head.py`、`tools/h2h_screen.py`；自洽冒烟：Random/Greedy 当候选测得 970±29 / 1285±28（锚点 1000/1315）
-- [x] 训练增量（2026-09）：`AutoresetMode.SAME_STEP` + `final_info.episode` 适配（`docs/experiments/ppo-alignment-audit.md`）；`--activation {relu,tanh,gelu,silu}`；`--opponent mix|pool` + `--pool-member`（多成员联赛）、`--games-out` 逐局 JSONL；全程实验结论见 [docs/experiments/](./docs/experiments/)（索引 [README](./docs/experiments/README.md)）
+| 分组 | 模块 |
+|------|------|
+| 规则核心 | `cards` / `rules` / `combos` / `actions` / `game` |
+| 对局驱动 | `policies` / `match` / `env` |
+| 轨迹与录制 | `trace` / `play` / `record` |
+| 训练 | `ppo` / `networks` / `metrics` / `league` / `train` / `eval` |
+| 评分与阶梯 | `elo` / `ladder` / `duel` / `arena` / `study` |
+| 真人定级 | `prior` / `placement/` |
+| 工具 | `tools/*.py`（薄 CLI，只依赖 `seven523`） |
+
+各模块的角色与依赖见 §1，接口见 §2。**状态、测试计数与里程碑不在这里维护**：
+实验结论与规范数字见 [docs/experiments/README.md](./docs/experiments/README.md)，
+全部计划、优先级与待决策见 [docs/plans.md](./docs/plans.md)；架构决策史见
+[docs/adr/](./docs/adr/)（本轮 v5/tier 退役见
+[ADR-0009](./docs/adr/0009-single-observation-and-comparison.md)，单一 owner 接缝见
+[ADR-0010](./docs/adr/0010-single-owner-seams.md)）。

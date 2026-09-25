@@ -18,8 +18,9 @@ uv run --group train 7g523-train --exp-name stage1 --total-timesteps 300000
 
 - 默认 `--opponent greedy`、8 env × 128 steps 一个 batch；本机 300k 步约 3 分钟。
 - 动作空间是 `MultiDiscrete([134, 4])`：134 个牌型模板 + 4 个顶牌花色（ADR-0004）。
-  旧的 134 头 checkpoint 可直接 `--load-checkpoint`：会自动 warm start（主干/价值头全拷，
-  模板头权重平移，花色头新初始化）。
+  同一 v5 布局、动作头更小的 checkpoint（如旧的单头 134）可直接 `--load-checkpoint`：
+  会自动 warm start（主干/价值头全拷，模板头权重平移，花色头新初始化）；
+  v5 之前的 checkpoint 不能加载（`load_agent` 直接拒绝，见 [ADR-0009](./adr/0009-single-observation-and-comparison.md)）。
 - 产物在 `runs/<exp-name>__<seed>__<时间戳>/`：
 
 | 文件 | 内容 |
@@ -121,7 +122,7 @@ uv run --group train python tools/h2h_screen.py --help   # 多对 × 3 seed × 2
 - `--cuda False`：强制 CPU；`--opponent random`：对手换随机 bot
 - `--activation {relu,tanh,gelu,silu}`：隐藏层激活（默认 relu；激活存入 checkpoint，旧 ckpt 缺省按 relu 加载）
 - `--arch {shared,towers}`：网络架构（默认 `shared`，共享主干）。`towers` = 独立 actor/critic 两塔（参数 +69.6%），为实验性选项、T6 已判负并关闭该线（见 [experiments/twin-towers-500k.md](./experiments/twin-towers-500k.md)）；默认 `shared` 逐位不变
-- `--obs-version {1,2,3,4,5}`：选择观测布局版本，默认 `5`（`OBS_VERSION`）。v1=原始（185+3n）；v2=B0 增广（+3 维点分量 `trick_points`/`remaining_points`/`point_hold`，188+3n，见 [experiments/observation-augmentation-b0.md](./experiments/observation-augmentation-b0.md)）；v3=B1 增广（v2+55：`unseen` 54 维 + `last_player` 1 维，243+3n、2 家 249，见 [experiments/observation-augmentation-b1.md](./experiments/observation-augmentation-b1.md)；结果未确认）；v4=观测 S1+B0（64+21n、2 家 106）；**v5=观测 S1+B0+B1（119+21n、2 家 161，默认）**，v4 是 v5 的逐位前缀（见 [ADR-0008](./adr/0008-observation-layout-v5.md)）。旧 ckpt 按自身 `obs_version` 推理；跨版本热启动对允许方向做段级列重映射（前缀方向新列置 0，`incumbent_top`/`revealed` 的 54→19 段为近似），不可映射方向在加载点显式拒绝
+- 观测布局固定为 **v5 = 观测 S1+B0+B1（`119+21n`、2 家 161）**，没有 `--obs-version` 开关。`save_agent` 把 `obs_version=5` 写进 payload，`load_agent` 对缺失或其他版本直接报错；v1–v4 已随兼容层退役，旧 ckpt 需重训（见 [ADR-0009](./adr/0009-single-observation-and-comparison.md)）
 - `--reward-shaping {terminal,trick_diff,win,trick_diff_win}`：奖励分解（默认 `terminal` 旧行为逐位不变）。`trick_diff` 每步 `Φ(s')−Φ(s)`（一局求和 = 终局回报，telescoping）；`win` 终局 `sign(own−max(others)) ∈ {−1,0,+1}`；`trick_diff_win` 为两者叠加。T1 结果见 [experiments/reward-shaping-500k.md](./experiments/reward-shaping-500k.md)（A1 正信号在训练 seed 复现后未复现）
 - `--opponent mix|pool`：对手混合 / 多成员联赛；`--pool-member [WEIGHT@]SPEC`（SPEC = `greedy`/`random`/`self`/`ckpt:<agent.pt>`，可重复，权重默认 1）
 - `--pool-episode`（默认关）：`--opponent pool/mix` 时改为**逐局**冻结一个成员
