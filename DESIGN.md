@@ -28,19 +28,23 @@
 依赖只能向内，规则层零 RL 依赖：
 
 ```
-        train.py / eval.py                    (PPO 移植 + 评估)
-             │
-        networks.py ── gymnasium.vector        (Agent/NeuralPolicy；SyncVectorEnv)
-             │
-        env.py        ──── policies.py        (gymnasium.Env；对手：脚本 bot / 神经策略)
-             │                    │
-        game.py  ──────────────┘              (亮牌→一墩→收分→补牌→撬底)
-             │
-        actions.py                            (规范动作目录：mask + resolve，env 与 bot 共用)
-             │
-        combos.py                             (牌型识别 + 比较 —— 最深的纯模块)
-             │
-        cards.py / rules.py                   (牌 + 序；Rules 值对象)
+        train.py ── ppo.py ── networks.py ── gymnasium.vector
+           │                        │
+        eval.py                     │
+           │                        │
+        play.py ── trace.py         │
+           │                        │
+           └──── match.py ──────────┤
+                    │               │
+                  env.py ───────────┘
+                    │
+                  game.py
+                    │
+                actions.py
+                    │
+                combos.py
+                    │
+            cards.py / rules.py
 
         全部经 Rules 配置；纯规则层可独立单测
 ```
@@ -49,10 +53,13 @@
 |------|------|----------|------|
 | `cards.py` / `rules.py` | 值对象 | in-process | 无外部依赖 |
 | `combos.py` | **deep module（核心）** | in-process | `classify`/`beats` 两个入口藏全部比较语义 |
-| `actions.py` | 动作空间 | in-process | 固定 134 目录，`action_mask` 唯一合法性权威 |
-| `game.py` | 流程状态机 | in-process | 纯函数式 `GameState` 转移 + `View` 投影 |
+| `actions.py` | 动作空间 | in-process | 固定 134 目录 + 头布局，`action_mask` 唯一合法性权威 |
+| `game.py` | 流程状态机 | in-process | 纯函数式 `GameState` 转移 + `View` 投影 + `Deal` |
 | `policies.py` | 接缝 | 2+ adapters | Random/Greedy；`make_scripted_policies` |
-| `env.py` | RL adapter | 依赖 gymnasium | 唯一知道观测张量形状的模块 |
+| `match.py` | 对局驱动 | in-process | 轮转 + 策略派发 + 合法性回退；唯一的多座位循环 |
+| `env.py` | RL adapter | 依赖 gymnasium | 唯一知道观测张量形状的模块；驱动委托给 `Match` |
+| `ppo.py` | 算法 | 依赖 torch | `compute_gae` / `ppo_update` 两个入口 |
+| `trace.py` | 编解码 | in-process | 轨迹格式（`Deal` + 每步 + 分数），版本与字段只此一处 |
 | `networks.py` | 训练适配 | 依赖 torch | `Agent`/`CategoricalMasked`/`NeuralPolicy`/checkpoint 读写 |
 | `train.py` | 装配/CLI | torch + gymnasium (+tensorboardX) | cleanrl PPO 移植：阶段 1 bot、阶段 2 冻结自博弈、CSV + TensorBoard 指标、checkpoint |
 | `eval.py` | 评估/CLI | torch 惰性 | 得分/分差/胜率/非法动作率 |
@@ -108,10 +115,17 @@ SUIT_N: int                           # 花色头 4（ADR-0004）
 def resolve(action, hand, rules, suit=None) -> Combo | None   # 顶牌按 suit（缺省最强）；其余牌弱色优先（占优）
 def top_rank(action) -> Rank | None   # 接受花色选择的点数；炸弹/PASS 为 None
 def suit_options(action, hand, rules) -> tuple[Suit, ...]     # 顶牌可选花色，强→弱
-def action_mask(hand, incumbent, rules) -> int        # 134-bit；唯一合法性权威
+def action_mask(hand, incumbent, rules) -> int        # 134-bit；唯一合法性权威（记忆化）
 def legal_ids(mask: int) -> list[int]
 def split_action(action) -> (int, int | None)         # 兼容 int / 1 元 / 2 元动作
+def nvec_for(rules) -> tuple[int, ...]                # (模板数, SUIT_N)（ADR-0004）
+def joint_mask_bits(template_mask, nvec) -> list[bool] # 模板位 + 偏好头全开；env/网络共用
+def index_hand(hand) -> dict[Rank, list[Card]]        # 按点数分组，强花色在前
+def resolve_indexed(action, by_rank, rules, suit=None) # 复用 index_hand 的 resolve
 ```
+
+头布局（`nvec_for`/`joint_mask_bits`）与 `action_mask` 的记忆化都收在 `actions.py`：
+加一个头或改合法性只需动这一处，`env` 与 `networks` 不再各自重建 138 位掩码。
 
 ### 2.4 `game.py`
 
@@ -128,6 +142,12 @@ class StepResult:
     trick_over; winner; points_taken; refilled; dug; done
 
 @dataclass(frozen=True, slots=True)
+class Deal:                          # 开局发牌（可脱离 RNG 重建）
+    hands; draw_pile; revealed; starter
+    @classmethod
+    def from_state(cls, state) -> Deal
+
+@dataclass(frozen=True, slots=True)
 class View:                          # agent/bot 唯一能看到的投影
     seat; hand; mask; incumbent; current; scores; counts;
     draw_count; revealed; trick_cards; last_player; done
@@ -135,6 +155,7 @@ class View:                          # agent/bot 唯一能看到的投影
 class Game:
     def __init__(self, rules=DEFAULT_RULES): ...
     def new(self, rng: random.Random) -> GameState: ...       # 发牌 + 亮牌定先
+    def restore(self, deal: Deal) -> GameState: ...           # 从发牌重建开局
     def view(self, state, seat) -> View: ...
     def step(self, state, action_id, suit=None) -> tuple[GameState, StepResult]: ...
     def is_terminal(self, state) -> bool: ...
@@ -156,13 +177,45 @@ class GreedyBot(Policy): ...          # 最弱合法跟牌，优先非炸弹；�
 class Seven523Env(gym.Env):            # gymnasium 5 元组 API（env 唯一碰张量形状）
     action_mask: list[bool]           # 138 = 134 模板 + 4 花色，永远对应刚返回的 obs
     action_space: MultiDiscrete([134, 4]) # 模板头 + 花色头（ADR-0004；目录规模随 Rules）
-    observation_space: Box(OBS_DIM,)   # OBS_DIM = 185 + 3 * num_players
+    observation_space: Box(OBS_DIM,)   # OBS_DIM = 185 + 3 * num_players（见 §4 的 segment schema）
     def reset(self, *, seed=None, options=None) -> (obs, info)
     def step(self, action) -> (obs, reward, terminated, truncated, info)
+    def view(self, seat=None) -> View  # 投影（默认 learner），对局驱动委托给 Match
 
 class NeuralPolicy:                    # Policy 接缝的神经 adapter（networks.py）
     def act(self, view: View) -> tuple[int, int | None]  # (模板, 花色)；旧单头 ckpt 花色为 None
 ```
+
+### 2.6 `match.py` / `trace.py` / `ppo.py`
+
+```python
+class Match:                          # 唯一的多座位对局循环
+    def __init__(self, rules, policies, *, state=None, rng=None)  # policies[seat] | None
+    state: GameState; done: bool; seat: int
+    steps: int; turns: list[int]; illegal_actions: int
+    on_turn: Callable[[seat, action_id, suit, View, StepResult], None] | None
+    def view(self, seat=None) -> View
+    def policy_for(self, seat) -> Policy | None
+    def step(self, action_id=None, suit=None) -> StepResult   # 无 id → 走策略并 clamp
+    def advance(self, *, stop=None) -> StepResult | None       # 停在外部座位/stop/终局
+    def run_to_end(self) -> GameState
+
+# trace.py —— 轨迹格式（字段与版本只此一处）
+def card_json / rules_json / deal_json / initial_snapshot / state_from_snapshot
+def build_trace(rules, *, seed, human_seat, players, created_at, **record)
+def save_trace(path, trace); def load_trace(path) -> dict
+TRACE_VERSION: int
+
+# ppo.py —— PPO 数学（忠实参考实现，ADR-0003）
+def compute_gae(rewards, values, dones, next_value, next_done, *, gamma, gae_lambda, use_gae=True)
+def ppo_update(agent, optimizer, batch, config) -> dict[str, float]
+class PPOConfig: ...                # PPOConfig.from_args(args)
+class RolloutBatch: ...             # RolloutBatch.flatten(...) + .size
+```
+
+契约：`step(action_id)` 走引擎严格校验（非法抛 `ValueError`）；`step()` 由策略出牌，非法则 clamp
+到首个合法并计入 `illegal_actions`。`advance`/`run_to_end` 只驱动有策略的座位；`None` 座位由
+调用方用 `step` 驱动（env 暂停 learner）。
 
 ---
 
@@ -188,8 +241,8 @@ class NeuralPolicy:                    # Policy 接缝的神经 adapter（networ
 
 ## 4. 观测与奖励
 
-观测在 `env._observation` 中构造（core 不知道）。维度 `OBS_DIM = 185 + 3 * num_players`
-（2 家 = 191）：
+观测由 `env.encode_observation` 构造（core 不知道）。维度由 `env._SEGMENTS` 一份 segment 布局
+求和（`observation_dim = 185 + 3 * num_players`，2 家 = 191），编码器按同一列表游走：
 
 | 段 | 维度 | 内容 |
 |----|------|------|
@@ -237,6 +290,10 @@ class NeuralPolicy:                    # Policy 接缝的神经 adapter（networ
 6. **差分泄漏测试**：两份仅隐藏字段不同的 `GameState`，`view(seat)` 的公开字段与 mask 必须逐位相同（ADR-0002）。
 7. `env`：gymnasium 空间/5 元组 API、obs 形状、mask 与 obs 同步。
 8. `train`/`eval`：masked categorical 不采样非法动作、Agent 前向/replay 形状、checkpoint 往返、极小训练与自博弈冒烟、评估指标恒等式（`mean_return == score_diff / 100`）。
+9. `match`：全策略跑到终局、外部座位停在 `advance`、非法策略动作被 clamp 并计数、外部动作严格抛错、`on_turn` 逐回合触发。
+10. `trace`：card/rules/deal 往返、开局重建、`build_trace` 版本戳、存取往返（无需终端）。
+11. `ppo`：GAE 手算对照（含 bootstrap/gamma/非 GAE 分支）、`RolloutBatch.flatten` 形状、`ppo_update` 参数确实更新且 loss 有限。
+12. `actions` 头布局：`nvec_for`、`joint_mask_bits`（含旧单头 ckpt）、`resolve_indexed` 与 `resolve` 一致、`action_mask` 记忆化。
 
 ---
 
@@ -264,8 +321,9 @@ class NeuralPolicy:                    # Policy 接缝的神经 adapter（networ
 
 代码在 `src/seven523/`（发行名 `7g523`；`uv run 7g523` 跑演示）。
 
-- [x] 核心：`cards` / `rules` / `combos` / `actions` / `game` / `policies` / `env`（gymnasium 5 元组 API）
-- [x] 测试 161 项：Golden cases、目录规模 134、mask↔resolve↔beats 一致、2–7 家随机/贪心对局不变量、撬底/补牌顺序/空手留局定向用例、`Rules` 校验、自定义 `Rules` 下的目录/环境尺寸回归、差分泄漏、masked categorical 不越奖、Agent 前向/replay、checkpoint 往返、训练/自博弈/评估冒烟、人机对战渲染、轨迹保存/回放与篡改检测、TensorBoard event 断言、花色头 `resolve`/`suit_options`/合法性回退/warm-start/旧 ckpt 兼容
+- [x] 核心：`cards` / `rules` / `combos` / `actions` / `game` / `policies` / `match` / `env`（gymnasium 5 元组 API）
+- [x] 训练/工具：`ppo` / `networks` / `train` / `eval` / `play` / `trace`
+- [x] 测试 193 项：Golden cases、目录规模 134、mask↔resolve↔beats 一致、2–7 家随机/贪心对局不变量、撬底/补牌顺序/空手留局定向用例、`Rules` 校验、自定义 `Rules` 下的目录/环境尺寸回归、差分泄漏、masked categorical 不越奖、Agent 前向/replay、checkpoint 往返、训练/自博弈/评估冒烟、人机对战渲染、轨迹保存/回放与篡改检测、TensorBoard event 断言、花色头 `resolve`/`suit_options`/合法性回退/warm-start/旧 ckpt 兼容、`Match` 轮转/回退/外部座位 11 项、`trace` 编解码 6 项、`ppo` GAE/update 7 项、头布局 `nvec_for`/`joint_mask_bits` 5 项
 - [x] 性能（单线程纯 Python）：2 家 ~6.0k steps/s、3/4 家 ~6.4k steps/s；`action_mask` ~75µs/次；PPO 端到端（8 env）：阶段 1 ~1.8k、自博弈 ~1.4k learner steps/s（均含周期评估）
 - [x] 训练验证：300k 步阶段 1（vs GreedyBot）后 500 局评估：分差 **+21.3**、胜率 64%（随机基线 -53.6 / 14%）；再 150k 步自博弈热启动后分差 +19.2、胜率 63%；非法动作率均为 0
 - [x] PPO 训练/评估：`networks.py`（Agent/NeuralPolicy/checkpoint）+ `train.py`（cleanrl 忠实移植、两阶段、`--eval-interval`）+ `eval.py` + `play.py`（人机对战）；动作空间 `(模板, top_suit)` 见 [ADR-0004](./docs/adr/0004-suit-head.md)，框架决议见 [ADR-0003](./docs/adr/0003-training-stack.md)
