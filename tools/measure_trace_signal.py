@@ -46,6 +46,7 @@ import numpy as np
 
 from seven523.actions import catalog_for
 from seven523.combos import ComboKind
+from seven523.elo import DEFAULT_ELO_SCALE
 from seven523.policies import Policy, policy_from_spec, split_entrant
 from seven523.play import play_game, replay_trace
 from seven523.rules import Rules
@@ -76,8 +77,7 @@ DEFAULT_LEVEL_ELO: dict[str, float] = {"random": 1000.0, "greedy": 1315.0}
 
 #: 400-point Elo scale and the SE of one single-game Bernoulli observation at
 #: p=0.5 (the plan's ``347``); ``m_eff = (SINGLE_GAME_SE / s) ** 2``.
-ELO_SCALE = 400.0
-BETA = math.log(10.0) / ELO_SCALE
+BETA = math.log(10.0) / DEFAULT_ELO_SCALE
 SINGLE_GAME_SE = 1.0 / (BETA * math.sqrt(0.25))
 Z95 = 1.959963984540054
 

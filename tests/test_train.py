@@ -3,7 +3,6 @@
 Torch lives in the optional ``train`` dependency group
 (``uv sync --group train``); without it this whole module is skipped.
 """
-import numpy as np
 import pytest
 
 torch = pytest.importorskip("torch")

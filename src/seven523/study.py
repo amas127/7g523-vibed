@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 __all__ = [
-    "MANIFEST_NAME",
     "MANIFEST_VERSION",
     "load_manifest",
     "merge_manifest",
@@ -25,7 +24,6 @@ __all__ = [
 ]
 
 MANIFEST_VERSION = 1
-MANIFEST_NAME = "manifest.json"
 
 
 def load_manifest(path: str | Path) -> dict[str, Any]:

@@ -24,7 +24,7 @@ from seven523.env import (
     encode_observation,
     observation_dim,
 )
-from seven523.game import Game, GameState, Phase, View
+from seven523.game import Game, GameState, Phase, View, seat_outcome
 from seven523.policies import GreedyBot, MixturePolicy, RandomBot
 from seven523.rules import DEFAULT_RULES, Rules
 
@@ -460,7 +460,9 @@ def run_env_episode(env, seed=0):
             (rng.choice(legal), rng.randrange(SUIT_N))
         )
         assert obs.shape == env.observation_space.shape
-        assert info == {} and not truncated
+        assert not truncated
+        if not done:
+            assert info == {}
         steps += 1
         assert steps < 50_000
     assert -1.0 <= reward <= 1.0
@@ -594,14 +596,8 @@ def _random_opponents(rules, seed):
 
 
 def _win_bonus(state, learner):
-    scores = state.scores
-    best_other = max(score for seat, score in enumerate(scores) if seat != learner)
-    own = scores[learner]
-    if own > best_other:
-        return 1.0
-    if own < best_other:
-        return -1.0
-    return 0.0
+    """The production win/tie/loss definition, under test."""
+    return float(seat_outcome(state.scores, learner))
 
 
 def test_reward_shaping_defaults_to_terminal_and_rejects_unknown_modes():
@@ -622,6 +618,23 @@ def test_terminal_mode_rewards_are_zero_until_the_terminal_return():
     assert len(rewards) > 1
     assert all(reward == 0.0 for reward in rewards[:-1])
     assert rewards[-1] == env.game.returns(env.state)[env.learner]
+
+
+def test_terminal_step_publishes_scores_and_outcome():
+    rules = Rules()
+    env = Seven523Env(rules=rules, seed=0, opponents=_random_opponents(rules, 0))
+    env.reset()
+    rng = random.Random(0)
+    done = False
+    info: dict = {}
+    while not done:
+        legal = [i for i in range(env.action_space_n) if env.action_mask[i]]
+        _obs, _reward, done, _truncated, info = env.step(
+            (rng.choice(legal), rng.randrange(SUIT_N))
+        )
+    assert info["scores"] == list(env.state.scores)
+    assert info["outcome"] == seat_outcome(env.state.scores, env.learner)
+    assert sum(info["scores"]) == rules.total_points
 
 
 @pytest.mark.parametrize("num_players", [2, 3])
@@ -724,7 +737,9 @@ def test_env_episode_is_finite_and_legal():
             (rng.choice(legal), rng.randrange(SUIT_N))
         )
         assert obs.shape == env.observation_space.shape
-        assert info == {} and not truncated
+        assert not truncated
+        if not done:
+            assert info == {}
         steps += 1
         assert steps < 20_000, "env episode did not terminate"
 

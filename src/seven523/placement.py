@@ -48,7 +48,6 @@ from .trace import build_trace, player_label, save_trace, trace_filename
 
 __all__ = [
     "COLD_START_PRIOR",
-    "DEFAULT_ANCHORS",
     "MARGIN_C",
     "MARGIN_SIGMA",
     "MARGIN_TRACE_FACTOR",
@@ -84,8 +83,6 @@ REPORT_SCHEMA = "seven523.placement-report"
 TRACE_PRIOR_SCHEMA = "seven523.trace-prior"
 VERSION = 1
 
-#: The manifest's pinned 秤砣 (fallback when a manifest carries no anchors).
-DEFAULT_ANCHORS: dict[str, float] = {"random": 1000.0, "greedy": 1315.0}
 
 #: Cold start before any trace exists (HR §5.4: the first-game prior).
 COLD_START_PRIOR = Prior(1500.0, 300.0)

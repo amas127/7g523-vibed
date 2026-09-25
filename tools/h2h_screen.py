@@ -28,7 +28,7 @@ if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
 import head_to_head as h2h  # noqa: E402
-from seven523.duel import ELO_SCALE  # noqa: E402
+from seven523.elo import DEFAULT_ELO_SCALE as ELO_SCALE  # noqa: E402
 from seven523.ladder import Entrant  # noqa: E402
 
 __all__ = ["main", "parse_args"]

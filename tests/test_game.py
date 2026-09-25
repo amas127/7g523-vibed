@@ -3,11 +3,11 @@ from dataclasses import replace
 
 import pytest
 
-from seven523.actions import CATALOG, catalog_for, split_action
+from seven523.actions import CATALOG, catalog_for
 from seven523.cards import Card, Rank, Suit, card_key, point_value
 from seven523.combos import ComboKind, classify
 from seven523.env import encode_observation
-from seven523.game import Game, GameState, Phase
+from seven523.game import Game, GameState, Phase, seat_outcome
 from seven523.policies import GreedyBot, RandomBot
 from seven523.rules import DEFAULT_RULES, Rules
 
@@ -380,6 +380,15 @@ def test_greedy_bot_with_custom_rules_uses_the_matching_catalog():
         play_episode_rules(
             rules, random.Random(seed), [GreedyBot(rules), GreedyBot(rules)]
         )
+
+
+def test_seat_outcome_is_the_single_win_tie_loss_definition():
+    assert seat_outcome((60, 40), 0) == 1
+    assert seat_outcome((40, 60), 0) == -1
+    assert seat_outcome((50, 50), 0) == 0
+    assert seat_outcome((40, 30, 30), 0) == 1
+    assert seat_outcome((40, 40, 20), 0) == 0
+    assert seat_outcome((20, 40, 40), 0) == -1
 
 
 def test_reveal_determines_starter_three_players():

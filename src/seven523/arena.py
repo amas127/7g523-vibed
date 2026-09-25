@@ -29,14 +29,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
-from .elo import Fit, FitConfig, PlayedGame, Prior, expected_score, fit_ratings
+from .elo import Fit, FitConfig, PlayedGame, expected_score, fit_ratings
 from .ladder import (
     Entrant,
     ScheduledGame,
     _ShardJob,
     _run_shards,
     _warn_cuda_workers,
-    make_factory,
     plan_games,
     split_schedule,
 )
@@ -47,7 +46,6 @@ __all__ = [
     "arena_document",
     "auto_id_from_path",
     "infer_step",
-    "make_factory",
     "pair_diagnostics",
     "pair_stats",
     "play_parallel",

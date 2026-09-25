@@ -11,6 +11,7 @@ import random
 import statistics
 from typing import Sequence
 
+from .game import seat_outcome
 from .match import Match
 from .policies import Policy, make_scripted_policies
 from .rules import DEFAULT_RULES, Rules
@@ -49,16 +50,15 @@ def evaluate(
         match.run_to_end()
 
         final = match.state.scores
-        own = final[learner]
+        outcome = seat_outcome(final, learner)
+        wins += outcome > 0
+        draws += outcome == 0
         others = [score for seat, score in enumerate(final) if seat != learner]
-        best_other = max(others)
-        wins += own > best_other
-        draws += own == best_other
         returns.append(match.returns()[learner])
         lengths.append(match.turns[learner])
-        scores.append(own)
+        scores.append(final[learner])
         opp_scores.append(statistics.fmean(others))
-        diffs.append(own - statistics.fmean(others))
+        diffs.append(final[learner] - statistics.fmean(others))
         illegal += match.illegal_actions
         learner_turns += match.turns[learner]
 

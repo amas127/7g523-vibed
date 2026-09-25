@@ -22,13 +22,12 @@ import random
 import statistics
 from typing import Mapping, Sequence
 
-from .elo import PlayedGame
+from .elo import DEFAULT_ELO_SCALE, PlayedGame
 from .ladder import Entrant, ScheduledGame
 
-__all__ = ["ELO_SCALE", "combine_duel_seeds", "paired_duel_stats", "plan_duel_schedule"]
+__all__ = ["combine_duel_seeds", "paired_duel_stats", "plan_duel_schedule"]
 
 #: The 400-point logistic scale, shared with :mod:`seven523.elo`.
-ELO_SCALE = 400.0
 
 
 def plan_duel_schedule(
@@ -72,7 +71,7 @@ def _clamp_probability(p: float, deals: int) -> float:
 def _elo_diff(p: float, deals: int) -> float:
     """``400 * log10(p / (1 - p))`` — the left-minus-right Elo difference."""
     p = _clamp_probability(p, deals)
-    return ELO_SCALE * math.log10(p / (1.0 - p))
+    return DEFAULT_ELO_SCALE * math.log10(p / (1.0 - p))
 
 
 def _quantile(values: Sequence[float], q: float) -> float:

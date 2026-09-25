@@ -337,6 +337,17 @@ def _episode_info(infos: dict) -> dict | None:
     return None
 
 
+def _final_outcome(infos: dict, index: int) -> int | None:
+    """The env-published win/tie/loss for one finished sub-env, if present."""
+    final_info = infos.get("final_info")
+    if not isinstance(final_info, dict):
+        return None
+    outcomes = final_info.get("outcome")
+    if outcomes is None:
+        return None
+    return int(outcomes[index])
+
+
 class MetricsLogger:
     """Append one CSV row per update; no tensorboard/wandb dependency."""
 
@@ -748,11 +759,13 @@ def train(args: argparse.Namespace) -> Path:
                             global_step, episode_return, episode_length
                         )
                         if pfsp_records:
-                            outcome = 0
-                            if episode_return > 0.0:
-                                outcome = 1
-                            elif episode_return < 0.0:
-                                outcome = -1
+                            # The env publishes the terminal win/tie/loss; the
+                            # reward sign is only a fallback for exotic wrappers.
+                            outcome = _final_outcome(infos, int(idx))
+                            if outcome is None:
+                                outcome = int(episode_return > 0.0) - int(
+                                    episode_return < 0.0
+                                )
                             for policy in episode_mixtures[int(idx)]:
                                 member_id = policy.finished_id
                                 if member_id is None:

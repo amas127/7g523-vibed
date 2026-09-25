@@ -12,7 +12,6 @@ from seven523.arena import (
     arena_document,
     auto_id_from_path,
     infer_step,
-    make_factory,
     pair_diagnostics,
     pair_stats,
     play_parallel,
@@ -21,7 +20,7 @@ from seven523.arena import (
     split_schedule,
     write_tensorboard,
 )
-from seven523.ladder import Entrant, plan_games
+from seven523.ladder import Entrant, make_factory, plan_games
 from seven523.policies import policy_from_spec
 from seven523.rules import DEFAULT_RULES
 

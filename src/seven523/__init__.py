@@ -43,7 +43,7 @@ from .cards import (
 )
 from .combos import Combo, ComboKind, beats, classify
 from .env import Seven523Env, observation_dim
-from .game import Deal, Game, GameState, Phase, StepResult, View
+from .game import Deal, Game, GameState, Phase, StepResult, View, seat_outcome
 from .match import Match
 from .policies import GreedyBot, Policy, RandomBot, make_scripted_policies
 from .rules import DEFAULT_RULES, Rules
@@ -84,6 +84,7 @@ __all__ = [
     "Phase",
     "StepResult",
     "View",
+    "seat_outcome",
     "Seven523Env",
     "observation_dim",
     "GreedyBot",

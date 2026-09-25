@@ -8,6 +8,7 @@ agent or bot may observe (ADR-0002).
 from __future__ import annotations
 
 import random
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
 
@@ -288,3 +289,10 @@ class Game:
             - (total - score) / ((n - 1) * self.rules.total_points)
             for score in state.scores
         )
+
+
+def seat_outcome(scores: Sequence[int], seat: int) -> int:
+    """The one win/tie/loss definition: +1 / 0 / -1 against the best other seat."""
+    own = scores[seat]
+    best_other = max(score for other, score in enumerate(scores) if other != seat)
+    return int(own > best_other) - int(own < best_other)

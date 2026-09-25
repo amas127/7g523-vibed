@@ -20,7 +20,7 @@ import numpy as np
 from .actions import joint_mask_bits, nvec_for, split_action
 from .cards import RANK_INDEX, card_id, make_deck, point_value
 from .combos import ComboKind
-from .game import Game, GameState, View
+from .game import Game, GameState, View, seat_outcome
 from .match import Match
 from .policies import Policy, RandomBot
 from .rules import DEFAULT_RULES, Rules
@@ -330,7 +330,11 @@ class Seven523Env(gym.Env):
             match.advance()
         after = self._potential()
         reward = self._reward(match.state, before, after)
-        return self._publish(), reward, match.done, False, {}
+        info: dict = {}
+        if match.done:
+            info["scores"] = list(match.state.scores)
+            info["outcome"] = seat_outcome(match.state.scores, self.learner)
+        return self._publish(), reward, match.done, False, info
 
     def _potential(self) -> float:
         """Φ(state) for the learner: ``own/total − mean(others)/total``.
@@ -348,15 +352,7 @@ class Seven523Env(gym.Env):
 
     def _win_bonus(self, state: GameState) -> float:
         """Outcome against the best other seat: +1 win / 0 tie / −1 loss."""
-        own = state.scores[self.learner]
-        best_other = max(
-            score for seat, score in enumerate(state.scores) if seat != self.learner
-        )
-        if own > best_other:
-            return 1.0
-        if own < best_other:
-            return -1.0
-        return 0.0
+        return float(seat_outcome(state.scores, self.learner))
 
     def _reward(self, state: GameState, before: float, after: float) -> float:
         """Shape the transition reward for the configured mode."""

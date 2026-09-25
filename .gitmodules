@@ -1,0 +1,3 @@
+[submodule "ppo-implementation-details"]
+	path = ppo-implementation-details
+	url = https://github.com/vwxyzjn/ppo-implementation-details.git
