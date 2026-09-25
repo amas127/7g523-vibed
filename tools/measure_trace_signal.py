@@ -48,17 +48,15 @@ from seven523.actions import catalog_for
 from seven523.combos import ComboKind
 from seven523.elo import DEFAULT_ELO_SCALE
 from seven523.policies import Policy, policy_from_spec, split_entrant
-from seven523.play import play_game, replay_trace
+from seven523.play import replay_trace
+from seven523.record import play_recorded, policy_seed
 from seven523.rules import Rules
 from seven523.study import load_manifest, merge_manifest, save_manifest
 from seven523.trace import (
-    build_trace,
     load_trace,
     parse_player_label,
     player_label,
     rules_from_json,
-    save_trace,
-    trace_filename,
 )
 
 __all__ = [
@@ -222,22 +220,13 @@ def cmd_generate(args: argparse.Namespace) -> int:
         for index, game_seed in enumerate(game_seeds):
             seat = index % n
             anchor = anchors[(index // n) % len(anchors)]
-            policy = build_policy(subject_spec, rules, game_seed)
+            policy = build_policy(subject_spec, rules, policy_seed(game_seed, seat))
             policies: list[Policy] = [policy] * n
             for other in range(n):
                 if other != seat:
                     policies[other] = build_policy(
-                        anchor, rules, (game_seed + 101 * (other + 1)) & 0xFFFF_FFFF
+                        anchor, rules, policy_seed(game_seed, other)
                     )
-            record: dict[str, Any] = {}
-            play_game(
-                policies,
-                rules=rules,
-                human_seat=seat,
-                seed=game_seed,
-                print_fn=_silent,
-                record=record,
-            )
             players = [
                 player_label(
                     "subject" if s == seat else "anchor",
@@ -246,16 +235,18 @@ def cmd_generate(args: argparse.Namespace) -> int:
                 )
                 for s in range(n)
             ]
-            trace = build_trace(
-                rules,
+            play_recorded(
+                policies,
+                rules=rules,
                 seed=game_seed,
                 human_seat=seat,
                 players=players,
                 created_at=created_at,
-                **record,
+                trace_dir=subject_dir,
+                trace_index=index,
+                opponent=anchor,
+                print_fn=_silent,
             )
-            path = subject_dir / trace_filename(index, game_seed, seat, anchor)
-            save_trace(path, trace)
         print(f"  {subject_id}: {args.games} games -> {subject_dir}")
 
     document = load_manifest(out / "manifest.json")

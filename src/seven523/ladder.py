@@ -34,9 +34,9 @@ from typing import Callable, Sequence
 
 from .elo import Fit, FitConfig, PlayedGame, Prior, RungSelection, fit_ratings, select_rungs
 from .policies import Policy, policy_from_spec
-from .play import play_game
+from .record import play_recorded, policy_seed
 from .rules import DEFAULT_RULES, Rules
-from .trace import build_trace, player_label, save_trace, trace_filename
+from .trace import player_label
 
 __all__ = [
     "Entrant",
@@ -296,31 +296,42 @@ def _play_games_range(
     try:
         for index, game in enumerate(schedule):
             policies = [
-                factory(by_id[id_].spec, rules, (game.seed + 101 * (seat + 1)) & 0xFFFF_FFFF)
+                factory(by_id[id_].spec, rules, policy_seed(game.seed, seat))
                 for seat, id_ in enumerate(game.seats)
             ]
             human = game.seats.index(game.subject)
-            record: dict[str, object] = {}
-            play_game(
+            opponent = game.seats[1 - human]
+            labels = [
+                player_label(
+                    "subject"
+                    if seat == human
+                    else ("anchor" if by_id[id_].is_anchor else "candidate"),
+                    id_,
+                    seat,
+                )
+                for seat, id_ in enumerate(game.seats)
+            ]
+            recorded = play_recorded(
                 policies,
                 rules=rules,
-                human_seat=human,
                 seed=game.seed,
+                human_seat=human,
+                players=labels,
+                created_at=stamp or "",
+                trace_dir=out_path / game.subject if out_path is not None else None,
+                trace_index=index_offset + index,
+                opponent=opponent,
                 print_fn=_silent,
-                record=record,
             )
             played = PlayedGame(
-                seed=game.seed,
-                seats=game.seats,
-                scores=tuple(int(value) for value in record["final_scores"]),  # type: ignore[arg-type]
+                seed=recorded.seed, seats=game.seats, scores=recorded.scores
             )
             results.append(played)
             if results_handle is not None:
-                opponent = game.seats[1 - human]
                 line = {
-                    "seed": game.seed,
+                    "seed": recorded.seed,
                     "seats": list(game.seats),
-                    "scores": list(played.scores),
+                    "scores": list(recorded.scores),
                     "subject": game.subject,
                     "opponent": opponent,
                     "subject_seat": human,
@@ -330,31 +341,6 @@ def _play_games_range(
                     json.dumps(line, ensure_ascii=False, separators=(",", ":")) + "\n"
                 )
                 results_handle.flush()  # a crash keeps every finished game
-            if out_path is not None:
-                labels = []
-                for seat, id_ in enumerate(game.seats):
-                    if seat == human:
-                        role = "subject"
-                    else:
-                        role = "anchor" if by_id[id_].is_anchor else "candidate"
-                    labels.append(player_label(role, id_, seat))
-                opponent = game.seats[1 - human]
-                trace = build_trace(
-                    rules,
-                    seed=game.seed,
-                    human_seat=human,
-                    players=labels,
-                    created_at=stamp or "",
-                    **record,
-                )
-                save_trace(
-                    out_path
-                    / game.subject
-                    / trace_filename(
-                        index_offset + index, game.seed, human, opponent
-                    ),
-                    trace,
-                )
     finally:
         if results_handle is not None:
             results_handle.close()

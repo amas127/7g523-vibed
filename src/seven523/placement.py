@@ -41,10 +41,11 @@ from typing import Any, Callable, Mapping, Sequence
 
 from .elo import Fit, FitConfig, PlayedGame, Prior, expected_score, fit_ratings
 from .policies import Policy, missing_ckpt_path, policy_from_spec
-from .play import QuitGame, interactive_chooser, play_game
+from .play import QuitGame, interactive_chooser
+from .record import play_recorded, policy_seed
 from .rules import DEFAULT_RULES, Rules
 from .study import load_manifest
-from .trace import build_trace, player_label, save_trace, trace_filename
+from .trace import player_label
 
 __all__ = [
     "COLD_START_PRIOR",
@@ -721,22 +722,14 @@ class PlacementSession:
         chooser: Callable[..., Any] | None = None,
         print_fn: Callable[..., None],
     ) -> tuple[dict[str, Any], Path]:
-        policy = self._opponent_policy(opponent, (seed + 101 * (index + 1)) & 0xFFFF_FFFF)
+        policy = self._opponent_policy(opponent, policy_seed(seed, seat))
         policies: list[Policy] = [policy] * self.rules.num_players
         if human_policy is not None:
             policies[seat] = human_policy
-        record: dict[str, Any] = {}
-        play_game(
+        recorded = play_recorded(
             policies,
             chooser=chooser,
             rules=self.rules,
-            human_seat=seat,
-            seed=seed,
-            print_fn=print_fn,
-            record=record,
-        )
-        trace = build_trace(
-            self.rules,
             seed=seed,
             human_seat=seat,
             players=session_player_labels(
@@ -746,11 +739,13 @@ class PlacementSession:
                 opponent=opponent,
             ),
             created_at=self.created_at,
-            **record,
+            trace_dir=self.directory,
+            trace_index=index,
+            opponent=opponent.id,
+            print_fn=print_fn,
         )
-        path = self.directory / trace_filename(index, seed, seat, opponent.id)
-        save_trace(path, trace)
-        return trace, path
+        assert recorded.trace_path is not None
+        return recorded.trace, recorded.trace_path
 
     def _record_game(
         self, opponent: Opponent, *, seat: int, seed: int, scores: Sequence[int], trace_path: Path
