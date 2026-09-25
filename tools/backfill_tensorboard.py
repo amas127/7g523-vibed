@@ -19,7 +19,7 @@ import csv
 import json
 from pathlib import Path
 
-from seven523.train import _LOG_FIELDS, TensorboardLogger
+from seven523.metrics import LOG_FIELDS, TensorboardLogger
 
 __all__ = ["backfill", "main", "parse_args"]
 
@@ -54,7 +54,7 @@ def backfill(run_dir: Path, *, force: bool = False) -> Path | None:
     with metrics_path.open() as handle:
         for row in csv.DictReader(handle):
             step = int(row["global_step"])
-            metrics = {field: _optional_float(row.get(field, "")) for field in _LOG_FIELDS}
+            metrics = {field: _optional_float(row.get(field, "")) for field in LOG_FIELDS}
             logger.log_update(step, metrics)
             if metrics["episodic_return"] is not None and metrics["episodic_length"] is not None:
                 logger.log_episode(

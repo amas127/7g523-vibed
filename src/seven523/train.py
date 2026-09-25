@@ -20,7 +20,6 @@ import argparse
 import json
 import random
 import time
-from collections import Counter
 from pathlib import Path
 
 import gymnasium as gym
@@ -31,68 +30,32 @@ import torch.optim as optim
 from .actions import nvec_for
 from .env import Seven523Env, observation_dim
 from .eval import evaluate
-from .networks import Agent, NeuralPolicy, load_agent, save_agent, warm_start_into
-from .policies import (
-    EpisodeMixturePolicy,
-    MixturePolicy,
-    Policy,
-    WeightedPolicy,
-    make_scripted_policies,
-    pfsp_weights,
-    policy_from_spec,
+from .league import LeagueConfig, PfspController, build_league, parse_pool_member
+from .metrics import MetricsLogger, TensorboardLogger
+from .networks import (
+    Agent,
+    NeuralPolicy,
+    WarmStartLayoutError,
+    save_agent,
+    warm_start_from,
 )
+from .policies import Policy, WeightedPolicy
 from .ppo import PPOConfig, RolloutBatch, compute_gae, ppo_update
 from .rules import Rules
 
-__all__ = ["MetricsLogger", "TensorboardLogger", "main", "make_env", "parse_args", "train"]
-
-_LOG_FIELDS = (
-    "episodic_return",
-    "episodic_length",
-    "episodes",
-    "learning_rate",
-    "value_loss",
-    "policy_loss",
-    "entropy",
-    "old_approx_kl",
-    "approx_kl",
-    "clipfrac",
-    "explained_variance",
-    "sps",
-    "eval_return",
-    "eval_score",
-    "eval_score_diff",
-    "eval_win_rate",
-)
+__all__ = [
+    "MetricsLogger",
+    "TensorboardLogger",
+    "main",
+    "make_env",
+    "parse_args",
+    "parse_pool_member",
+    "train",
+]
 
 
 def _bool(value: str) -> bool:
     return value.lower() in {"true", "1", "yes", "y", "t"}
-
-
-def parse_pool_member(raw: str) -> tuple[float, str]:
-    """Split a ``[WEIGHT@]SPEC`` league member (``1.5@ckpt:runs/<new-run>/agent.pt``)."""
-    if "@" in raw:
-        weight_raw, spec = raw.split("@", 1)
-        weight = float(weight_raw)
-        if weight < 0:
-            raise ValueError(f"pool member weight must be non-negative: {raw!r}")
-        return weight, spec.strip()
-    return 1.0, raw.strip()
-
-
-def _pool_member_ids(specs: list[str]) -> list[str]:
-    """Stable, readable per-member ids: the spec, disambiguated if repeated."""
-    counts = Counter(specs)
-    seen: dict[str, int] = {}
-    ids: list[str] = []
-    for spec in specs:
-        if counts[spec] == 1:
-            ids.append(spec)
-            continue
-        seen[spec] = seen.get(spec, 0) + 1
-        ids.append(f"{spec}#{seen[spec]}")
-    return ids
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -349,107 +312,6 @@ def _final_outcome(infos: dict, index: int) -> int | None:
     return int(outcomes[index])
 
 
-class MetricsLogger:
-    """Append one CSV row per update; no tensorboard/wandb dependency."""
-
-    def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
-        self.path.write_text("global_step," + ",".join(_LOG_FIELDS) + "\n")
-
-    def log(self, global_step: int, **values: float | None) -> None:
-        cells = []
-        for field in _LOG_FIELDS:
-            value = values.get(field)
-            cells.append("" if value is None else f"{value:.6g}")
-        with self.path.open("a") as handle:
-            handle.write(",".join([str(global_step), *cells]) + "\n")
-
-
-_TB_TAGS: dict[str, str] = {
-    "episodes": "charts/episodes",
-    "learning_rate": "charts/learning_rate",
-    "value_loss": "losses/value_loss",
-    "policy_loss": "losses/policy_loss",
-    "entropy": "losses/entropy",
-    "old_approx_kl": "losses/old_approx_kl",
-    "approx_kl": "losses/approx_kl",
-    "clipfrac": "losses/clipfrac",
-    "explained_variance": "losses/explained_variance",
-    "sps": "charts/SPS",
-    "eval_return": "eval/mean_return",
-    "eval_score": "eval/learner_score",
-    "eval_score_diff": "eval/score_diff",
-    "eval_win_rate": "eval/win_rate",
-}
-
-
-class TensorboardLogger:
-    """Thin tensorboardX wrapper; no-op when disabled or not installed."""
-
-    def __init__(self, log_dir: str | Path, enabled: bool = True) -> None:
-        self.writer = None
-        if enabled:
-            try:
-                from tensorboardX import SummaryWriter
-            except ImportError:
-                print(
-                    "tensorboardX not installed; skipping TensorBoard "
-                    "(metrics.csv is still written; run `uv sync --group train`)"
-                )
-            else:
-                self.writer = SummaryWriter(str(log_dir))
-
-    @property
-    def enabled(self) -> bool:
-        return self.writer is not None
-
-    def add_scalar(self, tag: str, value: float | None, step: int) -> None:
-        if self.writer is not None and value is not None:
-            self.writer.add_scalar(tag, value, step)
-
-    def add_text(self, tag: str, text: str, step: int = 0) -> None:
-        if self.writer is not None:
-            self.writer.add_text(tag, text, step)
-
-    def log_update(self, global_step: int, metrics: dict[str, float | None]) -> None:
-        for key, tag in _TB_TAGS.items():
-            self.add_scalar(tag, metrics.get(key), global_step)
-
-    def log_episode(self, global_step: int, episode_return: float, length: int) -> None:
-        self.add_scalar("charts/episodic_return", episode_return, global_step)
-        self.add_scalar("charts/episodic_length", float(length), global_step)
-
-    def close(self) -> None:
-        if self.writer is not None:
-            self.writer.close()
-            self.writer = None
-
-
-def _self_play_opponents(
-    args: argparse.Namespace,
-    rules: Rules,
-    obs_dim: int,
-    nvec: np.ndarray,
-    device: torch.device,
-    agent: Agent,
-) -> tuple[list[list[Policy]], NeuralPolicy]:
-    frozen = NeuralPolicy(
-        Agent(
-            obs_dim,
-            nvec,
-            hidden=args.hidden_size,
-            activation=args.activation,
-            arch=args.arch,
-        ),
-        rules,
-        device=device,
-        sample=args.self_play_sample,
-        seed=args.seed,
-    )
-    frozen.agent.load_state_dict(agent.state_dict())
-    return [[frozen] * rules.num_players for _ in range(args.num_envs)], frozen
-
-
 def train(args: argparse.Namespace) -> Path:
     """Run PPO and return the run directory (checkpoints + ``metrics.csv``)."""
     if args.pool_episode and args.opponent not in {"pool", "mix"}:
@@ -496,152 +358,56 @@ def train(args: argparse.Namespace) -> Path:
         arch=args.arch,
     ).to(device)
     if args.load_checkpoint:
-        loaded, _ = load_agent(args.load_checkpoint, device=device)
-        if loaded.obs_dim != obs_dim:
+        try:
+            warm = warm_start_from(args.load_checkpoint, agent, device=str(device))
+        except WarmStartLayoutError as error:
             raise SystemExit(
                 f"--load-checkpoint {args.load_checkpoint}: cannot "
-                f"warm-start a {loaded.obs_dim}-wide checkpoint into the v5 "
+                f"warm-start a {error.loaded_obs_dim}-wide checkpoint into the v5 "
                 f"{obs_dim}-wide layout for {rules.num_players} players"
-            )
-        if loaded.nvec.tolist() == nvec.tolist() and loaded.arch == args.arch:
-            agent.load_state_dict(loaded.state_dict())
-        else:
-            copied = warm_start_into(agent, loaded)
+            ) from error
+        if not warm.exact:
             print(
-                f"warm start: copied {len(copied)} tensors from "
-                f"{args.load_checkpoint} (arch {loaded.arch}->{args.arch}, "
-                f"nvec {loaded.nvec.tolist()} -> {nvec.tolist()})"
+                f"warm start: copied {len(warm.copied)} tensors from "
+                f"{args.load_checkpoint} (arch {warm.arch}->{args.arch}, "
+                f"nvec {warm.nvec} -> {nvec.tolist()})"
             )
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
     config = PPOConfig.from_args(args)
 
-    frozen: NeuralPolicy | None = None
-    member_ids: list[str] = []
-    episode_mixtures: list[list[EpisodeMixturePolicy]] = [
-        [] for _ in range(args.num_envs)
-    ]
-    if args.opponent in {"self", "mix", "pool"}:
-        opponents, frozen = _self_play_opponents(
-            args, rules, obs_dim, nvec, device, agent
-        )
-        if args.opponent == "mix":
-            greedy = make_scripted_policies("greedy", rules, seed=args.seed)[0]
-            mix_members: list[tuple[float, Policy, str]] = [
-                (1.0 - args.mix_greedy_prob, frozen, "self"),
-                (args.mix_greedy_prob, greedy, "greedy"),
-            ]
-            opponents = []
-            for idx in range(args.num_envs):
-                seat_policies: list[Policy] = []
-                for seat in range(rules.num_players):
-                    rng = random.Random(args.seed + idx * 1000 + seat)
-                    if args.pool_episode:
-                        policy: Policy = EpisodeMixturePolicy(mix_members, rng=rng)
-                        if seat != learner:
-                            episode_mixtures[idx].append(policy)
-                    else:
-                        policy = MixturePolicy(
-                            [(weight, member) for weight, member, _ in mix_members],
-                            rng=rng,
-                        )
-                    seat_policies.append(policy)
-                opponents.append(seat_policies)
-        elif args.opponent == "pool":
-            if not args.pool_member:
-                raise SystemExit("--opponent pool needs at least one --pool-member")
-            specs = [parse_pool_member(raw)[1] for raw in args.pool_member]
-            member_ids = _pool_member_ids(specs)
-            members: list[tuple[float, Policy, str]] = []
-            for index, raw in enumerate(args.pool_member):
-                weight, spec = parse_pool_member(raw)
-                if spec == "self":
-                    member: Policy = frozen
-                else:
-                    member = policy_from_spec(
-                        spec, rules, seed=args.seed + index, device=str(device)
-                    )
-                members.append((weight, member, member_ids[index]))
-            opponents = []
-            for idx in range(args.num_envs):
-                seat_policies = []
-                for seat in range(rules.num_players):
-                    rng = random.Random(args.seed + idx * 1000 + seat)
-                    if args.pool_episode:
-                        policy = EpisodeMixturePolicy(members, rng=rng)
-                        if seat != learner:
-                            episode_mixtures[idx].append(policy)
-                    else:
-                        policy = MixturePolicy(
-                            [(weight, member) for weight, member, _ in members],
-                            rng=rng,
-                        )
-                    seat_policies.append(policy)
-                opponents.append(seat_policies)
-    else:
-        opponents = [
-            make_scripted_policies(args.opponent, rules, seed=args.seed + idx)
-            for idx in range(args.num_envs)
-        ]
+    league = build_league(
+        LeagueConfig(
+            opponent=args.opponent,
+            num_envs=args.num_envs,
+            num_players=args.num_players,
+            seed=args.seed,
+            pool_member=tuple(args.pool_member or ()),
+            mix_greedy_prob=args.mix_greedy_prob,
+            pool_episode=args.pool_episode,
+            self_play_sample=args.self_play_sample,
+        ),
+        rules=rules,
+        agent=agent,
+        device=device,
+    )
+    frozen = league.frozen
+    opponents = league.opponents
+    member_ids = league.member_ids
+    episode_mixtures = league.episode_mixtures
 
     # PFSP (direction C): cumulative per-member win/draw/loss record from the
     # learner's seat; every --pfsp-every finished episodes the pool weights are
     # recomputed and pushed into every live EpisodeMixturePolicy.
-    pfsp_records: dict[str, list[int]] = {}
-    pfsp_episodes = 0
-    pfsp_last_update = 0
-    pfsp_updates = 0
+    pfsp: PfspController | None = None
     pfsp_writer = None
-
-    def pfsp_update(global_step: int) -> None:
-        nonlocal pfsp_last_update, pfsp_updates
-        weights = pfsp_weights(
-            {
-                member_id: (
-                    float(record[0]),
-                    float(record[1]),
-                    float(record[2]),
-                )
-                for member_id, record in pfsp_records.items()
-            },
+    if args.pfsp:
+        pfsp = PfspController(
+            member_ids,
             prior=args.pfsp_prior,
             epsilon=args.pfsp_epsilon,
             uniform_mix=args.pfsp_uniform_mix,
+            every=args.pfsp_every,
         )
-        ordered = [weights[member_id] for member_id in member_ids]
-        for env_mixtures in episode_mixtures:
-            for policy in env_mixtures:
-                if isinstance(policy, WeightedPolicy):
-                    policy.set_weights(ordered)
-        for member_id in member_ids:
-            wins, draws, losses = pfsp_records[member_id]
-            games = wins + draws + losses
-            denominator = args.pfsp_prior + games
-            win_rate = (
-                (0.5 * args.pfsp_prior + wins + 0.5 * draws) / denominator
-                if denominator
-                else 0.5
-            )
-            assert pfsp_writer is not None
-            pfsp_writer.write(
-                f"{global_step},{pfsp_episodes},{member_id},{weights[member_id]:.6g},"
-                f"{win_rate:.6g},{wins},{draws},{losses}\n"
-            )
-            tensorboard.add_scalar(
-                f"pfsp/weight/{member_id}", weights[member_id], global_step
-            )
-        pfsp_writer.flush()
-        pfsp_updates += 1
-        pfsp_last_update = pfsp_episodes
-        print(
-            f"pfsp update {pfsp_updates} @ step {global_step} "
-            f"(episodes {pfsp_episodes}): "
-            + ", ".join(
-                f"{member_id}={weights[member_id]:.3f}" for member_id in member_ids
-            )
-        )
-
-    if args.pfsp:
-        pfsp_records = {member_id: [0, 0, 0] for member_id in member_ids}
         pfsp_writer = (run_dir / "pfsp_weights.csv").open("w")
         pfsp_writer.write(
             "global_step,episodes,member_id,weight,win_rate,wins,draws,losses\n"
@@ -760,7 +526,7 @@ def train(args: argparse.Namespace) -> Path:
                         tensorboard.log_episode(
                             global_step, episode_return, episode_length
                         )
-                        if pfsp_records:
+                        if pfsp is not None:
                             # The env publishes the terminal win/tie/loss; the
                             # reward sign is only a fallback for exotic wrappers.
                             outcome = _final_outcome(infos, int(idx))
@@ -768,24 +534,49 @@ def train(args: argparse.Namespace) -> Path:
                                 outcome = int(episode_return > 0.0) - int(
                                     episode_return < 0.0
                                 )
+                            counted = False
                             for policy in episode_mixtures[int(idx)]:
                                 if not isinstance(policy, WeightedPolicy):
                                     continue
                                 member_id = policy.finished_id
                                 if member_id is None:
                                     continue
-                                record = pfsp_records.setdefault(
-                                    member_id, [0, 0, 0]
+                                pfsp.record(
+                                    member_id, outcome, episode=not counted
                                 )
-                                if outcome > 0:
-                                    record[0] += 1
-                                elif outcome < 0:
-                                    record[2] += 1
-                                else:
-                                    record[1] += 1
-                            pfsp_episodes += 1
-                            if pfsp_episodes - pfsp_last_update >= args.pfsp_every:
-                                pfsp_update(global_step)
+                                counted = True
+                            weights = pfsp.maybe_update()
+                            if weights is not None:
+                                ordered = [
+                                    weights[member_id] for member_id in member_ids
+                                ]
+                                for env_mixtures in episode_mixtures:
+                                    for policy in env_mixtures:
+                                        if isinstance(policy, WeightedPolicy):
+                                            policy.set_weights(ordered)
+                                for member_id in member_ids:
+                                    wins, draws, losses = pfsp.records[member_id]
+                                    assert pfsp_writer is not None
+                                    pfsp_writer.write(
+                                        f"{global_step},{pfsp.episodes},{member_id},"
+                                        f"{weights[member_id]:.6g},"
+                                        f"{pfsp.win_rate(member_id):.6g},"
+                                        f"{wins},{draws},{losses}\n"
+                                    )
+                                    tensorboard.add_scalar(
+                                        f"pfsp/weight/{member_id}",
+                                        weights[member_id],
+                                        global_step,
+                                    )
+                                pfsp_writer.flush()
+                                print(
+                                    f"pfsp update {pfsp.updates} @ step "
+                                    f"{global_step} (episodes {pfsp.episodes}): "
+                                    + ", ".join(
+                                        f"{member_id}={weights[member_id]:.3f}"
+                                        for member_id in member_ids
+                                    )
+                                )
             episodes_done += len(ep_returns)
 
             # bootstrap value if not done

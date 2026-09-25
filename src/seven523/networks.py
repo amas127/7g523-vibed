@@ -8,6 +8,7 @@ only place that does.  It needs the optional ``train`` dependency group:
 from __future__ import annotations
 
 import random
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -24,9 +25,12 @@ __all__ = [
     "Agent",
     "CategoricalMasked",
     "NeuralPolicy",
+    "WarmStart",
+    "WarmStartLayoutError",
     "layer_init",
     "load_agent",
     "save_agent",
+    "warm_start_from",
     "warm_start_into",
 ]
 
@@ -250,6 +254,35 @@ def load_agent(
     return agent.to(device), payload.get("extra", {})
 
 
+@dataclass(frozen=True, slots=True)
+class WarmStart:
+    """Outcome of :func:`warm_start_from`: what was copied and from where.
+
+    ``exact`` is true when the checkpoint layout matched and the whole state
+    dict was loaded directly (``copied`` is then empty); otherwise ``copied``
+    holds the tensor labels copied by :func:`warm_start_into`, and ``arch`` /
+    ``nvec`` describe the loaded checkpoint for the caller's log message.
+    """
+
+    copied: list[str]
+    exact: bool
+    arch: str
+    nvec: list[int]
+
+
+class WarmStartLayoutError(ValueError):
+    """A checkpoint whose observation width does not match the agent's."""
+
+    def __init__(self, loaded_obs_dim: int, agent_obs_dim: int) -> None:
+        super().__init__(
+            f"cannot warm-start a {loaded_obs_dim}-wide checkpoint into a "
+            f"{agent_obs_dim}-wide agent: observation layouts must match "
+            f"(v5 is the only supported layout)"
+        )
+        self.loaded_obs_dim = loaded_obs_dim
+        self.agent_obs_dim = agent_obs_dim
+
+
 def _mapped_source_key(agent: Agent, loaded: Agent, key: str) -> str:
     """Target state_dict key -> the key holding its weights in ``loaded``.
 
@@ -287,11 +320,7 @@ def warm_start_into(agent: Agent, loaded: Agent) -> list[str]:
     raises :class:`ValueError` rather than guessing a column mapping.
     """
     if loaded.obs_dim != agent.obs_dim:
-        raise ValueError(
-            f"cannot warm-start a {loaded.obs_dim}-wide checkpoint into a "
-            f"{agent.obs_dim}-wide agent: observation layouts must match "
-            f"(v5 is the only supported layout)"
-        )
+        raise WarmStartLayoutError(loaded.obs_dim, agent.obs_dim)
     copied: list[str] = []
     source = loaded.state_dict()
     for key, value in agent.state_dict().items():
@@ -307,6 +336,37 @@ def warm_start_into(agent: Agent, loaded: Agent) -> list[str]:
             value[: origin.shape[0]].copy_(origin)
             copied.append(f"{key}[:{origin.shape[0]}]")
     return copied
+
+
+def warm_start_from(
+    path: str | Path, agent: Agent, *, device: str = "cpu"
+) -> WarmStart:
+    """Load a same-layout checkpoint and warm-start ``agent`` in place.
+
+    The checkpoint is rebuilt with :func:`load_agent`.  An ``obs_dim``
+    mismatch raises :class:`WarmStartLayoutError` (a :class:`ValueError`) so
+    callers can raise their own CLI error; callers that only need to log can
+    instead print the returned :class:`WarmStart`.  An identical ``nvec`` /
+    ``arch`` layout loads the whole state dict directly; otherwise
+    :func:`warm_start_into` copies the shared trunk and heads and the copied
+    labels are returned.
+    """
+    loaded, _ = load_agent(path, device=device)
+    if loaded.obs_dim != agent.obs_dim:
+        raise WarmStartLayoutError(loaded.obs_dim, agent.obs_dim)
+    if loaded.nvec.tolist() == agent.nvec.tolist() and loaded.arch == agent.arch:
+        agent.load_state_dict(loaded.state_dict())
+        copied: list[str] = []
+        exact = True
+    else:
+        copied = warm_start_into(agent, loaded)
+        exact = False
+    return WarmStart(
+        copied=copied,
+        exact=exact,
+        arch=loaded.arch,
+        nvec=loaded.nvec.tolist(),
+    )
 
 
 class NeuralPolicy:

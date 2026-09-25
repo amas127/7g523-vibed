@@ -18,6 +18,7 @@ from seven523.networks import (  # noqa: E402
     NeuralPolicy,
     load_agent,
     save_agent,
+    warm_start_from,
     warm_start_into,
 )
 from seven523.policies import GreedyBot  # noqa: E402
@@ -147,6 +148,46 @@ def test_warm_start_towers_into_shared_takes_the_actor_tower():
         target.get_value(obs), source.critic(source.actor_network(obs))
     )
     assert not torch.equal(target.get_value(obs), source.get_value(obs))
+
+
+def test_warm_start_from_exact_layout_loads_everything(tmp_path):
+    torch.manual_seed(0)
+    source = Agent(OBS_V5, NVEC, hidden=16)
+    path = tmp_path / "exact.pt"
+    save_agent(path, source)
+    target = Agent(OBS_V5, NVEC, hidden=16)
+    result = warm_start_from(path, target)
+    assert result.exact is True
+    assert result.copied == []
+    assert result.arch == "shared"
+    assert result.nvec == NVEC
+    for key, value in target.state_dict().items():
+        assert torch.equal(value, source.state_dict()[key]), key
+
+
+def test_warm_start_from_reports_the_partial_copy(tmp_path):
+    torch.manual_seed(0)
+    source = Agent(OBS_V5, [134], hidden=16)
+    path = tmp_path / "old-head.pt"
+    save_agent(path, source)
+    target = Agent(OBS_V5, NVEC, hidden=16)
+    result = warm_start_from(path, target)
+    assert result.exact is False
+    assert result.nvec == [134]
+    assert "actor.weight[:134]" in result.copied
+    assert torch.equal(target.actor.weight[:134], source.actor.weight)
+
+
+def test_warm_start_from_rejects_a_different_obs_dim(tmp_path):
+    torch.manual_seed(0)
+    source = Agent(119, NVEC, hidden=16)
+    path = tmp_path / "foreign.pt"
+    save_agent(path, source)
+    target = Agent(OBS_V5, NVEC, hidden=16)
+    untouched = target.network[0].weight.clone()
+    with pytest.raises(ValueError, match="observation layouts must match"):
+        warm_start_from(path, target)
+    assert torch.equal(target.network[0].weight, untouched)
 
 
 # -- architecture field ------------------------------------------------------
