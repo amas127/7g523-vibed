@@ -1,0 +1,41 @@
+[project]
+name = "7g523"
+version = "0.1.0"
+description = "7鬼523: pure-rules card game core + Gym-shaped RL env"
+authors = [{ name = "amas127", email = "amadeusxu127@gmail.com" }]
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "gymnasium>=1.3.0",
+]
+
+[project.scripts]
+7g523 = "seven523:main"
+7g523-play = "seven523.play:main"
+7g523-train = "seven523.train:main"
+7g523-eval = "seven523.eval:main"
+
+[build-system]
+requires = ["uv_build>=0.12.19,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = ["pytest>=9.1.1"]
+train = [
+    "numpy>=1.26",
+    "tensorboard>=2.18",
+    "tensorboardx>=2.6.5",
+    "torch>=2.14",
+]
+
+# CUDA 13.2 wheels (decision: docs/adr/0003-training-stack.md); switch this
+# index for a CPU or another CUDA build on a different machine.
+[[tool.uv.index]]
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu132" }
+
+[tool.uv.build-backend]
+module-name = "seven523"
