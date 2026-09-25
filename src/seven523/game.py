@@ -47,6 +47,26 @@ class GameState:
 
 
 @dataclass(frozen=True, slots=True)
+class Deal:
+    """The opening deal: enough to rebuild a game without the RNG.
+
+    ``Game.new`` deals one; :meth:`Game.restore` turns it back into the opening
+    :class:`GameState`.  Traces persist a :class:`Deal` instead of poking at
+    ``GameState`` fields, so a new field cannot silently break replay.
+    """
+
+    hands: tuple[frozenset[Card], ...]
+    draw_pile: tuple[Card, ...]
+    revealed: tuple[Card, ...]
+    starter: int
+
+    @classmethod
+    def from_state(cls, state: "GameState") -> "Deal":
+        """The deal behind ``state``; only valid before the first move."""
+        return cls(state.hands, state.draw_pile, state.revealed, state.current)
+
+
+@dataclass(frozen=True, slots=True)
 class StepResult:
     trick_over: bool = False
     winner: int | None = None
@@ -81,24 +101,32 @@ class Game:
 
     # -- lifecycle ----------------------------------------------------------
     def new(self, rng: random.Random) -> GameState:
+        """Deal and return the opening state (reveal already resolved)."""
+        return self.restore(self._deal(rng))
+
+    def _deal(self, rng: random.Random) -> Deal:
         rules = self.rules
         deck = list(make_deck())
         rng.shuffle(deck)
-        hands: list[frozenset[Card]] = []
-        for seat in range(rules.num_players):
-            start = seat * rules.hand_size
-            hands.append(frozenset(deck[start : start + rules.hand_size]))
+        hands = tuple(
+            frozenset(deck[seat * rules.hand_size : (seat + 1) * rules.hand_size])
+            for seat in range(rules.num_players)
+        )
         draw_pile = tuple(deck[rules.num_players * rules.hand_size :])
         revealed = tuple(min(hand, key=card_key) for hand in hands)
         starter = min(range(rules.num_players), key=lambda s: card_key(revealed[s]))
+        return Deal(hands=hands, draw_pile=draw_pile, revealed=revealed, starter=starter)
+
+    def restore(self, deal: Deal) -> GameState:
+        """Rebuild the opening state of a dealt game (used by trace replay)."""
         return GameState(
-            hands=tuple(hands),
-            draw_pile=draw_pile,
-            scores=(0,) * rules.num_players,
+            hands=deal.hands,
+            draw_pile=deal.draw_pile,
+            scores=(0,) * self.rules.num_players,
             trick_points=0,
             trick_cards=(),
-            revealed=revealed,
-            current=starter,
+            revealed=deal.revealed,
+            current=deal.starter,
             incumbent=None,
             last_player=None,
             collected=0,

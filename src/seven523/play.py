@@ -13,45 +13,41 @@ policy.  Without ``--checkpoint`` the opponent is ``GreedyBot`` (default) or
 from __future__ import annotations
 
 import argparse
-import json
 import random
-from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from .actions import legal_ids, resolve, split_action, suit_options
-from .cards import CARD_ORDER, SUIT_LABELS, Suit, card_id, card_key, sorted_cards
+from .cards import SUIT_LABELS, Suit, card_key
 from .combos import Combo, ComboKind
-from .game import Game, GameState, Phase, StepResult, View
+from .game import Game, GameState, StepResult, View
 from .match import Match
 from .policies import GreedyBot, Policy, RandomBot
 from .rules import DEFAULT_RULES, Rules
+from .trace import (
+    TRACE_VERSION,
+    build_trace,
+    initial_snapshot,
+    load_trace,
+    rules_from_json,
+    save_trace,
+    state_from_snapshot,
+)
 
 __all__ = [
     "HELP",
     "QuitGame",
-    "TRACE_VERSION",
     "action_text",
-    "card_from_json",
-    "card_json",
     "combo_text",
-    "initial_snapshot",
-    "load_trace",
     "main",
     "parse_args",
     "parse_choice",
     "play_game",
     "replay_trace",
-    "rules_from_json",
-    "rules_json",
-    "save_trace",
-    "state_from_snapshot",
     "state_panel",
     "suit_hint",
 ]
-
-TRACE_VERSION = 1
 
 HELP = """\
 输入可选列表里的编号出牌；q 退出，h 显示帮助。
@@ -191,66 +187,7 @@ def _trick_text(result: StepResult, names: list[str]) -> str:
     return text
 
 
-# -- game traces: save / load / replay ---------------------------------------
-
-
-def card_json(card) -> dict[str, Any]:
-    return {"id": card_id(card), "label": str(card)}
-
-
-def card_from_json(data: dict[str, Any]):
-    return CARD_ORDER[int(data["id"])]
-
-
-def rules_json(rules: Rules) -> dict[str, int]:
-    return asdict(rules)
-
-
-def rules_from_json(data: dict[str, Any]) -> Rules:
-    return Rules(**data)
-
-
-def initial_snapshot(state: GameState) -> dict[str, Any]:
-    """The deal plus starter: enough to rebuild the game without the RNG."""
-    return {
-        "starter": state.current,
-        "hands": [
-            [card_json(card) for card in sorted_cards(hand)] for hand in state.hands
-        ],
-        "draw_pile": [card_json(card) for card in state.draw_pile],
-        "revealed": [card_json(card) for card in state.revealed],
-    }
-
-
-def state_from_snapshot(snapshot: dict[str, Any], rules: Rules) -> GameState:
-    """Rebuild the opening :class:`GameState` recorded by :func:`initial_snapshot`."""
-    return GameState(
-        hands=tuple(
-            frozenset(card_from_json(card) for card in hand)
-            for hand in snapshot["hands"]
-        ),
-        draw_pile=tuple(card_from_json(card) for card in snapshot["draw_pile"]),
-        scores=(0,) * rules.num_players,
-        trick_points=0,
-        trick_cards=(),
-        revealed=tuple(card_from_json(card) for card in snapshot["revealed"]),
-        current=int(snapshot["starter"]),
-        incumbent=None,
-        last_player=None,
-        collected=0,
-        phase=Phase.PLAY,
-    )
-
-
-def save_trace(path: str | Path, trace: dict[str, Any]) -> Path:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(trace, ensure_ascii=False, indent=2))
-    return path
-
-
-def load_trace(path: str | Path) -> dict[str, Any]:
-    return json.loads(Path(path).read_text())
+# -- game replay -------------------------------------------------------------
 
 
 def replay_trace(
@@ -265,6 +202,9 @@ def replay_trace(
     Raises ``ValueError`` on any divergence (illegal action, wrong seat,
     different score), which makes a trace an integrity check of the engine.
     """
+    version = int(trace.get("version", 1))
+    if version > TRACE_VERSION:
+        raise ValueError(f"trace version {version} is newer than {TRACE_VERSION}")
     rules = rules_from_json(trace["rules"])
     state = state_from_snapshot(trace["initial"], rules)
     match = Match(rules, [None] * rules.num_players, state=state)
@@ -523,18 +463,17 @@ def main() -> None:
                 record=record,
             )
             if args.save_trace:
-                trace = {
-                    "version": TRACE_VERSION,
-                    "created_at": datetime.now().isoformat(timespec="seconds"),
-                    "rules": rules_json(rules),
-                    "seed": seed,
-                    "human_seat": args.seat,
-                    "players": [
+                trace = build_trace(
+                    rules,
+                    seed=seed,
+                    human_seat=args.seat,
+                    players=[
                         f"human@seat{args.seat}" if seat == args.seat else opponent_name
                         for seat in range(rules.num_players)
                     ],
+                    created_at=datetime.now().isoformat(timespec="seconds"),
                     **record,
-                }
+                )
                 path = _trace_path(Path(args.save_trace), round_no, args.rounds)
                 save_trace(path, trace)
                 print(f"轨迹已保存：{path}")
