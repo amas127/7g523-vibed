@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import random
 from collections import Counter
+from collections.abc import Callable
+from dataclasses import dataclass
 
 import gymnasium as gym
 import numpy as np
@@ -31,56 +33,105 @@ _INC_TOP = 54
 _KINDS = len(ComboKind)
 _NUM_CARDS = 54
 
+#: ``obs``/``offset`` writer for one segment of the observation vector.
+_Writer = Callable[[View, Rules, list[float], int], None]
+
+
+@dataclass(frozen=True, slots=True)
+class _Segment:
+    """One contiguous block of the observation: its width and how to fill it.
+
+    ``width is None`` means one slot per player (``rules.num_players``).  The
+    dimensions and the encoder are both derived from :data:`_SEGMENTS`, so a
+    segment cannot drift between the two.
+    """
+
+    name: str
+    width: int | None
+    write: _Writer
+
+
+def _write_hand(view: View, rules: Rules, obs: list[float], offset: int) -> None:
+    for card in view.hand:  # own hand (private)
+        obs[offset + card_id(card)] = 1.0
+
+
+def _write_rank_counts(view: View, rules: Rules, obs: list[float], offset: int) -> None:
+    counts = Counter(card.rank for card in view.hand)
+    for rank, index in RANK_INDEX.items():
+        obs[offset + index] = counts.get(rank, 0) / 4.0
+
+
+def _write_incumbent_top(view: View, rules: Rules, obs: list[float], offset: int) -> None:
+    if view.incumbent is not None:  # current trick (public)
+        obs[offset + card_id(view.incumbent.top_card)] = 1.0
+
+
+def _write_incumbent_kind(view: View, rules: Rules, obs: list[float], offset: int) -> None:
+    if view.incumbent is not None:
+        obs[offset + _KIND_INDEX[view.incumbent.kind]] = 1.0
+
+
+def _write_incumbent_size(view: View, rules: Rules, obs: list[float], offset: int) -> None:
+    if view.incumbent is not None:
+        obs[offset] = view.incumbent.size / rules.hand_size
+
+
+def _write_draw_count(view: View, rules: Rules, obs: list[float], offset: int) -> None:
+    obs[offset] = view.draw_count / _NUM_CARDS
+
+
+def _write_scores(view: View, rules: Rules, obs: list[float], offset: int) -> None:
+    for seat in range(rules.num_players):
+        obs[offset + seat] = view.scores[seat] / rules.total_points
+
+
+def _write_hand_counts(view: View, rules: Rules, obs: list[float], offset: int) -> None:
+    for seat in range(rules.num_players):
+        obs[offset + seat] = view.counts[seat] / rules.hand_size
+
+
+def _write_current(view: View, rules: Rules, obs: list[float], offset: int) -> None:
+    obs[offset + view.current] = 1.0
+
+
+def _write_revealed(view: View, rules: Rules, obs: list[float], offset: int) -> None:
+    for card in view.revealed:  # public reveal (one known card each)
+        obs[offset + card_id(card)] = 1.0
+
+
+#: The observation layout, in order.  This is the single source of truth for
+#: both :func:`observation_dim` and :func:`encode_observation`.
+_SEGMENTS: tuple[_Segment, ...] = (
+    _Segment("hand", _HAND, _write_hand),
+    _Segment("rank_counts", _RANKS, _write_rank_counts),
+    _Segment("incumbent_top", _INC_TOP, _write_incumbent_top),
+    _Segment("incumbent_kind", _KINDS, _write_incumbent_kind),
+    _Segment("incumbent_size", 1, _write_incumbent_size),
+    _Segment("draw_count", 1, _write_draw_count),
+    _Segment("scores", None, _write_scores),
+    _Segment("hand_counts", None, _write_hand_counts),
+    _Segment("current", None, _write_current),
+    _Segment("revealed", _HAND, _write_revealed),
+)
+
+
+def _segment_width(segment: _Segment, num_players: int) -> int:
+    return num_players if segment.width is None else segment.width
+
 
 def observation_dim(num_players: int) -> int:
-    """Fixed observation length: hand + counts + incumbent + table."""
-    return _HAND + _RANKS + _INC_TOP + _KINDS + 1 + 1 + 3 * num_players + _HAND
+    """Fixed observation length, summed from the segment layout."""
+    return sum(_segment_width(segment, num_players) for segment in _SEGMENTS)
 
 
 def encode_observation(view: View, rules: Rules = DEFAULT_RULES) -> list[float]:
     """Encode a :class:`View` into the fixed float vector an agent sees."""
     obs = [0.0] * observation_dim(rules.num_players)
     offset = 0
-
-    for card in view.hand:  # own hand (private)
-        obs[offset + card_id(card)] = 1.0
-    offset += _HAND
-
-    counts = Counter(card.rank for card in view.hand)
-    for rank, index in RANK_INDEX.items():
-        obs[offset + index] = counts.get(rank, 0) / 4.0
-    offset += _RANKS
-
-    if view.incumbent is not None:  # current trick (public)
-        obs[offset + card_id(view.incumbent.top_card)] = 1.0
-    offset += _INC_TOP
-
-    if view.incumbent is not None:
-        obs[offset + _KIND_INDEX[view.incumbent.kind]] = 1.0
-    offset += _KINDS
-
-    if view.incumbent is not None:
-        obs[offset] = view.incumbent.size / rules.hand_size
-    offset += 1
-
-    obs[offset] = view.draw_count / _NUM_CARDS
-    offset += 1
-
-    for seat in range(rules.num_players):
-        obs[offset + seat] = view.scores[seat] / rules.total_points
-    offset += rules.num_players
-
-    for seat in range(rules.num_players):
-        obs[offset + seat] = view.counts[seat] / rules.hand_size
-    offset += rules.num_players
-
-    obs[offset + view.current] = 1.0
-    offset += rules.num_players
-
-    for card in view.revealed:  # public reveal (one known card each)
-        obs[offset + card_id(card)] = 1.0
-    offset += _HAND
-
+    for segment in _SEGMENTS:
+        segment.write(view, rules, obs, offset)
+        offset += _segment_width(segment, rules.num_players)
     assert offset == len(obs)
     return obs
 
