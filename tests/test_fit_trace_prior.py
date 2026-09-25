@@ -45,15 +45,6 @@ pytestmark = pytest.mark.skipif(
     not STUDY.is_dir(), reason="traces/study ladder is not present"
 )
 
-#: Locked on the fixed subset (α=30, reps=400, seed=0, LOLO + de-shrink).
-T2_EXPECTED = {"a": -683.3, "b": 1.5462, "sigma": {"5": 73.8, "10": 66.7, "20": 63.2}}
-MANIFEST_EXPECTED = {
-    "a": -673.5,
-    "b": 1.5407,
-    "sigma": {"5": 63.2, "10": 54.4, "20": 50.2},
-}
-
-
 @pytest.fixture(scope="module")
 def ladder():
     manifest = {
@@ -69,36 +60,6 @@ def ladder():
         )
         loaded[source] = (rows, labels, stats)
     return loaded
-
-
-@pytest.mark.parametrize(
-    "source, expected",
-    [("t2", T2_EXPECTED), ("manifest", MANIFEST_EXPECTED)],
-)
-def test_lolo_deshrink_regression_locks_ab_and_sigma(ladder, source, expected):
-    rows, labels, stats = ladder[source]
-    assert len(rows) == 6 * PER_LEVEL
-    assert stats["failed"] == 0
-
-    doc = fit.build_prior(
-        rows,
-        labels,
-        alpha=30.0,
-        scheme="lolo",
-        deshrink=True,
-        reps=400,
-        seed=0,
-        label_source="t2_full_data" if source == "t2" else "manifest_levels",
-    )
-    assert doc["scheme"] == "lolo"
-    assert doc["labels"] == ("t2_full_data" if source == "t2" else "manifest_levels")
-    assert doc["deshrink"]["applied"] is True
-    assert doc["deshrink"]["a"] == pytest.approx(expected["a"], abs=0.1)
-    assert doc["deshrink"]["b"] == pytest.approx(expected["b"], abs=1e-3)
-    assert set(doc["sigma_traj"]) == {str(n) for n in range(1, 21)}
-    for n, value in expected["sigma"].items():
-        assert doc["sigma_traj"][n] == pytest.approx(value, abs=0.05)
-
 
 def test_label_map_drives_both_subject_and_opponent_features(ladder):
     t2_rows, _t2_labels, _stats = ladder["t2"]

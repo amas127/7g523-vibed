@@ -34,9 +34,9 @@ FAMILY: dict[ComboKind, int] = {
     ComboKind.CONSECUTIVE_PAIRS: 1,
 }
 
-#: Flat-tier ordering (pre-2026-09-25 RULES.md).  ``beats`` reads it in the
-#: legacy ``rules.comparison == "tier"`` replay mode and for bombs;
-#: :attr:`Combo.strength` uses it to *sort* candidate plays.
+#: Flat-tier ordering (pre-2026-09-25 RULES.md).  :attr:`Combo.strength`
+#: uses it to *sort* candidate plays (bombs first by tier, then rank);
+#: :func:`beats` uses only the bomb hierarchy.
 TIER: dict[ComboKind, int] = {
     ComboKind.SINGLE: 1,
     ComboKind.PAIR: 1,
@@ -147,24 +147,6 @@ def classify(cards: Iterable[Card], rules: Rules = DEFAULT_RULES) -> Combo | Non
     return None
 
 
-def _beats_tier(candidate: Combo, incumbent: Combo) -> bool:
-    """The flat-tier comparison used before 2026-09-25 (``rules.comparison == "tier"``).
-
-    Kept only so traces recorded under the old rules replay: non-bombs compare
-    across tiers (单牌/对子 tier 1 < 顺子/连对 tier 2), same-tier different kinds
-    never compare, and bombs compare by tier then rank.
-    """
-    if candidate.tier != incumbent.tier:
-        return candidate.tier > incumbent.tier
-    if candidate.kind != incumbent.kind:
-        return False
-    if candidate.is_bomb:
-        return candidate.top_rank > incumbent.top_rank
-    if candidate.size != incumbent.size:
-        return candidate.size > incumbent.size
-    return candidate.top_key > incumbent.top_key
-
-
 def beats(candidate: Combo, incumbent: Combo | None, rules: Rules = DEFAULT_RULES) -> bool:
     """True iff ``candidate`` strictly beats ``incumbent`` (RULES.md §3).
 
@@ -172,13 +154,10 @@ def beats(candidate: Combo, incumbent: Combo | None, rules: Rules = DEFAULT_RULE
     non-bomb and compare among themselves by tier then rank.  Non-bombs only
     compare inside their family (单张: single/straight; 对子: pair/consecutive
     pairs); a cross-family play never beats.  Within a family, size comes
-    first, then the top card's point order and suit.  ``rules.comparison ==
-    "tier"`` selects the legacy flat-tier rule (:func:`_beats_tier`) instead.
+    first, then the top card's point order and suit.
     """
     if incumbent is None:
         return True
-    if rules.comparison == "tier":
-        return _beats_tier(candidate, incumbent)
     if candidate.is_bomb or incumbent.is_bomb:
         if candidate.tier != incumbent.tier:
             return candidate.tier > incumbent.tier

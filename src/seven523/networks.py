@@ -8,7 +8,6 @@ only place that does.  It needs the optional ``train`` dependency group:
 from __future__ import annotations
 
 import random
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -17,13 +16,7 @@ import torch.nn as nn
 from torch.distributions.categorical import Categorical
 
 from .actions import joint_mask_bits
-from .cards import CARD_ORDER, RANK_INDEX
-from .env import (
-    encode_observation,
-    observation_dim,
-    observation_num_players,
-    segment_spans,
-)
+from .env import OBS_VERSION, encode_observation
 from .game import View
 from .rules import DEFAULT_RULES, Rules
 
@@ -103,7 +96,6 @@ class Agent(nn.Module):
         nvec: Sequence[int],
         hidden: int = 128,
         activation: str = "relu",
-        obs_version: int = 1,
         arch: str = "shared",
     ) -> None:
         super().__init__()
@@ -117,10 +109,6 @@ class Agent(nn.Module):
                 f"unknown arch {arch!r}; choose from {sorted(_ARCHITECTURES)}"
             )
         self.obs_dim = int(obs_dim)
-        #: The encoder layout this network consumes.  Defaults to v1 so direct
-        #: constructions predating observation versioning keep their meaning;
-        #: :mod:`seven523.train` passes the run's version explicitly.
-        self.obs_version = int(obs_version)
         self.nvec = torch.as_tensor(list(nvec), dtype=torch.long)
         self.hidden = int(hidden)
         self.activation = activation
@@ -225,7 +213,7 @@ def save_agent(path: str | Path, agent: Agent, extra: dict[str, Any] | None = No
         "nvec": agent.nvec.tolist(),
         "hidden": agent.hidden,
         "activation": agent.activation,
-        "obs_version": int(getattr(agent, "obs_version", 1)),
+        "obs_version": OBS_VERSION,
         "arch": getattr(agent, "arch", "shared"),
     }
     if extra:
@@ -236,30 +224,30 @@ def save_agent(path: str | Path, agent: Agent, extra: dict[str, Any] | None = No
 def load_agent(
     path: str | Path, device: str | torch.device = "cpu"
 ) -> tuple[Agent, dict[str, Any]]:
-    """Rebuild an :class:`Agent` from :func:`save_agent`; returns ``(agent, extra)``."""
+    """Rebuild an :class:`Agent` from :func:`save_agent`; returns ``(agent, extra)``.
+
+    Only v5 checkpoints load.  A missing or different ``obs_version`` is a hard
+    error: the dimension alone can never identify a foreign layout, so old
+    payloads must be re-trained or explicitly migrated (see the ADR retiring
+    v1-v4).
+    """
     payload = torch.load(path, map_location=device, weights_only=True)
+    version = payload.get("obs_version")
+    if version != OBS_VERSION:
+        raise ValueError(
+            f"unsupported checkpoint obs_version {version!r}; expected "
+            f"{OBS_VERSION} (v5)"
+        )
     agent = Agent(
         payload["obs_dim"],
         payload["nvec"],
         payload["hidden"],
         activation=payload.get("activation", "relu"),
-        # Checkpoints saved before observation versioning are v1 by definition;
-        # the dimension alone cannot tell v1 3-player from v2 2-player.
-        obs_version=payload.get("obs_version", 1),
         # Checkpoints saved before the arch field are shared by construction.
         arch=payload.get("arch", "shared"),
     )
     agent.load_state_dict(payload["model"])
     return agent.to(device), payload.get("extra", {})
-
-
-#: First-layer weight keys whose input columns are obs-layout specific and
-#: therefore need the pad/guard treatment (one per possible trunk).
-_INPUT_LAYER_KEYS = {
-    "network.0.weight",
-    "actor_network.0.weight",
-    "critic_network.0.weight",
-}
 
 
 def _mapped_source_key(agent: Agent, loaded: Agent, key: str) -> str:
@@ -280,164 +268,6 @@ def _mapped_source_key(agent: Agent, loaded: Agent, key: str) -> str:
     return key
 
 
-#: Cross-family observation-version pairs whose first layer needs a
-#: segment-level remap: v4/v5 reorder and compress the legacy v1/v2 segments
-#: (the ``hand`` block and the appended B0/B1 blocks still line up).  Prefix
-#: pairs (v1 -> v2 -> v3 and v4 -> v5) are absent on purpose -- the plain
-#: prefix copy in :func:`warm_start_into` already handles them, and every
-#: other direction must not be guessed at (it is rejected at the train load
-#: point).
-_REMAP_VERSION_PAIRS: frozenset[tuple[int, int]] = frozenset(
-    {(1, 4), (2, 4), (1, 5), (2, 5)}
-)
-
-#: Destination slim segment -> same-meaning source segment, copied column for
-#: column.  Segments the source layout lacks stay zero (v1 has no B0/B1, v2
-#: has no B1), which is exactly the appended-feature start.
-_IDENTITY_SEGMENTS: dict[str, str] = {
-    "hand": "hand",
-    "inc_kind": "incumbent_kind",
-    "inc_size": "incumbent_size",
-    "draw": "draw_count",
-    "trick_points": "trick_points",
-    "remaining_points": "remaining_points",
-    "point_hold": "point_hold",
-    "unseen": "unseen",
-    "last_player": "last_player",
-}
-
-_NUM_CARDS = len(CARD_ORDER)
-_RANKS = len(RANK_INDEX)
-
-
-def _rank_mean_matrix() -> torch.Tensor:
-    """``(15, 54)`` map from a card one-hot to its rank one-hot.
-
-    Each rank row averages the source card columns that share the rank (four
-    for a standard rank, one per joker), so a rank one-hot activates the mean
-    of that rank's four legacy card columns.  There is deliberately no suit
-    half: the conservative compression drops suit weights to zero.
-    """
-    counts: dict[Any, int] = {}
-    for card in CARD_ORDER:
-        counts[card.rank] = counts.get(card.rank, 0) + 1
-    matrix = torch.zeros(_RANKS, _NUM_CARDS)
-    for index, card in enumerate(CARD_ORDER):
-        matrix[RANK_INDEX[card.rank], index] = 1.0 / counts[card.rank]
-    return matrix
-
-
-_RANK_MEAN = _rank_mean_matrix()
-
-
-@lru_cache(maxsize=None)
-def _first_layer_remap(
-    src_version: int, src_dim: int, dst_version: int, dst_dim: int
-) -> torch.Tensor | None:
-    """Column map from a source first layer to a destination first layer.
-
-    Returns a ``(dst_dim, src_dim)`` matrix ``m`` such that the destination
-    first layer can be initialised as ``w_dst = w_src @ m.T``.  The matrix is
-    built segment by segment from :func:`seven523.env.segment_spans`, so no
-    observation offset is hardcoded here and the map cannot drift from the
-    encoder tables.
-
-    Mapping rules for the supported forward pairs (v1/v2 -> v4/v5):
-
-    * same-meaning segments (``hand``, ``inc_kind``, ``inc_size``, ``draw``,
-      the B0 block and, when present, the B1 block) copy column for column;
-    * ``incumbent_top`` -> ``inc_rank`` averages the source columns of each
-      rank; its ``inc_suit`` half starts at zero (the conservative version of
-      the design);
-    * ``revealed`` -> each ``opp_revealed`` block gets the same rank average,
-      with the suit half zeroed (the layout hides which revealed card belongs
-      to which opponent, so this is the documented approximation);
-    * ``hand_counts`` -> ``opp_count`` keeps the opponent slots and drops the
-      self slot; ``scores`` stays identity because the legacy learner was
-      always seat 0, so the self-centred rotation is a no-op at load time;
-    * ``rank_counts`` and ``current`` are dropped (all-zero columns).
-
-    ``None`` means "not remappable here": prefix pairs, unsupported
-    directions, foreign dimensions and mixed player counts all fall back to
-    :func:`warm_start_into`'s old prefix/skip behaviour.
-    """
-    src_version = int(src_version)
-    dst_version = int(dst_version)
-    if (src_version, dst_version) not in _REMAP_VERSION_PAIRS:
-        return None
-    src_players = observation_num_players(src_dim, src_version)
-    dst_players = observation_num_players(dst_dim, dst_version)
-    if (
-        src_players is None
-        or dst_players is None
-        or src_players != dst_players
-        or observation_dim(src_players, src_version) != src_dim
-        or observation_dim(dst_players, dst_version) != dst_dim
-    ):
-        return None
-    players = src_players
-    src_spans = {
-        name: (start, width)
-        for name, start, width in segment_spans(src_version, players)
-    }
-    remap = torch.zeros(dst_dim, src_dim)
-    for name, dst_start, width in segment_spans(dst_version, players):
-        if name in _IDENTITY_SEGMENTS:
-            source = src_spans.get(_IDENTITY_SEGMENTS[name])
-            if source is None:
-                continue  # the source layout lacks this segment: keep zeros
-            src_start, src_width = source
-            if src_width != width:
-                return None  # layout drift: refuse to guess
-            remap[dst_start : dst_start + width, src_start : src_start + width] = (
-                torch.eye(width)
-            )
-        elif name == "inc_rank":
-            source = src_spans.get("incumbent_top")
-            if source is None or source[1] != _NUM_CARDS or width != _RANKS:
-                return None
-            src_start, _ = source
-            remap[
-                dst_start : dst_start + _RANKS, src_start : src_start + _NUM_CARDS
-            ] = _RANK_MEAN
-        elif name == "inc_suit":
-            # Only the rank half of incumbent_top is approximated; the suit
-            # half is the zero-start conservative variant (design §2).
-            if "incumbent_top" not in src_spans or width != 4:
-                return None
-        elif name == "scores":
-            source = src_spans.get("scores")
-            if source is None or source[1] != width:
-                return None
-            src_start, _ = source
-            # Learner seat 0, so self-centred order == absolute order here.
-            remap[dst_start : dst_start + width, src_start : src_start + width] = (
-                torch.eye(width)
-            )
-        elif name == "opp_count":
-            source = src_spans.get("hand_counts")
-            if source is None or source[1] != width + 1:
-                return None
-            src_start, _ = source
-            for slot in range(1, width + 1):
-                remap[dst_start + slot - 1, src_start + slot] = 1.0
-        elif name == "opp_revealed":
-            source = src_spans.get("revealed")
-            block = _RANKS + 4
-            if source is None or source[1] != _NUM_CARDS or width % block:
-                return None
-            src_start, _ = source
-            for opponent in range(width // block):
-                dst_block = dst_start + opponent * block
-                remap[
-                    dst_block : dst_block + _RANKS,
-                    src_start : src_start + _NUM_CARDS,
-                ] = _RANK_MEAN
-        else:
-            return None  # unknown destination segment: never guess
-    return remap
-
-
 def warm_start_into(agent: Agent, loaded: Agent) -> list[str]:
     """Copy compatible weights from ``loaded`` into ``agent`` in place.
 
@@ -453,19 +283,15 @@ def warm_start_into(agent: Agent, loaded: Agent) -> list[str]:
     and the value head is re-adapted to the actor trunk, so value is *not*
     preserved in that direction.
 
-    When the target observation is wider (an older-version checkpoint into a
-    newer agent, e.g. v1/v2 → v3), each trunk's first layer copies the old
-    input columns and zeroes the new ones, so the warm-started function is
-    bit-identical on the old prefix and the appended features start with zero
-    contribution.
-
-    Across layout families (v1/v2 → v4/v5) the first layer cannot be copied by
-    prefix -- S1 reorders and compresses segments -- so it is projected through
-    :func:`_first_layer_remap` instead (rank means for the two compressed
-    blocks, identity for the rest, zeros for dropped and missing segments).
-    Any direction without a remap keeps the old skip-first-layer semantics;
-    :mod:`seven523.train` rejects those pairs before calling this function.
+    Both checkpoints must use the one live v5 layout; a different ``obs_dim``
+    raises :class:`ValueError` rather than guessing a column mapping.
     """
+    if loaded.obs_dim != agent.obs_dim:
+        raise ValueError(
+            f"cannot warm-start a {loaded.obs_dim}-wide checkpoint into a "
+            f"{agent.obs_dim}-wide agent: observation layouts must match "
+            f"(v5 is the only supported layout)"
+        )
     copied: list[str] = []
     source = loaded.state_dict()
     for key, value in agent.state_dict().items():
@@ -474,47 +300,6 @@ def warm_start_into(agent: Agent, loaded: Agent) -> list[str]:
         if origin is None:
             continue
         label = key if origin_key == key else f"{key}<-{origin_key}"
-        if origin_key in _INPUT_LAYER_KEYS and origin.shape[0] == value.shape[0]:
-            src_version = int(getattr(loaded, "obs_version", 1))
-            dst_version = int(getattr(agent, "obs_version", 1))
-            remap = _first_layer_remap(
-                src_version, loaded.obs_dim, dst_version, agent.obs_dim
-            )
-            if remap is not None:
-                value.copy_(origin @ remap.to(origin.device).T)
-                suffix = "" if origin_key == key else f"<-{origin_key}"
-                copied.append(
-                    f"{key}@remap:v{src_version}->v{dst_version}{suffix}"
-                )
-                continue
-            # Input columns are layout-specific: only pad/truncate when both
-            # checkpoints were built for the same player count (so the prefix
-            # segments line up), the target version is newer, and the source
-            # fits inside the target.  The 194-wide v1 3-player and v2
-            # 2-player layouts are *not* prefix-compatible despite the width.
-            source_players = observation_num_players(
-                loaded.obs_dim, getattr(loaded, "obs_version", 1)
-            )
-            target_players = observation_num_players(
-                agent.obs_dim, getattr(agent, "obs_version", 1)
-            )
-            compatible = (
-                source_players is not None
-                and source_players == target_players
-                and getattr(loaded, "obs_version", 1)
-                <= getattr(agent, "obs_version", 1)
-                and origin.shape[1] <= value.shape[1]
-            )
-            if compatible and origin.shape[1] == value.shape[1]:
-                value.copy_(origin)
-                copied.append(label)
-            elif compatible:
-                old_width = origin.shape[1]
-                value[:, :old_width].copy_(origin)
-                value[:, old_width:].zero_()
-                suffix = "" if origin_key == key else f"<-{origin_key}"
-                copied.append(f"{key}[:, :{old_width}]{suffix}")
-            continue
         if origin.shape == value.shape:
             value.copy_(origin)
             copied.append(label)
@@ -544,9 +329,6 @@ class NeuralPolicy:
         self.device = torch.device(device)
         self.sample = sample
         self.rng = random.Random(seed)
-        # Encode with the checkpoint's own layout: a v1 agent inside a v2
-        # environment keeps reading the legacy 191-wide prefix.
-        self.obs_version = int(getattr(agent, "obs_version", 1))
 
     @torch.no_grad()
     def act(self, view: View) -> tuple[int, int | None]:
@@ -563,7 +345,7 @@ class NeuralPolicy:
         if not bool(mask[:, : nvec[0]].any()):
             raise ValueError("NeuralPolicy was asked to act with no legal action")
         obs = torch.as_tensor(
-            encode_observation(view, self.rules, self.obs_version),
+            encode_observation(view, self.rules),
             dtype=torch.float32,
             device=self.device,
         ).unsqueeze(0)

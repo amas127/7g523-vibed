@@ -29,13 +29,7 @@ import torch
 import torch.optim as optim
 
 from .actions import nvec_for
-from .env import (
-    OBS_VERSION,
-    OBS_VERSIONS,
-    Seven523Env,
-    observation_dim,
-    observation_num_players,
-)
+from .env import Seven523Env, observation_dim
 from .eval import evaluate
 from .networks import Agent, NeuralPolicy, load_agent, save_agent, warm_start_into
 from .policies import (
@@ -73,16 +67,6 @@ _LOG_FIELDS = (
 
 def _bool(value: str) -> bool:
     return value.lower() in {"true", "1", "yes", "y", "t"}
-
-
-#: Observation-version pairs allowed to warm-start across layouts: the two
-#: prefix chains (v1 -> v2 -> v3, v4 -> v5) plus the cross-family remap pairs
-#: (v1/v2 -> v4/v5).  Every other direction -- including v3 -> v4/v5 and all
-#: rollbacks -- is rejected at the load point instead of silently skipping the
-#: first layer.
-_WARM_START_VERSION_PAIRS: frozenset[tuple[int, int]] = frozenset(
-    {(1, 2), (2, 3), (1, 3), (1, 4), (2, 4), (4, 5), (1, 5), (2, 5)}
-)
 
 
 def parse_pool_member(raw: str) -> tuple[float, str]:
@@ -158,18 +142,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     # 7鬼523 / run management arguments.
     parser.add_argument("--num-players", type=int, default=2)
-    parser.add_argument(
-        "--obs-version",
-        type=int,
-        choices=list(OBS_VERSIONS),
-        default=OBS_VERSION,
-        help=(
-            "observation layout: 1 = legacy 185+3n, 2 = legacy + B0 point "
-            "context (188+3n), 3 = legacy + B0 + B1 unseen/last_player "
-            "(243+3n), 4 = slim S1 + B0 (64+21n), "
-            "5 = slim S1 + B0 + B1 (119+21n, default)"
-        ),
-    )
     parser.add_argument(
         "--reward-shaping",
         choices=["terminal", "trick_diff", "win", "trick_diff_win"],
@@ -332,7 +304,6 @@ def make_env(
     seed: int,
     idx: int,
     reward_shaping: str = "terminal",
-    obs_version: int = OBS_VERSION,
 ):
     """CleanRL-style thunk: one sub-env + episode statistics for the vector env."""
 
@@ -343,7 +314,6 @@ def make_env(
             seed=seed + idx,
             learner=learner,
             reward_shaping=reward_shaping,
-            obs_version=obs_version,
         )
         return gym.wrappers.RecordEpisodeStatistics(env)
 
@@ -457,7 +427,6 @@ def _self_play_opponents(
             nvec,
             hidden=args.hidden_size,
             activation=args.activation,
-            obs_version=args.obs_version,
             arch=args.arch,
         ),
         rules,
@@ -504,7 +473,7 @@ def train(args: argparse.Namespace) -> Path:
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
     rules = Rules(num_players=args.num_players)
     learner = 0
-    obs_dim = observation_dim(rules.num_players, args.obs_version)
+    obs_dim = observation_dim(rules.num_players)
     nvec = np.asarray(nvec_for(rules), dtype=np.int64)
 
     agent = Agent(
@@ -512,51 +481,23 @@ def train(args: argparse.Namespace) -> Path:
         nvec,
         hidden=args.hidden_size,
         activation=args.activation,
-        obs_version=args.obs_version,
         arch=args.arch,
     ).to(device)
     if args.load_checkpoint:
         loaded, _ = load_agent(args.load_checkpoint, device=device)
-        if (
-            loaded.nvec.tolist() == nvec.tolist()
-            and loaded.obs_dim == obs_dim
-            and loaded.obs_version == args.obs_version
-            and loaded.arch == args.arch
-        ):
+        if loaded.obs_dim != obs_dim:
+            raise SystemExit(
+                f"--load-checkpoint {args.load_checkpoint}: cannot "
+                f"warm-start a {loaded.obs_dim}-wide checkpoint into the v5 "
+                f"{obs_dim}-wide layout for {rules.num_players} players"
+            )
+        if loaded.nvec.tolist() == nvec.tolist() and loaded.arch == args.arch:
             agent.load_state_dict(loaded.state_dict())
         else:
-            source_version = int(getattr(loaded, "obs_version", 1))
-            target_version = int(args.obs_version)
-            source_players = observation_num_players(
-                loaded.obs_dim, source_version
-            )
-            target_players = observation_num_players(obs_dim, target_version)
-            # Cross-layout warm starts are only allowed along the design's
-            # forward table (prefix chains and the v1/v2 -> v4/v5 remap).
-            # Rollbacks and mixed player counts must fail loudly instead of
-            # silently skipping the first layer.
-            version_ok = source_version == target_version or (
-                source_version, target_version
-            ) in _WARM_START_VERSION_PAIRS
-            if (
-                not version_ok
-                or source_players is None
-                or source_players != target_players
-            ):
-                raise SystemExit(
-                    f"--load-checkpoint {args.load_checkpoint}: cannot "
-                    f"warm-start obs v{source_version}/{loaded.obs_dim} "
-                    f"({source_players} players) into "
-                    f"v{target_version}/{obs_dim} ({target_players} players); "
-                    f"allowed version pairs: "
-                    f"{sorted(_WARM_START_VERSION_PAIRS)}"
-                )
             copied = warm_start_into(agent, loaded)
             print(
                 f"warm start: copied {len(copied)} tensors from "
                 f"{args.load_checkpoint} (arch {loaded.arch}->{args.arch}, "
-                f"obs src v{source_version}/{loaded.obs_dim} -> "
-                f"dst v{target_version}/{obs_dim}, "
                 f"nvec {loaded.nvec.tolist()} -> {nvec.tolist()})"
             )
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
@@ -702,7 +643,6 @@ def train(args: argparse.Namespace) -> Path:
                 args.seed,
                 idx,
                 args.reward_shaping,
-                args.obs_version,
             )
             for idx in range(args.num_envs)
         ],

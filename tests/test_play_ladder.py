@@ -1,10 +1,9 @@
 """``tools/play_ladder.py``: registry integrity and 7g523-play argv plumbing.
 
 After the old-rule/old-obs checkpoint rungs were retired, the registry only
-advertises the two scripted anchors.  The checkpoint checks (file existence,
-declared observation version) are kept so they cover re-added rungs without
-edits; ``play`` is checked at the argv boundary (the real game loop is
-covered by ``tests/test_play.py``).
+advertises the two scripted anchors.  The checkpoint checks (file existence)
+are kept so they cover re-added rungs without edits; ``play`` is checked at
+the argv boundary (the real game loop is covered by ``tests/test_play.py``).
 """
 from __future__ import annotations
 
@@ -56,7 +55,6 @@ def _synthetic_rung(**overrides) -> play_ladder.Opponent:
         "strength": "占位（新口径）",
         "arena": None,
         "ckpt": "runs/<new-run>/agent.pt",
-        "obs_version": 5,
         "note": "接缝占位档",
     }
     fields.update(overrides)
@@ -70,9 +68,9 @@ def test_registry_covers_the_advertised_set():
         assert opponent.kind in play_ladder.KIND_LABELS
         assert opponent.strength and opponent.note
         if opponent.kind == "script":
-            assert opponent.ckpt is None and opponent.obs_version is None
+            assert opponent.ckpt is None
         else:
-            assert opponent.ckpt and opponent.obs_version is not None
+            assert opponent.ckpt
 
 
 def test_every_checkpoint_exists():
@@ -108,19 +106,6 @@ def test_build_play_argv_for_checkpoint():
     )
 
 
-def test_declared_obs_versions_match_checkpoints():
-    pytest.importorskip("torch")
-    from seven523.networks import load_agent
-
-    # Vacuously true while no checkpoint rungs are registered; guards re-added
-    # entries against a stale obs_version declaration.
-    for opponent in play_ladder.OPPONENTS:
-        if opponent.ckpt is None:
-            continue
-        agent, _ = load_agent(play_ladder.ckpt_path(opponent))
-        assert agent.obs_version == opponent.obs_version, opponent.id
-
-
 def test_list_output_mentions_every_id_path_and_command(capsys):
     assert play_ladder.main(["list"]) == 0
     out = capsys.readouterr().out
@@ -147,7 +132,6 @@ def test_list_json_document(capsys):
     assert greedy["kind"] == "script"
     assert greedy["ckpt"] is None
     assert greedy["path"] is None
-    assert greedy["obs_version"] is None
     assert greedy["play_argv"] == ["--opponent", "greedy"]
     assert greedy["command"] == "uv run 7g523-play --opponent greedy"
 

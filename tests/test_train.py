@@ -20,7 +20,7 @@ from seven523.networks import (  # noqa: E402
 from seven523.rules import DEFAULT_RULES  # noqa: E402
 from seven523.train import make_env, parse_args, parse_pool_member, train  # noqa: E402
 
-OBS_DIM = 191
+OBS_DIM = 161
 NVEC = [134, 4]
 
 
@@ -91,7 +91,8 @@ def test_activation_variants_forward_and_checkpoint_round_trip(tmp_path):
         },
         legacy,
     )
-    assert load_agent(legacy)[0].activation == "relu"
+    with pytest.raises(ValueError, match="obs_version"):
+        load_agent(legacy)
     with pytest.raises(ValueError):
         Agent(OBS_DIM, NVEC, hidden=16, activation="swish")
 
@@ -468,38 +469,24 @@ def test_tensorboard_can_be_disabled(tmp_path):
     assert not list((run_dir / "tb").glob("events.out.tfevents*"))
 
 
-# -- observation version plumbing (T2 / B0) ----------------------------------
+# -- observation layout plumbing ---------------------------------------------
 
 
-def test_parse_obs_version_default_and_choices():
-    from seven523.env import OBS_VERSION, OBS_VERSIONS
-
-    assert parse_args([]).obs_version == OBS_VERSION == 5
-    assert OBS_VERSIONS == (1, 2, 3, 4, 5)
-    for version in OBS_VERSIONS:
-        assert parse_args(["--obs-version", str(version)]).obs_version == version
-    with pytest.raises(SystemExit):
-        parse_args(["--obs-version", "6"])
-
-
-def test_make_env_passes_obs_version_through():
+def test_make_env_uses_the_v5_layout():
     from seven523.policies import make_scripted_policies
 
     opponents = make_scripted_policies("random", DEFAULT_RULES, seed=0)
-    default_env = make_env(DEFAULT_RULES, 0, opponents, 0, 0)()
-    assert default_env.unwrapped.obs_version == 5
-    assert default_env.observation_space.shape == (161,)
-    for version, width in ((4, 106), (3, 249), (2, 194), (1, 191)):
-        env = make_env(DEFAULT_RULES, 0, opponents, 0, 0, obs_version=version)()
-        assert env.unwrapped.obs_version == version
-        assert env.observation_space.shape == (width,)
+    env = make_env(DEFAULT_RULES, 0, opponents, 0, 0)()
+    assert env.observation_space.shape == (161,)
 
 
-def test_train_agent_uses_the_default_v5_layout(tmp_path):
+def test_train_agent_uses_the_v5_layout(tmp_path):
     run_dir = train(_tiny_args(tmp_path, "--checkpoint-interval", "0"))
     agent, extra = load_agent(run_dir / "agent.pt")
-    assert (agent.obs_dim, agent.obs_version) == (161, 5)
-    assert extra["args"]["obs_version"] == 5
+    assert agent.obs_dim == 161
+    assert "obs_version" not in extra["args"]
+    payload = torch.load(run_dir / "agent.pt", map_location="cpu", weights_only=True)
+    assert payload["obs_version"] == 5
 
 
 # -- independent actor/critic towers (T6 / direction F) ----------------------
@@ -518,7 +505,7 @@ def test_train_towers_smoke(tmp_path):
     )
     agent, extra = load_agent(run_dir / "agent.pt")
     assert agent.arch == "towers"
-    assert (agent.obs_dim, agent.obs_version) == (161, 5)
+    assert agent.obs_dim == 161
     assert extra["args"]["arch"] == "towers"
 
 
@@ -539,16 +526,41 @@ def test_train_towers_self_play_smoke(tmp_path):
     assert load_agent(run_dir / "agent.pt")[0].arch == "towers"
 
 
-def test_train_warm_starts_a_shared_v1_checkpoint_into_towers(tmp_path):
+def test_train_warm_starts_a_same_layout_checkpoint(tmp_path):
     torch.manual_seed(0)
-    old = Agent(OBS_DIM, NVEC, hidden=16, obs_version=1)
-    path = tmp_path / "v1.pt"
+    old = Agent(OBS_DIM, NVEC, hidden=16)
+    path = tmp_path / "old.pt"
     save_agent(path, old)
     run_dir = train(
         _tiny_args(
             tmp_path,
-            "--obs-version",
-            "3",
+            "--hidden-size",
+            "16",
+            "--learning-rate",
+            "0",
+            "--load-checkpoint",
+            str(path),
+            "--checkpoint-interval",
+            "0",
+        )
+    )
+    agent, _ = load_agent(run_dir / "agent.pt")
+    assert agent.obs_dim == OBS_DIM
+    assert torch.equal(agent.network[0].weight, old.network[0].weight)
+    assert torch.equal(agent.actor.weight, old.actor.weight)
+    assert torch.equal(agent.critic.weight, old.critic.weight)
+    obs = torch.rand(4, OBS_DIM)
+    assert torch.equal(agent.get_value(obs), old.get_value(obs))
+
+
+def test_train_warm_starts_a_same_layout_checkpoint_into_towers(tmp_path):
+    torch.manual_seed(0)
+    old = Agent(OBS_DIM, NVEC, hidden=16)
+    path = tmp_path / "old.pt"
+    save_agent(path, old)
+    run_dir = train(
+        _tiny_args(
+            tmp_path,
             "--arch",
             "towers",
             "--hidden-size",
@@ -563,80 +575,19 @@ def test_train_warm_starts_a_shared_v1_checkpoint_into_towers(tmp_path):
     )
     agent, _ = load_agent(run_dir / "agent.pt")
     assert agent.arch == "towers"
-    assert (agent.obs_dim, agent.obs_version) == (249, 3)
+    assert agent.obs_dim == OBS_DIM
     for tower in (agent.actor_network, agent.critic_network):
-        assert torch.equal(tower[0].weight[:, :OBS_DIM], old.network[0].weight)
-        assert torch.count_nonzero(tower[0].weight[:, OBS_DIM:]) == 0
-    obs = torch.rand(4, 249)
-    assert torch.equal(agent.get_value(obs), old.get_value(obs[:, :OBS_DIM]))
-    assert torch.equal(
-        agent.policy_logits(obs), old.policy_logits(obs[:, :OBS_DIM])
-    )
+        assert torch.equal(tower[0].weight, old.network[0].weight)
+        assert torch.equal(tower[0].bias, old.network[0].bias)
+    obs = torch.rand(4, OBS_DIM)
+    assert torch.equal(agent.get_value(obs), old.get_value(obs))
+    assert torch.equal(agent.policy_logits(obs), old.policy_logits(obs))
 
 
-def test_train_warm_starts_a_v1_checkpoint_by_padding_the_first_layer(tmp_path):
+def test_train_rejects_a_different_layout_checkpoint(tmp_path):
     torch.manual_seed(0)
-    old = Agent(OBS_DIM, NVEC, hidden=16, obs_version=1)
-    path = tmp_path / "v1.pt"
-    save_agent(path, old)
-    run_dir = train(
-        _tiny_args(
-            tmp_path,
-            "--obs-version",
-            "3",
-            "--hidden-size",
-            "16",
-            "--learning-rate",
-            "0",
-            "--load-checkpoint",
-            str(path),
-            "--checkpoint-interval",
-            "0",
-        )
-    )
-    agent, extra = load_agent(run_dir / "agent.pt")
-    assert (agent.obs_dim, agent.obs_version) == (249, 3)
-    assert torch.count_nonzero(agent.network[0].weight[:, OBS_DIM:]) == 0
-    assert torch.equal(agent.network[0].weight[:, :OBS_DIM], old.network[0].weight)
-    obs = torch.rand(4, 249)
-    assert torch.equal(agent.get_value(obs), old.get_value(obs[:, :OBS_DIM]))
-
-
-def test_train_warm_starts_a_v2_checkpoint_into_v3(tmp_path):
-    from seven523.env import observation_dim
-
-    torch.manual_seed(0)
-    old = Agent(observation_dim(2, 2), NVEC, hidden=16, obs_version=2)
-    path = tmp_path / "v2.pt"
-    save_agent(path, old)
-    run_dir = train(
-        _tiny_args(
-            tmp_path,
-            "--obs-version",
-            "3",
-            "--hidden-size",
-            "16",
-            "--learning-rate",
-            "0",
-            "--load-checkpoint",
-            str(path),
-            "--checkpoint-interval",
-            "0",
-        )
-    )
-    agent, _ = load_agent(run_dir / "agent.pt")
-    assert (agent.obs_dim, agent.obs_version) == (249, 3)
-    assert torch.count_nonzero(agent.network[0].weight[:, 194:]) == 0
-    assert torch.equal(agent.network[0].weight[:, :194], old.network[0].weight)
-    obs = torch.rand(4, 249)
-    assert torch.equal(agent.get_value(obs), old.get_value(obs[:, :194]))
-
-
-def test_train_rejects_a_cross_player_checkpoint(tmp_path):
-    # v1 with three players is 194 wide, exactly like v2 with two players; the
-    # load point must refuse instead of silently skipping the first layer.
-    old = Agent(194, NVEC, hidden=16, obs_version=1)
-    path = tmp_path / "v1_three_players.pt"
+    old = Agent(191, NVEC, hidden=16)
+    path = tmp_path / "foreign.pt"
     save_agent(path, old)
     with pytest.raises(SystemExit) as excinfo:
         train(
@@ -654,90 +605,5 @@ def test_train_rejects_a_cross_player_checkpoint(tmp_path):
         )
     message = str(excinfo.value)
     assert "cannot warm-start" in message
-    assert "v1/194" in message and "v5/161" in message
-    assert "(3 players)" in message and "(2 players)" in message
+    assert "191" in message and "161" in message
 
-
-def test_train_warm_starts_a_v1_checkpoint_into_v5_by_remap(tmp_path):
-    from seven523.env import observation_dim
-    from seven523.networks import _first_layer_remap
-
-    torch.manual_seed(0)
-    old = Agent(OBS_DIM, NVEC, hidden=16, obs_version=1)
-    path = tmp_path / "v1.pt"
-    save_agent(path, old)
-    run_dir = train(
-        _tiny_args(
-            tmp_path,
-            "--hidden-size",
-            "16",
-            "--learning-rate",
-            "0",
-            "--load-checkpoint",
-            str(path),
-            "--checkpoint-interval",
-            "0",
-        )
-    )
-    agent, _ = load_agent(run_dir / "agent.pt")
-    dst_dim = observation_dim(2, 5)
-    assert (agent.obs_dim, agent.obs_version) == (dst_dim, 5)
-    remap = _first_layer_remap(1, OBS_DIM, 5, dst_dim)
-    assert remap is not None
-    assert torch.equal(agent.network[0].weight, old.network[0].weight @ remap.T)
-    assert torch.equal(agent.network[0].bias, old.network[0].bias)
-    assert torch.equal(agent.critic.weight, old.critic.weight)
-
-
-def test_train_rejects_a_v5_checkpoint_into_v1(tmp_path):
-    from seven523.env import observation_dim
-
-    torch.manual_seed(0)
-    old = Agent(observation_dim(2, 5), NVEC, hidden=16, obs_version=5)
-    path = tmp_path / "v5.pt"
-    save_agent(path, old)
-    with pytest.raises(SystemExit) as excinfo:
-        train(
-            _tiny_args(
-                tmp_path,
-                "--obs-version",
-                "1",
-                "--hidden-size",
-                "16",
-                "--learning-rate",
-                "0",
-                "--load-checkpoint",
-                str(path),
-                "--checkpoint-interval",
-                "0",
-            )
-        )
-    message = str(excinfo.value)
-    assert "cannot warm-start" in message
-    assert "v5/161" in message and "v1/191" in message
-
-
-def test_train_rejects_a_v3_checkpoint_into_v5(tmp_path):
-    from seven523.env import observation_dim
-
-    torch.manual_seed(0)
-    old = Agent(observation_dim(2, 3), NVEC, hidden=16, obs_version=3)
-    path = tmp_path / "v3.pt"
-    save_agent(path, old)
-    with pytest.raises(SystemExit) as excinfo:
-        train(
-            _tiny_args(
-                tmp_path,
-                "--hidden-size",
-                "16",
-                "--learning-rate",
-                "0",
-                "--load-checkpoint",
-                str(path),
-                "--checkpoint-interval",
-                "0",
-            )
-        )
-    message = str(excinfo.value)
-    assert "cannot warm-start" in message
-    assert "v3/249" in message and "v5/161" in message

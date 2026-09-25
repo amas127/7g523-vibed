@@ -64,13 +64,10 @@ def rules_json(rules: Rules) -> dict[str, Any]:
 
 
 def rules_from_json(data: dict[str, Any]) -> Rules:
-    # Traces up to TRACE_VERSION 1 predate ``Rules.comparison``: they were
-    # recorded under the flat-tier rules, so a missing key must default to
-    # "tier", not today's "family".  Copy first so reading never mutates the
-    # caller's record.
-    fields = dict(data)
-    fields.setdefault("comparison", "tier")
-    return Rules(**fields)
+    # Traces recorded while ``Rules.comparison`` existed carry a stale key;
+    # family comparison is now the only semantics, so drop it instead of
+    # rejecting the record (and never mutate the caller's dict).
+    return Rules(**{key: value for key, value in data.items() if key != "comparison"})
 
 
 # -- the opening deal --------------------------------------------------------

@@ -2,8 +2,6 @@
 import json
 import random
 
-import pytest
-
 from seven523.actions import legal_ids
 from seven523.cards import CARD_ORDER
 from seven523.game import Deal, Game
@@ -36,60 +34,47 @@ def test_card_json_round_trip():
 
 
 def test_rules_json_round_trips_every_field():
-    rules = Rules(num_players=3, straight_max=13, comparison="tier")
-    assert rules_json(rules)["comparison"] == "tier"
+    rules = Rules(num_players=3, straight_max=13)
+    assert set(rules_json(rules)) == {
+        "num_players",
+        "hand_size",
+        "straight_min",
+        "straight_max",
+        "consecutive_pairs_min",
+        "consecutive_pairs_max",
+        "total_points",
+    }
     assert rules_from_json(rules_json(rules)) == rules
 
 
-def test_legacy_v1_rules_without_comparison_read_as_tier():
+def test_stale_comparison_key_reads_as_family_without_mutating_the_record():
     legacy = rules_json(DEFAULT_RULES)
-    del legacy["comparison"]
-    assert rules_from_json(legacy) == Rules(comparison="tier")
+    legacy["comparison"] = "tier"
+    assert rules_from_json(legacy) == DEFAULT_RULES
     # Reading a legacy record must not rewrite the caller's copy in place.
-    assert "comparison" not in legacy
+    assert legacy["comparison"] == "tier"
 
 
-def test_legacy_v1_trace_replays_as_tier_but_not_as_family(tmp_path):
-    # Seed 152's scripted game has a cross-family beat at step 1, so the trace
-    # only validates under the legacy flat-tier comparison.
-    from seven523.actions import legal_ids, resolve
+def test_legacy_v1_trace_replays_under_family_semantics(tmp_path):
+    # A TRACE_VERSION 1 record has no comparison field; family is the only
+    # semantics now, so a scripted game replays as long as its beats are legal.
     from seven523.play import play_game, replay_trace
     from seven523.policies import GreedyBot
 
-    def prefer_cross_family(game, state, view):
-        for action_id in legal_ids(view.mask):
-            action = game.catalog[action_id]
-            if action.is_pass:
-                continue
-            combo = resolve(action, view.hand, game.rules)
-            incumbent = view.incumbent
-            if (
-                combo is not None
-                and incumbent is not None
-                and not combo.is_bomb
-                and not incumbent.is_bomb
-                and combo.family != incumbent.family
-            ):
-                return action_id
-        return legal_ids(view.mask)[0]
-
-    legacy_rules = Rules(comparison="tier")
     record = {}
     play_game(
-        [GreedyBot(legacy_rules), GreedyBot(legacy_rules)],
-        prefer_cross_family,
-        rules=legacy_rules,
-        seed=152,
+        [GreedyBot(), GreedyBot()],
+        lambda game, state, view: legal_ids(view.mask)[0],
+        rules=DEFAULT_RULES,
+        seed=11,
         print_fn=lambda *args, **kwargs: None,
         record=record,
     )
-    rules_data = rules_json(legacy_rules)
-    del rules_data["comparison"]  # exactly a TRACE_VERSION 1 record
     trace = {
         "version": 1,
         "created_at": "2026-09-24T00:00:00",
-        "rules": rules_data,
-        "seed": 152,
+        "rules": rules_json(DEFAULT_RULES),
+        "seed": 11,
         "human_seat": 0,
         "players": ["human@seat0", "贪心 bot"],
         **record,
@@ -97,12 +82,6 @@ def test_legacy_v1_trace_replays_as_tier_but_not_as_family(tmp_path):
 
     loaded = load_trace(save_trace(tmp_path / "legacy.json", trace))
     assert replay_trace(loaded, print_fn=lambda *args, **kwargs: None) is True
-
-    # The same steps are illegal under today's family semantics, so the replay
-    # check depends on the v1 default, not on a no-op.
-    loaded["rules"] = dict(rules_data, comparison="family")
-    with pytest.raises(ValueError, match="illegal"):
-        replay_trace(loaded, print_fn=lambda *args, **kwargs: None)
 
 
 def test_deal_json_round_trips():
@@ -143,7 +122,7 @@ def test_save_and_load_trace_round_trip(tmp_path):
     loaded = load_trace(path)
     assert loaded == trace
     assert json.loads(path.read_text())["version"] == TRACE_VERSION
-    assert loaded["rules"]["comparison"] == "family"
+    assert "comparison" not in loaded["rules"]
 
 
 def test_build_trace_stamps_version_and_metadata():

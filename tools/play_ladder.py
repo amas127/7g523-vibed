@@ -21,9 +21,10 @@ before launch, so ``play`` also works from another working directory.
 
 The table columns are placeholders for the re-added rungs: ``strength`` is
 the contract label of a fresh measurement, ``arena`` a new joint
-Bradley-Terry fit (mean Elo ``±`` cross-seed sd), and ``obs`` the observation
-layout version baked into the checkpoint.  Values measured under the retired
-rules must not be mixed in, so the columns stay ``-`` until then.
+Bradley-Terry fit (mean Elo ``±`` cross-seed sd).  Every checkpoint is v5 by
+construction: :func:`seven523.networks.load_agent` rejects anything else.
+Values measured under the retired rules must not be mixed in, so the columns
+stay ``-`` until then.
 """
 from __future__ import annotations
 
@@ -64,12 +65,10 @@ class Opponent:
     """One playable opponent.
 
     ``id`` doubles as the ``--opponent`` value for scripted entries (whose
-    ``ckpt`` is ``None``).  ``obs_version`` is the observation layout the
-    checkpoint identity carries (torch checkpoints saved before versioning
-    default to 1); it is ``None`` for scripted bots.  ``strength`` is the
-    measured strength label of a rung (step count for practice/lab entries);
-    ``arena`` is an optional joint Bradley-Terry measurement
-    (mean ± cross-seed sd), a different fit from ``strength``.
+    ``ckpt`` is ``None``).  ``strength`` is the measured strength label of a
+    rung (step count for practice/lab entries); ``arena`` is an optional joint
+    Bradley-Terry measurement (mean ± cross-seed sd), a different fit from
+    ``strength``.
     """
 
     id: str
@@ -77,15 +76,14 @@ class Opponent:
     strength: str
     arena: str | None
     ckpt: str | None
-    obs_version: int | None
     note: str
 
 
 #: Display order: the scripted anchors first, then any checkpoint rungs.
 #:
-#: 接缝（新模型接回）：新规则 / 新观测下训练并测完强度的模型，按下面的模式在锚点
+#: 接缝（新模型接回）：新规则 / v5 观测下训练并测完强度的模型，按下面的模式在锚点
 #: 之后追加 ``Opponent`` 条目，并把 id 加进 tests/test_play_ladder.py 的
-#: EXPECTED_IDS（该测试同时校验 ckpt 存在与声明的 obs_version）：
+#: EXPECTED_IDS（该测试同时校验 ckpt 存在）：
 #:
 #:     Opponent(
 #:         id="<new-run>",
@@ -93,7 +91,6 @@ class Opponent:
 #:         strength="<新测强度标签>",         # 新口径值，不得复用旧规则数字
 #:         arena="<新 arena 拟合或 None>",
 #:         ckpt="runs/<new-run>/agent.pt",   # 占位符：替换为实际 run 目录
-#:         obs_version=5,                    # checkpoint 内固化的观测布局版本
 #:         note="<一句话说明>",
 #:     ),
 #:
@@ -105,7 +102,6 @@ OPPONENTS: tuple[Opponent, ...] = (
         strength="锚 1000（固定）",
         arena="1000（锚定）",
         ckpt=None,
-        obs_version=None,
         note="均匀随机出合法牌；熟悉规则和界面用。",
     ),
     Opponent(
@@ -114,7 +110,6 @@ OPPONENTS: tuple[Opponent, ...] = (
         strength="锚 1315（固定）",
         arena="1315（锚定）",
         ckpt=None,
-        obs_version=None,
         note="贪心一手；所有比较的固定参照，也是默认对手。",
     ),
 )
@@ -163,7 +158,7 @@ def _pad(text: str, width: int) -> str:
 def format_list(opponents: Sequence[Opponent] = OPPONENTS) -> str:
     """The human-readable table plus one launch command per opponent."""
     headers = (
-        "id", "类型", "强度 / 步数", "arena Elo（3seed）", "obs", "ckpt", "说明"
+        "id", "类型", "强度 / 步数", "arena Elo（3seed）", "ckpt", "说明"
     )
     rows: list[tuple[str, ...]] = []
     missing: list[Opponent] = []
@@ -179,7 +174,6 @@ def format_list(opponents: Sequence[Opponent] = OPPONENTS) -> str:
                 KIND_LABELS.get(opponent.kind, opponent.kind),
                 opponent.strength,
                 opponent.arena or "-",
-                "-" if opponent.obs_version is None else str(opponent.obs_version),
                 ckpt_cell,
                 opponent.note,
             )
@@ -245,7 +239,6 @@ def _entry_document(opponent: Opponent) -> dict[str, object]:
         "arena": opponent.arena,
         "ckpt": opponent.ckpt,
         "path": None if path is None else str(path),
-        "obs_version": opponent.obs_version,
         "note": opponent.note,
         "play_argv": build_play_argv(opponent),
         "command": launch_command(opponent),

@@ -16,7 +16,6 @@ from seven523.cards import (
     Suit,
     card_id,
     make_deck,
-    point_value,
 )
 from seven523.combos import Combo, ComboKind
 from seven523.env import (
@@ -24,16 +23,10 @@ from seven523.env import (
     Seven523Env,
     encode_observation,
     observation_dim,
-    observation_num_players,
-    segment_spans,
 )
 from seven523.game import Game, GameState, Phase, View
 from seven523.policies import GreedyBot, MixturePolicy, RandomBot
 from seven523.rules import DEFAULT_RULES, Rules
-
-#: Golden v1 encodings + legacy ``base680k`` actions generated from the T1
-#: snapshot package (``/tmp/t7_disc_pkg``) while that layout was live.
-_LEGACY_FIXTURE = Path(__file__).parent / "data" / "legacy_v1_views.json"
 
 #: Pilot layout-b encoder; gitignored, so the bit-for-bit comparison against it
 #: is skipped when the file is absent.  It produced ``_OBS_V5_GOLDEN``.
@@ -43,10 +36,6 @@ _PILOT_ENCODER = (
 
 #: v5 snapshots: the pilot's layout b prefix plus independently computed B0/B1.
 _OBS_V5_GOLDEN = Path(__file__).parent / "data" / "obs_v5_golden.json"
-
-
-def _load_legacy_fixture():
-    return json.loads(_LEGACY_FIXTURE.read_text())
 
 
 def _load_v5_golden():
@@ -90,166 +79,96 @@ def _view(spec):
     )
 
 
-def _span_map(obs_version, num_players):
-    """``name -> (start, width)`` for one layout."""
-    return {
-        name: (start, width)
-        for name, start, width in segment_spans(obs_version, num_players)
-    }
+#: The v5 segment order and fixed widths; variable blocks expand per player.
+_V5_SEGMENTS = (
+    ("hand", 54),
+    ("inc_rank", 15),
+    ("inc_suit", 4),
+    ("inc_kind", 6),
+    ("inc_size", 1),
+    ("draw", 1),
+    ("scores", None),
+    ("opp_count", None),
+    ("opp_revealed", None),
+    ("trick_points", 1),
+    ("remaining_points", 1),
+    ("point_hold", 1),
+    ("unseen", 54),
+    ("last_player", 1),
+)
 
 
-def test_observation_dim_by_version():
-    assert observation_dim(2, obs_version=1) == 191
-    assert observation_dim(2, obs_version=2) == 194
-    assert observation_dim(2, obs_version=3) == 249
-    assert observation_dim(2, obs_version=4) == 106
-    assert observation_dim(2, obs_version=5) == 161
-    # v1 with three players collides with v2 with two players: the version is
-    # part of the checkpoint identity, never inferred from the dimension.
-    assert observation_dim(3, obs_version=1) == 194
-    assert observation_dim(3, obs_version=2) == 197
-    assert observation_dim(3, obs_version=3) == 252
-    assert observation_dim(3, obs_version=4) == 127
-    assert observation_dim(3, obs_version=5) == 182
-    assert observation_dim(2) == observation_dim(2, OBS_VERSION) == 161
-    with pytest.raises(ValueError, match="obs_version"):
-        observation_dim(2, obs_version=6)
-    with pytest.raises(ValueError, match="obs_version"):
-        observation_dim(2, obs_version=0)
+def _span_map(num_players):
+    """``name -> (start, width)`` for the v5 layout at ``num_players``."""
+    spans: dict[str, tuple[int, int]] = {}
+    offset = 0
+    for name, width in _V5_SEGMENTS:
+        if name == "scores":
+            width = num_players
+        elif name == "opp_count":
+            width = num_players - 1
+        elif name == "opp_revealed":
+            width = 19 * (num_players - 1)
+        assert width is not None
+        spans[name] = (offset, width)
+        offset += width
+    return spans
 
 
-def test_observation_num_players_tells_the_colliding_layouts_apart():
-    assert observation_num_players(191, obs_version=1) == 2
-    assert observation_num_players(194, obs_version=1) == 3
-    assert observation_num_players(194, obs_version=2) == 2
-    assert observation_num_players(197, obs_version=2) == 3
-    assert observation_num_players(249, obs_version=3) == 2
-    assert observation_num_players(252, obs_version=3) == 3
-    assert observation_num_players(251, obs_version=3) is None
-    assert observation_num_players(192, obs_version=1) is None
-    assert observation_num_players(106, obs_version=4) == 2
-    assert observation_num_players(127, obs_version=4) == 3
-    assert observation_num_players(105, obs_version=4) is None
-    assert observation_num_players(161, obs_version=5) == 2
-    assert observation_num_players(182, obs_version=5) == 3
-    assert observation_num_players(160, obs_version=5) is None
-    with pytest.raises(ValueError, match="obs_version"):
-        observation_num_players(191, obs_version=9)
+def test_observation_dim_is_the_only_v5_layout():
+    assert OBS_VERSION == 5
+    assert observation_dim(2) == 161
+    assert observation_dim(3) == 182
+    assert observation_dim(7) == 266
 
 
 @pytest.mark.parametrize("num_players", [2, 3, 4, 5, 6, 7])
 def test_observation_dim_formula(num_players):
-    assert observation_dim(num_players, obs_version=1) == 185 + 3 * num_players
-    assert observation_dim(num_players, obs_version=2) == 188 + 3 * num_players
-    assert observation_dim(num_players, obs_version=3) == 243 + 3 * num_players
-    assert observation_dim(num_players, obs_version=4) == 64 + 21 * num_players
-    assert observation_dim(num_players, obs_version=5) == 119 + 21 * num_players
+    assert observation_dim(num_players) == 119 + 21 * num_players
 
 
 @pytest.mark.parametrize("num_players", [2, 3, 4, 5, 6, 7])
-@pytest.mark.parametrize("obs_version", [1, 2, 3, 4, 5])
-def test_encode_observation_length_matches_dim(num_players, obs_version):
+def test_encode_observation_length_matches_dim(num_players):
     rules = Rules(num_players=num_players)
     game = Game(rules)
     state = game.new(random.Random(0))
     view = game.view(state, 0)
-    obs = encode_observation(view, rules, obs_version)
-    assert len(obs) == observation_dim(num_players, obs_version)
+    obs = encode_observation(view, rules)
+    assert len(obs) == observation_dim(num_players)
 
 
-@pytest.mark.parametrize("num_players", [2, 3])
-def test_v1_is_an_exact_prefix_of_v2(num_players):
-    """Appending the B0 block must not move or rescale any v1 slot."""
-    rules = Rules(num_players=num_players)
-    game = Game(rules)
-    state = game.new(random.Random(11))
-    view = game.view(state, 1)
-    v1 = encode_observation(view, rules, obs_version=1)
-    v2 = encode_observation(view, rules, obs_version=2)
-    assert len(v1) == observation_dim(num_players, obs_version=1)
-    assert len(v2) == observation_dim(num_players, obs_version=2)
-    assert v2[: len(v1)] == v1
-
-
-@pytest.mark.parametrize("num_players", [2, 3])
-def test_v1_and_v2_are_exact_prefixes_of_v3(num_players):
-    """B1 appends the unseen/last_player block without moving any old slot."""
-    rules = Rules(num_players=num_players)
-    game = Game(rules)
-    state = game.new(random.Random(11))
-    view = game.view(state, 1)
-    v1 = encode_observation(view, rules, obs_version=1)
-    v2 = encode_observation(view, rules, obs_version=2)
-    v3 = encode_observation(view, rules, obs_version=3)
-    assert len(v3) == observation_dim(num_players, obs_version=3)
-    assert v3[: len(v1)] == v1
-    assert v3[: len(v2)] == v2
-
-
-@pytest.mark.parametrize("num_players", [2, 3])
-def test_v4_is_an_exact_prefix_of_v5(num_players):
-    """B1 appends to the slim layout without moving the B0 block."""
-    rules = Rules(num_players=num_players)
-    game = Game(rules)
-    state = game.new(random.Random(11))
-    view = game.view(state, 1)
-    v4 = encode_observation(view, rules, obs_version=4)
-    v5 = encode_observation(view, rules, obs_version=5)
-    assert len(v4) == observation_dim(num_players, obs_version=4)
-    assert len(v5) == observation_dim(num_players, obs_version=5)
-    assert v5[: len(v4)] == v4
-
-
-@pytest.mark.parametrize("obs_version", [1, 2, 3, 4, 5])
 @pytest.mark.parametrize("num_players", [2, 3, 7])
-def test_segment_spans_are_contiguous_and_cover_the_dimension(
-    obs_version, num_players
-):
-    spans = segment_spans(obs_version, num_players)
-    assert spans
+def test_v5_layout_spans_are_contiguous_and_cover_the_dimension(num_players):
+    spans = _span_map(num_players)
     offset = 0
-    names = []
-    for name, start, width in spans:
+    for name, _fixed_width in _V5_SEGMENTS:
+        start, width = spans[name]
         assert start == offset
         assert width > 0
-        names.append(name)
         offset += width
-    assert names == list(dict.fromkeys(names))  # ordered and unique
-    assert offset == observation_dim(num_players, obs_version)
+    assert offset == observation_dim(num_players)
 
 
-def test_segment_spans_v5_is_the_documented_layout():
-    assert segment_spans(5, 2) == (
-        ("hand", 0, 54),
-        ("inc_rank", 54, 15),
-        ("inc_suit", 69, 4),
-        ("inc_kind", 73, 6),
-        ("inc_size", 79, 1),
-        ("draw", 80, 1),
-        ("scores", 81, 2),
-        ("opp_count", 83, 1),
-        ("opp_revealed", 84, 19),
-        ("trick_points", 103, 1),
-        ("remaining_points", 104, 1),
-        ("point_hold", 105, 1),
-        ("unseen", 106, 54),
-        ("last_player", 160, 1),
+def test_v5_layout_matches_the_documented_offsets():
+    assert tuple(_span_map(2).items()) == (
+        ("hand", (0, 54)),
+        ("inc_rank", (54, 15)),
+        ("inc_suit", (69, 4)),
+        ("inc_kind", (73, 6)),
+        ("inc_size", (79, 1)),
+        ("draw", (80, 1)),
+        ("scores", (81, 2)),
+        ("opp_count", (83, 1)),
+        ("opp_revealed", (84, 19)),
+        ("trick_points", (103, 1)),
+        ("remaining_points", (104, 1)),
+        ("point_hold", (105, 1)),
+        ("unseen", (106, 54)),
+        ("last_player", (160, 1)),
     )
 
 
-def test_segment_spans_v4_is_the_v5_prefix():
-    v4 = segment_spans(4, 3)
-    v5 = segment_spans(5, 3)
-    v4_width = sum(width for _, _, width in v4)
-    assert v5[: len(v4)] == v4
-    assert v5[len(v4) :] == (
-        ("unseen", v4_width, 54),
-        ("last_player", v4_width + 54, 1),
-    )
-
-
-@pytest.mark.parametrize("obs_version", [3, 5])
-def test_b1_unseen_segment_is_the_public_set_complement(obs_version):
+def test_b1_unseen_segment_is_the_public_set_complement():
     """``unseen`` = 54 − own hand − revealed − played − current trick."""
     rules = DEFAULT_RULES
     deck = make_deck()
@@ -272,8 +191,8 @@ def test_b1_unseen_segment_is_the_public_set_complement(obs_version):
         last_player=1,
         done=False,
     )
-    obs = encode_observation(view, rules, obs_version=obs_version)
-    base, width = _span_map(obs_version, 2)["unseen"]
+    obs = encode_observation(view, rules)
+    base, width = _span_map(2)["unseen"]
     assert width == 54
     seen = set(hand) | set(revealed) | set(played) | set(trick)
     assert sum(obs[base : base + width]) == 54 - len(seen)
@@ -281,14 +200,11 @@ def test_b1_unseen_segment_is_the_public_set_complement(obs_version):
         assert obs[base + card_id(card)] == (0.0 if card in seen else 1.0)
 
 
-@pytest.mark.parametrize("obs_version", [3, 5])
 @pytest.mark.parametrize("num_players", [2, 3])
-def test_b1_last_player_segment_normalises_the_incumbent_owner(
-    num_players, obs_version
-):
+def test_b1_last_player_segment_normalises_the_incumbent_owner(num_players):
     """None (no incumbent) is 0.0; seat s is (s + 1) / num_players."""
     rules = Rules(num_players=num_players)
-    base, width = _span_map(obs_version, num_players)["last_player"]
+    base, width = _span_map(num_players)["last_player"]
     assert width == 1
     for last_player in (None, *range(num_players)):
         view = View(
@@ -306,22 +222,21 @@ def test_b1_last_player_segment_normalises_the_incumbent_owner(
             last_player=last_player,
             done=False,
         )
-        obs = encode_observation(view, rules, obs_version=obs_version)
+        obs = encode_observation(view, rules)
         expected = 0.0 if last_player is None else (last_player + 1) / num_players
         assert obs[base] == pytest.approx(expected)
 
 
-@pytest.mark.parametrize("obs_version", [4, 5])
-def test_s1_segments_reencode_every_public_field(obs_version):
-    """The slim blocks are lossless decodes of the v1 public fields."""
-    fixture = _load_legacy_fixture()
+def test_s1_segments_reencode_every_public_field():
+    """The slim blocks are lossless decodes of the public fields."""
+    fixture = _load_v5_golden()
     assert fixture["cases"]
     for case in fixture["cases"]:
         rules = Rules(**case["rules"])
         view = _view(case["view"])
         players = rules.num_players
-        obs = encode_observation(view, rules, obs_version=obs_version)
-        spans = _span_map(obs_version, players)
+        obs = encode_observation(view, rules)
+        spans = _span_map(players)
 
         start, width = spans["hand"]
         assert width == 54
@@ -369,15 +284,14 @@ def test_s1_segments_reencode_every_public_field(obs_version):
                 assert sum(obs[chunk + 15 : chunk + 19]) == 1.0
                 assert obs[chunk + 15 + int(card.suit)] == 1.0
 
-        if obs_version == 5:
-            start, width = spans["last_player"]
-            assert width == 1
-            expected = (
-                0.0
-                if view.last_player is None
-                else (view.last_player + 1) / players
-            )
-            assert obs[start] == pytest.approx(expected)
+        start, width = spans["last_player"]
+        assert width == 1
+        expected = (
+            0.0
+            if view.last_player is None
+            else (view.last_player + 1) / players
+        )
+        assert obs[start] == pytest.approx(expected)
 
 
 def test_s1_inc_suit_and_opp_revealed_leave_jokers_all_zero():
@@ -398,8 +312,8 @@ def test_s1_inc_suit_and_opp_revealed_leave_jokers_all_zero():
         last_player=0,
         done=False,
     )
-    obs = encode_observation(view, rules, obs_version=5)
-    spans = _span_map(5, 2)
+    obs = encode_observation(view, rules)
+    spans = _span_map(2)
     rank_start, _ = spans["inc_rank"]
     suit_start, _ = spans["inc_suit"]
     opp_start, _ = spans["opp_revealed"]
@@ -413,70 +327,6 @@ def test_s1_inc_suit_and_opp_revealed_leave_jokers_all_zero():
     assert obs[opp_start + 15 + int(Suit.CLUB)] == 0.0
 
 
-def test_v2_point_segments_on_a_crafted_view():
-    rules = DEFAULT_RULES
-    view = View(
-        seat=0,
-        hand=frozenset(
-            {
-                Card(Rank.R5, Suit.SPADE),
-                Card(Rank.RK, Suit.HEART),
-                Card(Rank.R4, Suit.CLUB),
-            }
-        ),
-        mask=(1 << len(CATALOG)) - 1,
-        incumbent=None,
-        current=0,
-        scores=(20, 30),
-        counts=(3, 4),
-        draw_count=52,
-        revealed=(Card(Rank.R3, Suit.DIAMOND),),
-        trick_cards=(Card(Rank.R10, Suit.DIAMOND), Card(Rank.R5, Suit.CLUB)),
-        played=(),
-        last_player=1,
-        done=False,
-    )
-    obs = encode_observation(view, rules, obs_version=2)
-    base = observation_dim(2, obs_version=1)
-    assert len(obs) == 194
-    assert obs[base] == pytest.approx(15 / 100)  # trick_points: 10 + 5
-    assert obs[base + 1] == pytest.approx(35 / 100)  # 100 - 50 score - 15 trick
-    assert obs[base + 2] == pytest.approx(15 / 100)  # own hand: 5 + 10
-    # v1 knows nothing about the block
-    assert encode_observation(view, rules, obs_version=1) == obs[:base]
-
-
-def test_v2_point_segments_on_real_midgame_views():
-    cases = [
-        case
-        for case in _load_legacy_fixture()["cases"]
-        if case["view"]["trick_cards"]
-        and sum(point_value(_card(c)) for c in case["view"]["trick_cards"]) > 0
-    ]
-    assert cases, "fixture has no trick with points"
-    for case in cases:
-        rules = Rules(**case["rules"])
-        view = _view(case["view"])
-        obs = encode_observation(view, rules, obs_version=2)
-        base = observation_dim(rules.num_players, obs_version=1)
-        trick_points = sum(point_value(c) for c in view.trick_cards)
-        remaining = rules.total_points - sum(view.scores) - trick_points
-        hold = sum(point_value(c) for c in view.hand)
-        assert obs[base] == pytest.approx(trick_points / rules.total_points)
-        assert obs[base + 1] == pytest.approx(remaining / rules.total_points)
-        assert obs[base + 2] == pytest.approx(hold / rules.total_points)
-
-
-def test_v1_encoding_matches_legacy_snapshot_fixture():
-    """Every v1 slot must equal the encoding the T1 snapshot produced."""
-    fixture = _load_legacy_fixture()
-    assert fixture["cases"]
-    for case in fixture["cases"]:
-        rules = Rules(**case["rules"])
-        obs = encode_observation(_view(case["view"]), rules, obs_version=1)
-        assert obs == case["obs_v1"], case["label"]
-
-
 def test_v5_golden_fixture_matches_the_encoder():
     """The committed v5 snapshots are pilot layout b + independent B0/B1."""
     fixture = _load_v5_golden()
@@ -485,7 +335,7 @@ def test_v5_golden_fixture_matches_the_encoder():
     for case in fixture["cases"]:
         rules = Rules(**case["rules"])
         view = _view(case["view"])
-        obs = encode_observation(view, rules, obs_version=5)
+        obs = encode_observation(view, rules)
         assert len(obs) == len(case["obs_v5"])
         assert obs == case["obs_v5"], case["label"]
         assert obs[: len(case["obs_b"])] == case["obs_b"], case["label"]
@@ -503,7 +353,7 @@ def test_v5_prefix_matches_the_pilot_layout_b_encoder():
         view = _view(case["view"])
         pilot_b = pilot.encode_b(view, rules)
         assert pilot_b == case["obs_b"], case["label"]
-        obs = encode_observation(view, rules, obs_version=5)
+        obs = encode_observation(view, rules)
         assert obs[: len(pilot_b)] == pilot_b, case["label"]
 
 
@@ -521,12 +371,11 @@ def test_v5_prefix_matches_the_pilot_for_every_table_size(num_players):
     for seat in range(num_players):
         view = game.view(state, seat)
         pilot_b = pilot.encode_b(view, rules)
-        obs = encode_observation(view, rules, obs_version=5)
+        obs = encode_observation(view, rules)
         assert obs[: len(pilot_b)] == pilot_b, seat
 
 
-@pytest.mark.parametrize("obs_version", [1, 2, 3, 4, 5])
-def test_encoding_does_not_leak_hidden_cards(obs_version):
+def test_encoding_does_not_leak_hidden_cards():
     """Two states differing only in hidden cards encode bit-for-bit equal.
 
     ADR-0002: the public projection may not carry opponent hands or the draw
@@ -578,31 +427,16 @@ def test_encoding_does_not_leak_hidden_cards(obs_version):
     ):
         assert getattr(view_a, field) == getattr(view_b, field)
     assert encode_observation(
-        view_a, rules, obs_version=obs_version
-    ) == encode_observation(view_b, rules, obs_version=obs_version)
+        view_a, rules
+    ) == encode_observation(view_b, rules)
 
 
-@pytest.mark.parametrize("obs_version", [1, 2, 3, 4, 5])
-def test_env_publishes_the_configured_observation_version(obs_version):
-    env = Seven523Env(
-        seed=0,
-        opponents=[GreedyBot(), GreedyBot()],
-        obs_version=obs_version,
-    )
-    assert env.obs_version == obs_version
-    assert env.obs_dim == observation_dim(2, obs_version)
+def test_env_publishes_the_v5_observation():
+    env = Seven523Env(seed=0, opponents=[GreedyBot(), GreedyBot()])
+    assert env.obs_dim == observation_dim(2) == 161
     assert env.observation_space.shape == (env.obs_dim,)
     obs, _ = env.reset()
-    assert np.allclose(
-        obs, encode_observation(env.view(), env.rules, obs_version)
-    )
-
-
-def test_env_defaults_to_v5_and_rejects_unknown_versions():
-    assert Seven523Env(seed=0).obs_version == OBS_VERSION == 5
-    assert Seven523Env(seed=0).obs_dim == 161
-    with pytest.raises(ValueError, match="obs_version"):
-        Seven523Env(seed=0, obs_version=6)
+    assert np.allclose(obs, encode_observation(env.view(), env.rules))
 
 
 def run_env_episode(env, seed=0):

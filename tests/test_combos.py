@@ -2,7 +2,6 @@ import pytest
 
 from seven523.cards import NATURAL_ORDER, Card, Rank, Suit
 from seven523.combos import ComboKind, beats, classify
-from seven523.rules import Rules
 
 
 def cards(*specs):
@@ -326,72 +325,3 @@ def test_family_chains_are_monotone_over_representatives():
             assert beats(higher, lower)
             assert not beats(lower, higher)
 
-
-# -- legacy tier comparison (traces recorded before 2026-09-25) --------------
-
-LEGACY = Rules(comparison="tier")
-
-
-def test_legacy_tier_straight_beats_pair():
-    pair = run((Rank.R7, Suit.SPADE), (Rank.R7, Suit.HEART))
-    straight = run(*[(rank, Suit.SPADE) for rank in (Rank.R3, Rank.R4, Rank.R5)])
-    assert beats(straight, pair, LEGACY)
-    assert not beats(pair, straight, LEGACY)
-
-
-def test_legacy_tier_consecutive_pairs_beat_single():
-    single = run((Rank.R7, Suit.SPADE))
-    pairs = run(
-        *[
-            (rank, suit)
-            for rank in (Rank.R3, Rank.R4, Rank.R5)
-            for suit in (Suit.SPADE, Suit.HEART)
-        ]
-    )
-    assert beats(pairs, single, LEGACY)
-    assert not beats(single, pairs, LEGACY)
-
-
-def test_legacy_tier_is_monotone_across_tiers():
-    tier1 = [
-        run((Rank.R7, Suit.SPADE)),
-        run((Rank.R7, Suit.SPADE), (Rank.R7, Suit.HEART)),
-    ]
-    tier2 = [
-        run(*[(rank, Suit.SPADE) for rank in (Rank.R3, Rank.R4, Rank.R5)]),
-        run(
-            *[
-                (rank, suit)
-                for rank in (Rank.R3, Rank.R4, Rank.R5)
-                for suit in (Suit.SPADE, Suit.HEART)
-            ]
-        ),
-    ]
-    for lower in tier1:
-        for higher in tier2:
-            assert beats(higher, lower, LEGACY)
-            assert not beats(lower, higher, LEGACY)
-    # Same tier, different kind never compares (the old bug and the old rule).
-    assert not beats(tier1[1], tier1[0], LEGACY)
-    assert not beats(tier2[0], tier2[1], LEGACY)
-    assert not beats(tier2[1], tier2[0], LEGACY)
-
-
-def test_legacy_tier_bombs_beat_everything_and_compare_by_tier_then_rank():
-    pair = run((Rank.R7, Suit.SPADE), (Rank.R7, Suit.HEART))
-    small = run(*[(Rank.R3, suit) for suit in (Suit.SPADE, Suit.HEART, Suit.CLUB)])
-    big = run(*[(Rank.R4, suit) for suit in Suit])
-    assert beats(small, pair, LEGACY)
-    assert beats(big, small, LEGACY)
-    assert not beats(small, big, LEGACY)
-
-
-def test_legacy_tier_still_compares_same_kind_by_size_then_top_card():
-    short = run(*[(rank, Suit.SPADE) for rank in (Rank.R3, Rank.R4, Rank.R5)])
-    long = run(*[(rank, Suit.SPADE) for rank in (Rank.R3, Rank.R4, Rank.R5, Rank.R6)])
-    assert beats(long, short, LEGACY)
-    assert not beats(short, long, LEGACY)
-    spade = run((Rank.R7, Suit.SPADE))
-    heart = run((Rank.R7, Suit.HEART))
-    assert beats(spade, heart, LEGACY)
-    assert not beats(heart, spade, LEGACY)

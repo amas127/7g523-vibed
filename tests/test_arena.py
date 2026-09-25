@@ -55,7 +55,7 @@ def _tiny_agent(path: Path, *, hidden: int = 8) -> None:
     from seven523.networks import Agent, save_agent
 
     torch.manual_seed(0)
-    save_agent(path, Agent(191, [134, 4], hidden=hidden))
+    save_agent(path, Agent(161, [134, 4], hidden=hidden))
 
 
 def _snapshot(games) -> list[tuple[int, tuple[str, ...], tuple[int, ...]]]:
