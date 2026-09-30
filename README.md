@@ -1,5 +1,10 @@
 # 7鬼523
 
+This is a pure VIBE card game project. If you wanna try it you might follow the intrustion below,
+be no completeness will be guaranteed. This is a card game I play with my young brother.
+
+---
+
 一个 54 张牌的中式跑牌游戏：打满一墩收分、底牌堆补牌、**出空即撬底**结束本局。
 本仓库 = 可独立使用的纯规则核心 + Gymnasium 形状的 RL 环境 + PPO 训练/评分/定级/人机对战全链路。
 
