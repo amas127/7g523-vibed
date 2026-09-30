@@ -1,7 +1,14 @@
 import pytest
 
+import seven523.rules as rules_module
 from seven523.actions import catalog_for
-from seven523.rules import DEFAULT_RULES, Rules
+from seven523.rules import (
+    DEFAULT_RULES,
+    RULES_REVISION,
+    Rules,
+    rules_id,
+    rules_identity,
+)
 
 
 def test_default_rules_match_the_documented_variant():
@@ -49,3 +56,39 @@ def test_rules_are_hashable_and_catalogs_are_cached():
     assert catalog_for(DEFAULT_RULES) is catalog_for(Rules())
     # A distinct, equal-valued Rules instance must hit the same cache entry.
     assert catalog_for(Rules(straight_max=13)) is catalog_for(Rules(straight_max=13))
+
+
+# The default id is a worked example pinned by hand: it was computed once from
+# the plain JSON payload (revision + fields, sorted keys, compact separators),
+# not re-derived here, so any serialisation drift fails the literal.
+def test_default_rules_identity_is_a_pinned_worked_example():
+    assert RULES_REVISION == 3  # 撬底 on going out (ADR-0014)
+    assert rules_identity() == {
+        "revision": 3,
+        "fields": {
+            "num_players": 2,
+            "hand_size": 7,
+            "straight_min": 3,
+            "straight_max": 7,
+            "consecutive_pairs_min": 3,
+            "consecutive_pairs_max": 3,
+            "total_points": 100,
+        },
+    }
+    assert rules_id() == "2e36dbea44893696"
+    assert rules_id(DEFAULT_RULES) == "2e36dbea44893696"
+
+
+def test_equal_fields_give_the_same_id():
+    assert rules_id(Rules()) == rules_id(DEFAULT_RULES)
+    assert rules_id(Rules(straight_max=13)) == rules_id(Rules(straight_max=13))
+
+
+def test_a_changed_field_changes_the_id():
+    assert rules_id(Rules(total_points=101)) != rules_id(DEFAULT_RULES)
+
+
+def test_a_bumped_revision_changes_the_id(monkeypatch):
+    baseline = rules_id(DEFAULT_RULES)
+    monkeypatch.setattr(rules_module, "RULES_REVISION", 4)
+    assert rules_id(DEFAULT_RULES) != baseline

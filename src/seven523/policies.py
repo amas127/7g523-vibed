@@ -11,19 +11,19 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from .actions import catalog_for, index_hand, legal_ids, resolve_indexed
+from .actions import legal_ids
 from .game import View
 from .rules import DEFAULT_RULES, Rules
 
 __all__ = [
     "EpisodeMixturePolicy",
     "EpisodePolicy",
-    "GreedyBot",
     "JointAction",
     "MixturePolicy",
     "Policy",
     "RandomBot",
     "WeightedPolicy",
+    "buildable_by_grammar",
     "default_id_for_spec",
     "make_scripted_policies",
     "missing_ckpt_path",
@@ -64,36 +64,12 @@ class RandomBot:
         return self.rng.choice(legal_ids(view.mask)), None
 
 
-class GreedyBot:
-    """Weakest legal beat, non-bombs first; PASS only when nothing else is legal."""
-
-    def __init__(self, rules: Rules = DEFAULT_RULES) -> None:
-        self.rules = rules
-        self.catalog = catalog_for(rules)
-        self.pass_id = len(self.catalog) - 1
-
-    def act(self, view: View) -> JointAction:
-        best_id = self.pass_id
-        best_key: tuple | None = None
-        by_rank = index_hand(view.hand)
-        for action_id in legal_ids(view.mask):
-            if action_id == self.pass_id:
-                continue
-            combo = resolve_indexed(self.catalog[action_id], by_rank, self.rules)
-            if combo is None:
-                continue
-            key = (combo.is_bomb, combo.strength)
-            if best_key is None or key < best_key:
-                best_key = key
-                best_id = action_id
-        return best_id, None
-
-
 class MixturePolicy:
     """Weighted mixture of policies, re-drawn per decision (a tiny league).
 
     The prior ladder report (``docs/experiments/ladder-report.md`` §4.1) names
-    an opponent pool as the untested route out of the vs-Greedy plateau: a
+    an opponent pool as the untested route out of the single-scripted-opponent
+    plateau: a
     single deterministic opponent gives a saturating gradient.  This policy
     keeps two (or more) opponents in play without changing the env or the
     trainer: every call independently draws one member by weight, so the
@@ -271,15 +247,13 @@ def pfsp_weights(
 def make_scripted_policies(
     mode: str, rules: Rules = DEFAULT_RULES, seed: int | None = None
 ) -> list[Policy]:
-    """One opponent policy per seat for the built-in modes ('random' / 'greedy')."""
+    """One opponent policy per seat for the built-in scripted mode ('random')."""
     if mode == "random":
         rng = random.Random(seed)
         return [
             RandomBot(random.Random(rng.randrange(1 << 32)))
             for _ in range(rules.num_players)
         ]
-    if mode == "greedy":
-        return [GreedyBot(rules) for _ in range(rules.num_players)]
     raise ValueError(f"unknown scripted opponent mode: {mode!r}")
 
 
@@ -292,16 +266,14 @@ def policy_from_spec(
     seed: int | None = None,
     device: str = "cpu",
 ) -> Policy:
-    """Build a policy from the shared ``random`` / ``greedy`` / ``ckpt:<path>`` grammar.
+    """Build a policy from the shared ``random`` / ``ckpt:<path>`` grammar.
 
-    The single spec parser for the tracing/rating tools (ADR-0006).  Torch is
-    imported lazily inside the ``ckpt:`` branch, so the default import stays
+    The single spec parser for the tracing/rating tools (ADR-0006/0012).  Torch
+    is imported lazily inside the ``ckpt:`` branch, so the default import stays
     torch-free; agent weights are cached per ``(path, device)``.
     """
     if spec == "random":
         return RandomBot(random.Random(seed))
-    if spec == "greedy":
-        return GreedyBot(rules)
     if spec.startswith("ckpt:"):
         from .networks import NeuralPolicy, load_agent  # lazy: torch is train-only
 
@@ -316,7 +288,7 @@ def policy_from_spec(
             _AGENT_CACHE[key], rules, device=device, seed=seed
         )
     raise ValueError(
-        f"unknown policy spec {spec!r} (want random / greedy / ckpt:<path>)"
+        f"unknown policy spec {spec!r} (want random / ckpt:<path>)"
     )
 
 
@@ -340,7 +312,7 @@ def split_entrant(raw: str) -> tuple[str, str]:
 
 def missing_ckpt_path(spec: str | None) -> str | None:
     """The path of a ``ckpt:`` spec when the file is absent (or the path is
-    empty), else ``None``.  ``random`` / ``greedy`` / other / ``None`` -> ``None``."""
+    empty), else ``None``.  ``random`` / other / ``None`` -> ``None``."""
     if spec is None or not spec.startswith("ckpt:"):
         return None
     path = spec[len("ckpt:") :]
@@ -349,13 +321,26 @@ def missing_ckpt_path(spec: str | None) -> str | None:
     return path
 
 
+def buildable_by_grammar(spec: str | None) -> bool:
+    """Whether the stock ``random`` / ``ckpt:<path>`` grammar can build ``spec``.
+
+    The caller-owned capability counterpart of :func:`validate_spec` for the
+    placement/web admission gates: ``None`` (a spec-less subject) is not
+    buildable, and anything outside the stock grammar (e.g. a run-local
+    ``rolloutt:`` search spec) needs an injected factory.
+    """
+    if spec is None:
+        return False
+    return validate_spec(str(spec)) is None
+
+
 def validate_spec(spec: str) -> str | None:
     """Return an error message when the spec is not usable, else ``None``.
 
-    The spec grammar is ``random`` / ``greedy`` / ``ckpt:<path>``; the messages
-    are kept byte-identical to those the tools raised before this lived here.
+    The spec grammar is ``random`` / ``ckpt:<path>``; the messages are kept
+    byte-identical to those the tools raised before this lived here.
     """
-    if spec in {"random", "greedy"}:
+    if spec == "random":
         return None
     if spec.startswith("ckpt:"):
         path = spec[len("ckpt:") :]
@@ -364,4 +349,4 @@ def validate_spec(spec: str) -> str | None:
         if not Path(path).is_file():
             return f"checkpoint not found: {path}"
         return None
-    return f"unknown policy spec {spec!r} (want random / greedy / ckpt:<path>)"
+    return f"unknown policy spec {spec!r} (want random / ckpt:<path>)"

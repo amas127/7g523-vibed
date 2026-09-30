@@ -24,6 +24,22 @@ class Phase(Enum):
 
 
 @dataclass(frozen=True, slots=True)
+class Play:
+    """One public action record: a seat played a combo (pass = empty cards).
+
+    ``seat`` is the acting seat, ``cards`` the concrete cards in the combo
+    (canonically sorted); a pass has ``cards == ()``.  ``opens_trick`` records
+    that the actor faced no incumbent (this action started a trick) and
+    ``went_out`` that the actor's hand became empty (a public count fact).
+    """
+
+    seat: int
+    cards: tuple[Card, ...]
+    opens_trick: bool
+    went_out: bool
+
+
+@dataclass(frozen=True, slots=True)
 class GameState:
     """The omniscient engine state.  Agents must go through :class:`View`."""
 
@@ -43,6 +59,17 @@ class GameState:
     #: Restored traces start empty because the trace format records actions,
     #: not this derived history.
     played: tuple[Card, ...] = ()
+    #: Seats whose hand is empty, in the order they went out (RULES.md 4.8/4.9,
+    #: ADR-0014).  A seat is appended when its last card is played and removed
+    #: when a refill gives it cards back; the first entry digs at a refill that
+    #: leaves the draw pile empty.  Engine-internal: never projected into
+    #: :class:`View` (ADR-0002).
+    empty_order: tuple[int, ...] = ()
+    #: Every public action (pass included), oldest first.  Unlike ``played``
+    #: (finished-trick cards, no seats) each entry carries the acting seat and
+    #: the trick boundary; it is appended by :meth:`Game.step` and rebuilt
+    #: naturally by trace replay (``restore`` starts empty).
+    plays: tuple[Play, ...] = ()
 
     @property
     def done(self) -> bool:
@@ -99,6 +126,9 @@ class View:
     played: tuple[Card, ...]
     last_player: int | None
     done: bool
+    #: Public action log, oldest-first; see :attr:`GameState.plays`.  Has a
+    #: default so pre-existing keyword constructions stay valid.
+    plays: tuple[Play, ...] = ()
 
 
 class Game:
@@ -158,6 +188,7 @@ class Game:
             played=state.played,
             last_player=state.last_player,
             done=state.done,
+            plays=state.plays,
         )
 
     # -- transitions ---------------------------------------------------------
@@ -173,7 +204,10 @@ class Game:
 
         action = self.catalog[action_id]
         if action.is_pass:
-            return self._advance(state, StepResult())
+            noted = replace(
+                state, plays=(*state.plays, Play(seat, (), False, False))
+            )
+            return self._advance(noted, StepResult())
 
         combo = resolve(action, state.hands[seat], self.rules, suit=suit)
         if combo is None or (
@@ -187,7 +221,10 @@ class Game:
         if combo is None:  # the mask guarantees this cannot happen
             raise RuntimeError("legal action failed to resolve")
         hand = state.hands[seat].difference(combo.cards)
-        hands = state.hands[:seat] + (hand,) + state.hands[seat + 1 :]
+        hands = (*state.hands[:seat], hand, *state.hands[seat + 1 :])
+        empty_order = state.empty_order
+        if not hand and seat not in empty_order:
+            empty_order = (*empty_order, seat)
         points = sum(point_value(card) for card in combo.cards)
         after = replace(
             state,
@@ -196,7 +233,17 @@ class Game:
             last_player=seat,
             trick_cards=state.trick_cards + combo.cards,
             trick_points=state.trick_points + points,
+            empty_order=empty_order,
+            plays=(
+                *state.plays,
+                Play(seat, combo.cards, state.incumbent is None, not hand),
+            ),
         )
+        # 撬底, revision 3 (RULES.md 4.8, ADR-0014): going out with an empty
+        # draw pile ends the round on the spot — the actor digs before any
+        # opponent may respond, so the trick's winner is always the actor.
+        if not hand and not after.draw_pile:
+            return self._end_trick(after, StepResult(), immediate_digger=seat)
         return self._advance(after, StepResult())
 
     def _advance(self, state: GameState, result: StepResult) -> tuple[GameState, StepResult]:
@@ -208,15 +255,20 @@ class Game:
             return self._end_trick(state, result)
         return replace(state, current=nxt), result
 
-    def _end_trick(self, state: GameState, result: StepResult) -> tuple[GameState, StepResult]:
+    def _end_trick(
+        self,
+        state: GameState,
+        result: StepResult,
+        *,
+        immediate_digger: int | None = None,
+    ) -> tuple[GameState, StepResult]:
         rules = self.rules
         n = rules.num_players
-        winner = state.last_player
-        if winner is None:
+        trick_winner = state.last_player
+        if trick_winner is None:
             raise RuntimeError("trick ended without a player")
 
         scores = list(state.scores)
-        scores[winner] += state.trick_points
         hands = list(state.hands)
         draw_pile = state.draw_pile
         collected = state.collected + len(state.trick_cards)
@@ -227,7 +279,7 @@ class Game:
         if draw_pile:
             pile = list(draw_pile)
             for offset in range(1, n + 1):
-                seat = (winner + offset) % n
+                seat = (trick_winner + offset) % n
                 need = rules.hand_size - len(hands[seat])
                 take = min(need, len(pile))
                 if take:
@@ -236,12 +288,23 @@ class Game:
                     refilled.append(seat)
             draw_pile = tuple(pile)
 
-        # 撬底: the winner is empty and no refill was possible.
-        dug = not hands[winner] and not draw_pile
+        # A seat that got cards is no longer "out"; drop it from the order.
+        refilled_seats = set(refilled)
+        empty_order = tuple(
+            seat for seat in state.empty_order if seat not in refilled_seats
+        )
+
+        # 撬底, revision 3 (RULES.md 4.8/4.9, ADR-0014): the first player to go
+        # out digs.  The immediate path names the digger; otherwise a trick
+        # whose refill emptied the draw pile sends the earliest empty seat.
+        digger = immediate_digger
+        if digger is None and not draw_pile and empty_order:
+            digger = empty_order[0]
+
         gained = 0
-        if dug:
+        if digger is not None:
             for seat in range(n):
-                if seat == winner:
+                if seat == digger:
                     continue
                 kept = [card for card in hands[seat] if not is_point_card(card)]
                 gained += sum(point_value(c) for c in hands[seat]) - sum(
@@ -249,8 +312,13 @@ class Game:
                 )
                 collected += len(hands[seat]) - len(kept)
                 hands[seat] = frozenset(kept)
-            scores[winner] += gained
+            scores[digger] += state.trick_points + gained
+        else:
+            scores[trick_winner] += state.trick_points
 
+        # ``winner`` names the seat that collected ``points_taken``: the trick
+        # winner normally, the digger when the trick ends in 撬底.
+        winner = digger if digger is not None else trick_winner
         after = replace(
             state,
             hands=tuple(hands),
@@ -263,7 +331,8 @@ class Game:
             last_player=None,
             collected=collected,
             played=played,
-            phase=Phase.DONE if dug else Phase.PLAY,
+            empty_order=empty_order,
+            phase=Phase.DONE if digger is not None else Phase.PLAY,
         )
         return after, replace(
             result,
@@ -271,8 +340,8 @@ class Game:
             winner=winner,
             points_taken=state.trick_points + gained,
             refilled=tuple(refilled),
-            dug=dug,
-            done=dug,
+            dug=digger is not None,
+            done=digger is not None,
         )
 
     # -- rewards -------------------------------------------------------------

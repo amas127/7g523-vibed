@@ -7,9 +7,9 @@ what".
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Iterable
 
 from .cards import JOKER_RANKS, NATURAL_INDEX, Card, Rank, card_key, sorted_cards
 from .rules import DEFAULT_RULES, Rules
@@ -87,7 +87,7 @@ class Combo:
 
     @property
     def strength(self) -> tuple:
-        """Ordering key for callers that sort legal plays (greedy bots, demos)."""
+        """Ordering key for callers that sort legal plays (bots, demos)."""
         if self.is_bomb:
             return (self.tier, self.top_rank)
         return (self.tier, self.size, self.top_key)

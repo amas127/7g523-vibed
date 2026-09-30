@@ -61,8 +61,8 @@ dispatch、`--obs-version`、热启动段级列重映射 `_REMAP_VERSION_PAIRS` 
 - `traces/study`（1200 局 + manifest）作为历史语料保留，不作 live 输入；由它标定的
   `T2_LABELS` 与 `artifacts/human-elo/prior.json` 仍是旧 `tier` 口径，重标定路线见
   `docs/plans.md` T15。
-- 测试面删除了 v1–v4 布局矩阵、热启动重映射表与 tier 比较用例；当前全套
-  `uv run --group train pytest -q` 收集 464 项。
+- 测试面删除了 v1–v4 布局矩阵、热启动重映射表与 tier 比较用例；当时全套
+  `uv run --group train pytest -q` 收集 464 项（现行计数以 `uv run pytest` 为准）。
 - 文档同步：[DESIGN.md](../../DESIGN.md) §4 只描述 v5 段表并指向本 ADR；
   `RULES.md` §7 R-Q12 改为「tier 变体已随旧语料退役（见 ADR-0009）」；
   `docs/experiments/README.md` 的口径警告保持「旧数字不可混比」并补充语料只读说明。

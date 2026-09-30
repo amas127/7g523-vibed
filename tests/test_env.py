@@ -1,11 +1,13 @@
 import importlib.util
 import json
 import random
+from dataclasses import replace
 from pathlib import Path
 
 import gymnasium as gym
 import numpy as np
 import pytest
+from support import FirstLegalBot
 
 from seven523.actions import CATALOG, SUIT_N, catalog_for, joint_mask_bits
 from seven523.cards import (
@@ -24,8 +26,8 @@ from seven523.env import (
     encode_observation,
     observation_dim,
 )
-from seven523.game import Game, GameState, Phase, View, seat_outcome
-from seven523.policies import GreedyBot, MixturePolicy, RandomBot
+from seven523.game import Game, GameState, Phase, Play, View, seat_outcome
+from seven523.policies import MixturePolicy, RandomBot
 from seven523.rules import DEFAULT_RULES, Rules
 
 #: Pilot layout-b encoder; gitignored, so the bit-for-bit comparison against it
@@ -76,6 +78,15 @@ def _view(spec):
         played=tuple(_card(c) for c in spec.get("played", ())),
         last_player=spec["last_player"],
         done=spec["done"],
+        plays=tuple(
+            Play(
+                seat=play["seat"],
+                cards=tuple(_card(c) for c in play["cards"]),
+                opens_trick=play["opens_trick"],
+                went_out=play["went_out"],
+            )
+            for play in spec.get("plays", ())
+        ),
     )
 
 
@@ -120,6 +131,21 @@ def test_observation_dim_is_the_only_v5_layout():
     assert observation_dim(2) == 161
     assert observation_dim(3) == 182
     assert observation_dim(7) == 266
+
+
+def test_empty_order_stays_out_of_the_view_and_observation():
+    """The revision-3 emptiness order is engine-internal (ADR-0002/ADR-0014)."""
+    rules = DEFAULT_RULES
+    game = Game(rules)
+    base = game.new(random.Random(0))
+    before = game.view(base, 0)
+    state_a = replace(base, empty_order=())
+    state_b = replace(base, empty_order=(0, 1))
+    view_a = game.view(state_a, 0)
+    view_b = game.view(state_b, 0)
+    assert view_a == view_b == before
+    assert not hasattr(view_a, "empty_order")
+    assert encode_observation(view_a, rules) == encode_observation(view_b, rules)
 
 
 @pytest.mark.parametrize("num_players", [2, 3, 4, 5, 6, 7])
@@ -432,7 +458,7 @@ def test_encoding_does_not_leak_hidden_cards():
 
 
 def test_env_publishes_the_v5_observation():
-    env = Seven523Env(seed=0, opponents=[GreedyBot(), GreedyBot()])
+    env = Seven523Env(seed=0, opponents=[FirstLegalBot(), FirstLegalBot()])
     assert env.obs_dim == observation_dim(2) == 161
     assert env.observation_space.shape == (env.obs_dim,)
     obs, _ = env.reset()
@@ -522,11 +548,11 @@ def test_mixture_policy_draws_members_by_weight():
 
 
 def test_mixture_policy_returns_legal_actions():
-    env = Seven523Env(seed=0, opponents=[GreedyBot(), GreedyBot()])
+    env = Seven523Env(seed=0, opponents=[FirstLegalBot(), FirstLegalBot()])
     env.reset()
     view = env.game.view(env.state, env.learner)
     mixture = MixturePolicy(
-        [(0.5, GreedyBot()), (0.5, RandomBot(random.Random(0)))], random.Random(0)
+        [(0.5, FirstLegalBot()), (0.5, RandomBot(random.Random(0)))], random.Random(0)
     )
     for _ in range(20):
         action_id, _suit = mixture.act(view)
@@ -539,7 +565,7 @@ def test_env_learner_not_zero():
         rules=rules,
         seed=2,
         learner=2,
-        opponents=[GreedyBot(rules) for _ in range(3)],
+        opponents=[FirstLegalBot(rules) for _ in range(3)],
     )
     run_env_episode(env, seed=2)
 
@@ -554,8 +580,8 @@ def test_env_action_mask_matches_the_learner_view():
 
 
 def test_env_reset_with_the_same_seed_is_reproducible():
-    first = Seven523Env(seed=0, opponents=[GreedyBot(), GreedyBot()])
-    second = Seven523Env(seed=0, opponents=[GreedyBot(), GreedyBot()])
+    first = Seven523Env(seed=0, opponents=[FirstLegalBot(), FirstLegalBot()])
+    second = Seven523Env(seed=0, opponents=[FirstLegalBot(), FirstLegalBot()])
     obs_a, _ = first.reset(seed=42)
     obs_b, _ = second.reset(seed=42)
     assert np.array_equal(obs_a, obs_b)
@@ -602,8 +628,12 @@ def _win_bonus(state, learner):
 
 def test_reward_shaping_defaults_to_terminal_and_rejects_unknown_modes():
     assert Seven523Env(seed=0).reward_shaping == "terminal"
-    for mode in ("terminal", "trick_diff", "win", "trick_diff_win"):
+    assert Seven523Env(seed=0).reward_cap is None
+    for mode in ("terminal", "trick_diff", "win", "trick_diff_win", "terminal_win"):
         assert Seven523Env(seed=0, reward_shaping=mode).reward_shaping == mode
+    saturated = Seven523Env(seed=0, reward_shaping="saturate", reward_cap=0.2)
+    assert saturated.reward_shaping == "saturate"
+    assert saturated.reward_cap == 0.2
     for bad in ("", "none", "TERMINAL", "trickdiff"):
         with pytest.raises(ValueError, match="reward_shaping"):
             Seven523Env(seed=0, reward_shaping=bad)
@@ -716,9 +746,345 @@ def test_trick_diff_win_adds_the_win_bonus_on_the_terminal_step_only():
         assert both_rewards[-1] == pytest.approx(diff_rewards[-1] + win, abs=1e-12)
 
 
+# -- terminal_win / win_jump (Tier 1 boundary jump) ---------------------------
+
+
+def _terminal_state(rules, scores):
+    """A minimal finished GameState carrying ``scores`` (points conserved)."""
+    assert sum(scores) == rules.total_points
+    return GameState(
+        hands=tuple(frozenset() for _ in range(rules.num_players)),
+        draw_pile=(),
+        scores=tuple(scores),
+        trick_points=0,
+        trick_cards=(),
+        revealed=(),
+        current=0,
+        incumbent=None,
+        last_player=None,
+        collected=rules.total_points,
+        phase=Phase.DONE,
+    )
+
+
+@pytest.mark.parametrize(
+    ("scores", "outcome"),
+    [((60, 40), 1), ((50, 50), 0), ((40, 60), -1)],
+)
+def test_terminal_win_is_the_margin_plus_lambda_times_the_outcome(scores, outcome):
+    rules = Rules()
+    env = Seven523Env(
+        rules=rules, seed=0, reward_shaping="terminal_win", win_jump=0.25
+    )
+    state = _terminal_state(rules, scores)
+    margin = env.game.returns(state)[env.learner]
+    assert seat_outcome(state.scores, env.learner) == outcome
+    assert env._reward(state, 0.0, 0.0) == pytest.approx(
+        margin + 0.25 * outcome, abs=1e-12
+    )
+
+
+def test_terminal_win_uses_seat_outcome_not_a_50_point_threshold():
+    """3 players: own<50 can win, and a nonzero-margin tie stays a tie."""
+    rules = Rules(num_players=3)
+    env = Seven523Env(
+        rules=rules, seed=0, reward_shaping="terminal_win", win_jump=1.0
+    )
+    low_win = _terminal_state(rules, (40, 30, 30))
+    high_tie = _terminal_state(rules, (35, 35, 30))
+    assert seat_outcome(low_win.scores, env.learner) == 1
+    assert env._reward(low_win, 0.0, 0.0) == pytest.approx(0.1 + 1.0, abs=1e-12)
+    assert seat_outcome(high_tie.scores, env.learner) == 0
+    assert env._reward(high_tie, 0.0, 0.0) == pytest.approx(0.025, abs=1e-12)
+
+
+def test_terminal_win_rewards_are_zero_until_the_terminal_step():
+    rules = Rules()
+    env = Seven523Env(
+        rules=rules,
+        seed=8,
+        opponents=_random_opponents(rules, 8),
+        reward_shaping="terminal_win",
+        win_jump=1.0,
+    )
+    rewards = _play_episode(env, action_seed=0)
+    assert len(rewards) > 1
+    assert all(reward == 0.0 for reward in rewards[:-1])
+    margin = env.game.returns(env.state)[env.learner]
+    assert rewards[-1] == pytest.approx(
+        margin + _win_bonus(env.state, env.learner), abs=1e-12
+    )
+
+
+@pytest.mark.parametrize("win_jump", [0.0, 0.25, 1.0])
+def test_terminal_win_equals_terminal_plus_lambda_times_win(win_jump):
+    """Step-by-step identity: r_jump = r_terminal + λ·r_win for every step."""
+    rules = Rules()
+    terminal = Seven523Env(
+        rules=rules, seed=6, opponents=_random_opponents(rules, 6)
+    )
+    win = Seven523Env(
+        rules=rules,
+        seed=6,
+        opponents=_random_opponents(rules, 6),
+        reward_shaping="win",
+    )
+    jumped = Seven523Env(
+        rules=rules,
+        seed=6,
+        opponents=_random_opponents(rules, 6),
+        reward_shaping="terminal_win",
+        win_jump=win_jump,
+    )
+    for episode in range(3):
+        term_rewards = _play_episode(terminal, action_seed=episode)
+        win_rewards = _play_episode(win, action_seed=episode)
+        jump_rewards = _play_episode(jumped, action_seed=episode)
+        assert len(jump_rewards) == len(term_rewards) == len(win_rewards)
+        if win_jump == 0.0:
+            # λ=0 must be bit-for-bit terminal, not merely close.
+            assert jump_rewards == term_rewards
+        expected = [t + win_jump * w for t, w in zip(term_rewards, win_rewards)]
+        assert jump_rewards == pytest.approx(expected, abs=1e-12)
+
+
+def test_terminal_win_with_a_large_jump_orders_by_outcome_like_win():
+    rules = Rules()
+    loss = _terminal_state(rules, (0, 100))
+    tie = _terminal_state(rules, (50, 50))
+    win = _terminal_state(rules, (100, 0))
+    for win_jump in (2.0, 10.0):
+        env = Seven523Env(
+            rules=rules,
+            seed=0,
+            reward_shaping="terminal_win",
+            win_jump=win_jump,
+        )
+        rewards = [env._reward(state, 0.0, 0.0) for state in (loss, tie, win)]
+        assert rewards[0] < rewards[1] < rewards[2]
+
+
+def test_win_jump_validation():
+    assert Seven523Env(seed=0).win_jump == 1.0
+    assert Seven523Env(seed=0, win_jump=0.0).win_jump == 0.0
+    for bad in (float("nan"), float("inf"), float("-inf"), -0.25, 10.5):
+        with pytest.raises(ValueError, match="win_jump"):
+            Seven523Env(seed=0, reward_shaping="terminal_win", win_jump=bad)
+    # The value is validated even when the mode ignores it, so a typo cannot
+    # silently reach a future terminal_win run.
+    with pytest.raises(ValueError, match="win_jump"):
+        Seven523Env(seed=0, win_jump=float("nan"))
+
+
+@pytest.mark.parametrize(
+    "mode", ["terminal", "trick_diff", "win", "trick_diff_win"]
+)
+def test_win_jump_is_ignored_by_legacy_modes(mode):
+    rules = Rules()
+    first = Seven523Env(
+        rules=rules,
+        seed=7,
+        opponents=_random_opponents(rules, 7),
+        reward_shaping=mode,
+    )
+    second = Seven523Env(
+        rules=rules,
+        seed=7,
+        opponents=_random_opponents(rules, 7),
+        reward_shaping=mode,
+        win_jump=5.0,
+    )
+    for episode in range(2):
+        assert _play_episode(first, action_seed=episode) == _play_episode(
+            second, action_seed=episode
+        )
+
+
+# -- saturate / reward_cap (Tier 1 margin clamp) -------------------------------
+
+
+@pytest.mark.parametrize(
+    ("scores", "cap", "expected"),
+    [
+        ((60, 40), 0.2, 0.2),  # win above the cap -> cap
+        ((70, 30), 0.7, 0.4),  # win below the cap -> margin
+        ((55, 45), 0.2, 0.1),  # win below the cap -> margin
+        ((50, 50), 0.2, 0.0),  # tie -> zero
+        ((40, 60), 0.2, -0.2),  # loss keeps the margin
+        ((0, 100), 0.0, -1.0),  # K0: losses unchanged, wins zero
+    ],
+)
+def test_saturate_clamps_wins_and_keeps_losses(scores, cap, expected):
+    rules = Rules()
+    env = Seven523Env(
+        rules=rules, seed=0, reward_shaping="saturate", reward_cap=cap
+    )
+    state = _terminal_state(rules, scores)
+    assert env._reward(state, 0.0, 0.0) == pytest.approx(expected, abs=1e-12)
+
+
+def test_saturate_zero_cap_makes_wins_score_like_ties():
+    rules = Rules()
+    env = Seven523Env(
+        rules=rules, seed=0, reward_shaping="saturate", reward_cap=0.0
+    )
+    win = _terminal_state(rules, (100, 0))
+    tie = _terminal_state(rules, (50, 50))
+    loss = _terminal_state(rules, (0, 100))
+    assert env._reward(win, 0.0, 0.0) == 0.0
+    assert env._reward(tie, 0.0, 0.0) == 0.0
+    assert env._reward(loss, 0.0, 0.0) == -1.0
+
+
+def test_saturate_uses_seat_outcome_not_a_50_point_threshold():
+    """3 players: own<50 can win; a nonzero-margin tie stays a tie."""
+    rules = Rules(num_players=3)
+    env = Seven523Env(
+        rules=rules, seed=0, reward_shaping="saturate", reward_cap=0.7
+    )
+    low_win = _terminal_state(rules, (40, 30, 30))
+    high_tie = _terminal_state(rules, (35, 35, 30))
+    assert seat_outcome(low_win.scores, env.learner) == 1
+    assert env._reward(low_win, 0.0, 0.0) == pytest.approx(0.1, abs=1e-12)
+    assert seat_outcome(high_tie.scores, env.learner) == 0
+    assert env._reward(high_tie, 0.0, 0.0) == 0.0
+    # 4 players: the branch is chosen by the outcome, so a loss keeps its
+    # (possibly positive) margin exactly like the specification says.
+    rules4 = Rules(num_players=4)
+    env4 = Seven523Env(
+        rules=rules4, seed=0, reward_shaping="saturate", reward_cap=0.1
+    )
+    positive_loss = _terminal_state(rules4, (26, 27, 22, 25))
+    assert seat_outcome(positive_loss.scores, env4.learner) == -1
+    margin = env4.game.returns(positive_loss)[env4.learner]
+    assert margin > 0.0
+    assert env4._reward(positive_loss, 0.0, 0.0) == pytest.approx(margin, abs=1e-12)
+
+
+def test_saturate_rewards_are_zero_until_the_terminal_step():
+    rules = Rules()
+    env = Seven523Env(
+        rules=rules,
+        seed=8,
+        opponents=_random_opponents(rules, 8),
+        reward_shaping="saturate",
+        reward_cap=0.2,
+    )
+    rewards = _play_episode(env, action_seed=0)
+    assert len(rewards) > 1
+    assert all(reward == 0.0 for reward in rewards[:-1])
+    margin = env.game.returns(env.state)[env.learner]
+    outcome = seat_outcome(env.state.scores, env.learner)
+    expected = margin if outcome < 0 else min(margin, 0.2)
+    assert rewards[-1] == pytest.approx(expected, abs=1e-12)
+
+
+def test_saturate_episode_matches_the_formula_and_differs_from_terminal():
+    """Same seed / same actions: saturate is not a renamed terminal arm."""
+    rules = Rules()
+    terminal = Seven523Env(rules=rules, seed=9, opponents=_random_opponents(rules, 9))
+    k2 = Seven523Env(
+        rules=rules,
+        seed=9,
+        opponents=_random_opponents(rules, 9),
+        reward_shaping="saturate",
+        reward_cap=0.2,
+    )
+    k0 = Seven523Env(
+        rules=rules,
+        seed=9,
+        opponents=_random_opponents(rules, 9),
+        reward_shaping="saturate",
+        reward_cap=0.0,
+    )
+    for episode in range(3):
+        term_rewards = _play_episode(terminal, action_seed=episode)
+        k2_rewards = _play_episode(k2, action_seed=episode)
+        k0_rewards = _play_episode(k0, action_seed=episode)
+        assert len(k2_rewards) == len(k0_rewards) == len(term_rewards)
+        assert k2_rewards[:-1] == [0.0] * (len(k2_rewards) - 1)
+        assert k0_rewards[:-1] == [0.0] * (len(k0_rewards) - 1)
+        margin = terminal.game.returns(terminal.state)[terminal.learner]
+        outcome = seat_outcome(terminal.state.scores, terminal.learner)
+        expected_k2 = margin if outcome < 0 else min(margin, 0.2)
+        expected_k0 = margin if outcome < 0 else 0.0
+        assert k2_rewards[-1] == pytest.approx(expected_k2, abs=1e-12)
+        assert k0_rewards[-1] == pytest.approx(expected_k0, abs=1e-12)
+        if outcome > 0 and margin > 0.2:
+            assert k2_rewards[-1] != term_rewards[-1]
+            assert k0_rewards[-1] != term_rewards[-1]
+    # Deterministic arm guard on constructed states.
+    win = _terminal_state(rules, (70, 30))
+    assert terminal._reward(win, 0.0, 0.0) == pytest.approx(0.4, abs=1e-12)
+    assert k2._reward(win, 0.0, 0.0) == pytest.approx(0.2, abs=1e-12)
+    assert k0._reward(win, 0.0, 0.0) == 0.0
+
+
+def test_saturate_ignores_win_jump():
+    rules = Rules()
+    first = Seven523Env(
+        rules=rules,
+        seed=7,
+        opponents=_random_opponents(rules, 7),
+        reward_shaping="saturate",
+        reward_cap=0.2,
+    )
+    second = Seven523Env(
+        rules=rules,
+        seed=7,
+        opponents=_random_opponents(rules, 7),
+        reward_shaping="saturate",
+        reward_cap=0.2,
+        win_jump=5.0,
+    )
+    for episode in range(2):
+        assert _play_episode(first, action_seed=episode) == _play_episode(
+            second, action_seed=episode
+        )
+    # win_jump is still validated even though saturate ignores its value.
+    with pytest.raises(ValueError, match="win_jump"):
+        Seven523Env(
+            seed=0,
+            reward_shaping="saturate",
+            reward_cap=0.2,
+            win_jump=float("nan"),
+        )
+
+
+def test_saturate_requires_an_explicit_reward_cap():
+    with pytest.raises(ValueError, match="reward_cap"):
+        Seven523Env(seed=0, reward_shaping="saturate")
+    with pytest.raises(ValueError, match="reward_cap"):
+        Seven523Env(seed=0, reward_shaping="saturate", reward_cap=None)
+
+
+@pytest.mark.parametrize(
+    "mode", ["terminal", "trick_diff", "win", "trick_diff_win", "terminal_win"]
+)
+def test_reward_cap_is_rejected_by_every_other_mode(mode):
+    with pytest.raises(ValueError, match="reward_cap"):
+        Seven523Env(seed=0, reward_shaping=mode, reward_cap=0.2)
+    with pytest.raises(ValueError, match="reward_cap"):
+        Seven523Env(seed=0, reward_cap=0.2)  # default mode is terminal
+
+
+@pytest.mark.parametrize(
+    "cap", [-0.1, 1.1, float("nan"), float("inf"), float("-inf")]
+)
+def test_reward_cap_range_validation(cap):
+    with pytest.raises(ValueError, match="reward_cap"):
+        Seven523Env(seed=0, reward_shaping="saturate", reward_cap=cap)
+
+
+@pytest.mark.parametrize("cap", [0.0, 0.2, 0.7, 1.0])
+def test_reward_cap_accepts_the_closed_unit_interval(cap):
+    env = Seven523Env(seed=0, reward_shaping="saturate", reward_cap=cap)
+    assert env.reward_cap == cap
+
+
 def test_env_episode_is_finite_and_legal():
     env = Seven523Env(
-        opponents=[RandomBot(random.Random(0)), GreedyBot()],
+        opponents=[RandomBot(random.Random(0)), FirstLegalBot()],
         seed=5,
     )
     obs, _ = env.reset()

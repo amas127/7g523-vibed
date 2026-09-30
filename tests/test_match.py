@@ -5,10 +5,11 @@ These exercise the loop through its own interface — no gymnasium, no torch.
 import random
 
 import pytest
+from support import FirstLegalBot
 
 from seven523.game import Game
 from seven523.match import Match
-from seven523.policies import GreedyBot, RandomBot, make_scripted_policies
+from seven523.policies import RandomBot, make_scripted_policies
 from seven523.rules import DEFAULT_RULES, Rules
 
 
@@ -24,7 +25,7 @@ class _AlwaysIllegal:
 
 
 def test_run_to_end_with_all_policies_finishes():
-    match = Match(DEFAULT_RULES, [GreedyBot(), GreedyBot()], rng=random.Random(0))
+    match = Match(DEFAULT_RULES, [FirstLegalBot(), FirstLegalBot()], rng=random.Random(0))
     state = match.run_to_end()
     assert state.done
     assert sum(state.scores) == DEFAULT_RULES.total_points
@@ -33,14 +34,14 @@ def test_run_to_end_with_all_policies_finishes():
 
 
 def test_advance_stops_at_an_external_seat():
-    match = Match(DEFAULT_RULES, [None, GreedyBot()], rng=random.Random(3))
+    match = Match(DEFAULT_RULES, [None, FirstLegalBot()], rng=random.Random(3))
     match.advance()
     assert match.done or match.seat == 0
     assert match.policy_for(match.seat) is None
 
 
 def test_run_to_end_requires_a_policy_for_every_seat():
-    match = Match(DEFAULT_RULES, [None, GreedyBot()], rng=random.Random(3))
+    match = Match(DEFAULT_RULES, [None, FirstLegalBot()], rng=random.Random(3))
     with pytest.raises(RuntimeError, match="no policy"):
         match.run_to_end()
 
@@ -64,7 +65,7 @@ def test_policy_illegal_action_is_clamped_and_counted():
 
 
 def test_on_turn_observes_every_turn():
-    match = Match(DEFAULT_RULES, [RandomBot(random.Random(0)), GreedyBot()], rng=random.Random(4))
+    match = Match(DEFAULT_RULES, [RandomBot(random.Random(0)), FirstLegalBot()], rng=random.Random(4))
     seen = []
     match.on_turn = lambda seat, action_id, suit, view, result: seen.append(
         (seat, action_id, view.seat, result)
@@ -90,8 +91,8 @@ def test_match_can_be_built_from_a_replay_state():
 
 
 def test_advance_and_explicit_step_interleave():
-    # External seat 0 drives, GreedyBot drives seat 1: the two together finish.
-    match = Match(DEFAULT_RULES, [None, GreedyBot()], rng=random.Random(9))
+    # External seat 0 drives, FirstLegalBot drives seat 1: the two together finish.
+    match = Match(DEFAULT_RULES, [None, FirstLegalBot()], rng=random.Random(9))
     while not match.done:
         if match.seat == 0:
             legal = [
@@ -108,11 +109,11 @@ def test_advance_and_explicit_step_interleave():
 
 def test_policies_list_length_is_validated():
     with pytest.raises(ValueError, match="policies"):
-        Match(Rules(num_players=3), [GreedyBot()], rng=random.Random(0))
+        Match(Rules(num_players=3), [FirstLegalBot()], rng=random.Random(0))
 
 
 def test_custom_rules_match_still_terminates():
     rules = Rules(num_players=3, straight_max=13)
-    match = Match(rules, make_scripted_policies("greedy", rules, seed=0), rng=random.Random(0))
+    match = Match(rules, make_scripted_policies("random", rules, seed=0), rng=random.Random(0))
     match.run_to_end()
     assert sum(match.state.scores) == rules.total_points

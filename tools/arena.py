@@ -9,10 +9,10 @@
         --out runs/arena/pilot.json --games-out runs/arena/games \
         --tb runs/arena/tb
 
-Entrants come as ``[ID=]SPEC`` (``random`` / ``greedy`` / ``ckpt:<path>``) and
+Entrants come as ``[ID=]SPEC`` (``random`` / ``ckpt:<path>``) and
 may also be discovered with ``--glob`` + ``--every`` sampling (auto ids come
-from the file name, ``model_step00020480.pt`` -> ``model20480``).  Anchors
-default to pinned Random=1000 / Greedy=1315.  The schedule, the parallel
+from the file name, ``model_step00020480.pt`` -> ``model20480``).  The pinned
+anchor defaults to the RandomBot gauge (``mu = 0``).  The schedule and the parallel
 sharding live in ``src/seven523/arena.py``; this file is
 the argparse shell plus the table printer.
 """
@@ -27,16 +27,15 @@ from glob import glob
 from pathlib import Path
 
 # Run as ``python tools/arena.py``: reuse the shared spec grammar.
-
-from seven523.arena import (  # noqa: E402
+from seven523.arena import (
     arena_document,
     auto_id_from_path,
     run_arena,
     write_tensorboard,
 )
-from seven523.elo import FitConfig  # noqa: E402
-from seven523.ladder import DEFAULT_ANCHOR_ELO, Entrant  # noqa: E402
-from seven523.policies import split_entrant, validate_spec  # noqa: E402
+from seven523.elo import FitConfig
+from seven523.ladder import DEFAULT_ANCHOR_RATING, Entrant
+from seven523.policies import split_entrant, validate_spec
 
 __all__ = ["discover_paths", "main", "parse_args"]
 
@@ -85,14 +84,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="append",
         default=None,
         metavar="ID=SPEC",
-        help="pinned anchor, default random=random and greedy=greedy",
+        help="pinned anchor (gauge), default random=random at mu=0",
     )
     parser.add_argument(
         "--anchor-elo",
         action="append",
         default=[],
-        metavar="ID=ELO",
-        help="override an anchor rating (random/greedy have defaults)",
+        metavar="ID=MU",
+        help="override an anchor rating (random defaults to 0)",
     )
     parser.add_argument(
         "--games-per-anchor",
@@ -115,7 +114,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="cpu",
         help="torch device for ckpt: policies (cpu / cuda / cuda:0)",
     )
-    parser.add_argument("--window", type=int, default=None, help="trailing games per id")
     parser.add_argument("--out", default=None, metavar="JSON", help="write the league table")
     parser.add_argument(
         "--games-out",
@@ -127,7 +125,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--tb",
         default=None,
         metavar="DIR",
-        help="write each step-bearing entrant's Elo as arena/elo/<id> scalars",
+        help="write each step-bearing entrant's rating as arena/rating/<id> scalars",
     )
     parser.add_argument(
         "--step-map",
@@ -166,10 +164,10 @@ def _parse_steps(raw: list[str]) -> dict[str, int]:
 
 
 def _parse_anchor_elo(raw: list[str]) -> dict[str, float]:
-    values = dict(DEFAULT_ANCHOR_ELO)
+    values = dict(DEFAULT_ANCHOR_RATING)
     for item in raw:
         if "=" not in item:
-            raise SystemExit(f"--anchor-elo expects ID=ELO, got {item!r}")
+            raise SystemExit(f"--anchor-elo expects ID=MU, got {item!r}")
         id_, value = item.split("=", 1)
         values[id_.strip()] = float(value)
     return values
@@ -191,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
     entrants: list[Entrant] = []
     seen: dict[str, str] = {}
 
-    for raw in args.anchor or ["random=random", "greedy=greedy"]:
+    for raw in args.anchor or ["random=random"]:
         id_, spec = split_entrant(raw)
         _require_spec(spec)
         if id_ not in anchor_elo:
@@ -232,7 +230,6 @@ def main(argv: list[str] | None = None) -> int:
         workers=args.workers,
         device=args.device,
         games_out=args.games_out,
-        window=args.window,
         config=FitConfig(),
     )
     elapsed = time.perf_counter() - started
@@ -254,23 +251,22 @@ def main(argv: list[str] | None = None) -> int:
         created_at=datetime.now().isoformat(timespec="seconds"),
     )
 
-    print(f"{'entrant':<26}{'elo':>9}{'se':>7}{'games':>8}{'step':>10}  role")
+    print(f"{'entrant':<26}{'mu':>9}{'sigma':>7}{'games':>8}{'step':>10}  role")
     print("-" * 72)
     for row in document["entrants"]:
         step = "" if row["step"] is None else str(row["step"])
         print(
-            f"{row['id']:<26}{row['elo']:>9.1f}{row['se']:>7.1f}"
+            f"{row['id']:<26}{row['mu']:>9.1f}{row['sigma']:>7.1f}"
             f"{row['games']:>8}{step:>10}  {row['role']}"
         )
     fit = document["fit"]
     print(
-        f"\nfit: {fit['iterations']} sweeps, "
-        f"{'converged' if fit['converged'] else 'NOT converged'}"
+        f"\nfit: {fit['games']} games, {fit['estimator']}"
     )
     if document["transitivity"]:
         worst = document["transitivity"][0]
         print(
-            "largest Elo/observed disagreement: "
+            "largest rating/observed disagreement: "
             f"{worst['a']} vs {worst['b']} "
             f"(obs {worst['observed']:.3f} vs exp {worst['expected']:.3f}, "
             f"{worst['games']} games, z={worst['z']:+.1f})"

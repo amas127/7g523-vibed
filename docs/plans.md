@@ -26,9 +26,27 @@
 | EXPR | `docs/experiments/README.md` | §0（结论总表）、§1（索引）、§2（PENDING）、§3（命令与判定规则） |
 | DES | `DESIGN.md` | §7（训练计划）、§8（模块清单） |
 | TRN | `docs/training.md` | 评估/定级/开关口径 |
-| ADR-n | `docs/adr/0001`–`0010` | 约束与已决事项（见 §1.3）；0007=牌型族比较，重标定见 T15；0008=观测布局 v5；0009=v5 与牌型族成为唯一实现（v1–v4 与 `tier` 回放退役）；0010=单一 owner 接缝 |
+| ADR-n | `docs/adr/0001`–`0014` | 约束与已决事项（见 §1.3）；0007=牌型族比较，重标定见 T15；0008=观测布局 v5；0009=v5 与牌型族成为唯一实现（v1–v4 与 `tier` 回放退役）；0010=单一 owner 接缝；0011=评分核心换成 OpenSkill；0012=单一 RandomBot 基准与 GreedyBot 退役；0013=无漂移评分通道；0014=出空即撬底（revision 3，重标定见 T17） |
 
 二手引用（本路线图只转引上述来源对它们的一手引用，未直接通读）：`ladder-report.md`（LAD，经 SD §6 / W5 §1）、`trace-signal-report.md`（TSR，经 HEP §4 / HR §2）、`elo-breakthrough-report.md`（EBO，经 SD §0 / ALS §1 / W5 §1）。
+
+### 0.1.1 计划/评审文档补录（2026-09-29 索引审计）
+
+上表之外，`docs/` 根下另有成对的计划/评审文档（`*-plan.md`/`*-review.md`）、决策备忘与玩家手册；
+其对应结果均已在 `experiments/README.md` §1 建索引，这里按「计划 → 结果」补齐来源映射。
+未结项的开放事项（`search-config-plan.md` §5、`experiments/warmstart-adamw-1m.md` §6.1、
+`experiments/evaluation-resolution-review.md` 的修订要求）尚未并入 §3/§4。
+
+| 文档 | 状态 | 对应结果 / 说明 |
+|---|---|---|
+| [`event-history-plan.md`](./event-history-plan.md)、[`event-history-review.md`](./event-history-review.md) | 规划 r2；红队 41/41 已处置 | 结果 [`experiments/event-history-pilot.md`](./experiments/event-history-pilot.md)（无 ≥+10 证据、不 ship） |
+| [`opponent-intent-plan.md`](./opponent-intent-plan.md)、[`opponent-intent-review.md`](./opponent-intent-review.md) | 规划 r2；红队 48 条已处置 | 结果 [`experiments/opponent-intent-probe.md`](./experiments/opponent-intent-probe.md)（G-I FAIL、不进入阶段 B） |
+| [`reward-alignment-plan.md`](./reward-alignment-plan.md)、[`reward-alignment-review.md`](./reward-alignment-review.md) | 计划 r4；红队 41 条已处置 | 结果 [`experiments/reward-alignment-saturate.md`](./experiments/reward-alignment-saturate.md) 等 Tier 1 三报告 |
+| [`selfplay-pool-plan.md`](./selfplay-pool-plan.md)、[`selfplay-pool-review.md`](./selfplay-pool-review.md) | 计划 r2；红队 40 条已处置 | 结果 [`experiments/selfplay-pool-diagnostics.md`](./experiments/selfplay-pool-diagnostics.md)、[`experiments/selfplay-pool-wave1.md`](./experiments/selfplay-pool-wave1.md) |
+| [`v5-optimization-plan.md`](./v5-optimization-plan.md)、[`v5-optimization-review.md`](./v5-optimization-review.md) | 计划 r4；红队 35 条已处置 | 结果 [`experiments/v5-optimization-wave1.md`](./experiments/v5-optimization-wave1.md)（主端点 +2.87、止损） |
+| [`post-v5-structural-options.md`](./post-v5-structural-options.md) | 决策备忘（2026-09-27） | 选项 O1–O6 对比；O4 搜索线结果见 §5 搜索 rung 行 |
+| [`search-config-plan.md`](./search-config-plan.md) | 计划；P4a 已发布、P6 已落地 | `search_leafq` 已入 manifest（见 §5）；§5 开放项未排期 |
+| [`human-play.md`](./human-play.md) | 玩家入口手册 | §3 对手档位强度为 `play_ladder` 注册表的同步说明 |
 
 ### 0.2 完整性声明
 
@@ -36,7 +54,7 @@
 - **去重**：同一事项在多份报告出现时合并为一条并列出全部出处（例：逐局 JSONL、联合 Hessian、manifest refit、SAME_STEP、座位配对）。
 - **冲突已裁定（2026-09-25 文档治理）**：§7 的 7 处冲突已按各来源报告证据全局裁定并落地（§7 现为「裁定结果」表），本路线图不再有「待统一」项；不属 §7 的争议（refit 批准、spacing、牌堆 UX）已于 §4 裁决记录落地（2026-09-25），真人招募（D-3）等仍列 §4 等待 owner。
 - **交付更新（2026-09-25）**：`tournament-arena.md` 已定稿并归档进 §5；T1/T2/T3/T5/T6 结果均已回填（T5 C 为 null、T6 F 已关闭）、T13-M1–M3 已交付，§2 当前无 in-flight（T2 B0 null、T3 B1 未确认、T5 C 三效应 null、T6 F 不可分且更差，见各自现状）。
-- 代码状态核对截止本整理时刻（当前 `uv run --group train pytest -q` 收集 464 项）。文中「现状」一栏以源码 grep 为准。
+- 代码状态核对截止本整理时刻（当前 `uv run pytest --collect-only -q` 收集 859 项，2026-09-29）。文中「现状」一栏以源码 grep 为准。
 
 ## 1. 状态图例、使用说明与统一验收口径
 
@@ -66,7 +84,7 @@
 
 - 查阅计划先看 §3/§4；写结论回填时同步更新 `README §0/§1` 与对应报告，避免第二套真相。
 - 术语别名（C-3，2026-09-25 统一；完整表见 `experiments/README.md` §0.2）：**轨迹 S1** = HEP/HR 的逐墩轨迹特征（评分先验）；**观测 S1** = OS 的 103 维精简观测布局；同类加前缀——轨迹 S2（决策 regret）/ 轨迹 S3（策略一致度）、观测 S2（68 维，已否）。**裸 S1 视为歧义，不得用于新文本。**
-- 已决约束（ADR，不要重开）：ADR-0001 模板动作空间（134）；ADR-0002 唯一投影接缝 `Game.view`（差分泄漏测试兜底）；ADR-0003 gymnasium+torch 忠实移植（**SAME_STEP**）；ADR-0004 花色头 `MultiDiscrete([134,4])`；ADR-0005 `Match` 唯一对局驱动；ADR-0006 `elo.py` 评分接缝 + `ladder.py` 编排 + `study.py` manifest owner，结果似然是最终权威、轨迹先验只加速（ADR-0006 后果条款）；ADR-0007 牌型族比较（`"tier"` 回放变体已随 ADR-0009 退役）；ADR-0008 观测布局 v5（v5 = 观测 S1+B0+B1）；ADR-0009 v5 与牌型族为唯一实现：v1–v4、`--obs-version`、段级列重映射与 `tier` 变体全部退役，旧 ckpt 必须重训；ADR-0010 单一 owner 接缝（`record`/spec 语法/manifest/`prior`/`metrics`/`league`/`placement/`）。
+- 已决约束（ADR，不要重开）：ADR-0001 模板动作空间（134）；ADR-0002 唯一投影接缝 `Game.view`（差分泄漏测试兜底）；ADR-0003 gymnasium+torch 忠实移植（**SAME_STEP**）；ADR-0004 花色头 `MultiDiscrete([134,4])`；ADR-0005 `Match` 唯一对局驱动；ADR-0006 `elo.py` 评分接缝 + `ladder.py` 编排 + `study.py` manifest owner，结果似然是最终权威、轨迹先验只加速（ADR-0006 后果条款）；ADR-0007 牌型族比较（`"tier"` 回放变体已随 ADR-0009 退役）；ADR-0008 观测布局 v5（v5 = 观测 S1+B0+B1）；ADR-0009 v5 与牌型族为唯一实现：v1–v4、`--obs-version`、段级列重映射与 `tier` 变体全部退役，旧 ckpt 必须重训；ADR-0010 单一 owner 接缝（`record`/spec 语法/manifest/`prior`/`metrics`/`league`/`placement/`）；ADR-0011 评分核心换成 OpenSkill Plackett–Luce（`elo.py` 的 deep seam 不变；`margin`/`window`/Hessian SE 退役，旧 `elo/se` manifest 需重测）；ADR-0012 单一评分基准：RandomBot=0，GreedyBot 策略/预设分数从仓库退役，ladder 只要求 ≥1 gauge 并把 `cross` 默认提到 `games_per_anchor`；ADR-0013 无漂移评分通道：漂移分类（坐标/顺序/非传递/真进步/规则变化）、`rules_id` 身份与跨版本拒绝 pooling、不建 SPRT（门禁走 `duel` 3 seed × 400）、`mle.py` 独立纯 Python 永不进 `elo.py`、`fit_ratings`/`tau>0`/anchor σ=0 的在线契约不变。
 
 ## 2. 进行中（in-flight）
 
@@ -126,17 +144,17 @@
 | 验收 | 手算单测覆盖不同 confidence；默认路径回归不变 |
 | 现状 | **未做**（`duel.py:293` z 与 `per_seed.confidence` 不联动；日常只用 0.95 无影响） |
 
-### T11. 评估侧：`window` 非对称交叉项近似
+### T11. 评估侧：`window` 非对称交叉项近似（**已随 ADR-0011 失效**）
 
 | 字段 | 内容 |
 |---|---|
-| 目标 | `window` 保留对局不对称时，free-free 交叉项目前只是近似（默认 `window=None` 精确） |
-| 依据 | EPV §4 遗留说明 |
-| 依赖 | D3 在线窗口（HR §5.3 计划定级后 `window=50`）使用前必须解决或声明边界 |
-| 实现要点 | 精确装配 window 后的信息矩阵，或对近似给出误差界/警告 |
-| 成本 | 中 |
-| 验收 | `window=None` 与数值 Hessian 一致（现有回归）；非 None 下与暴力装配/有限差分比对 |
-| 现状 | 近似保留（`elo.py` 联合 Hessian 仅在无窗口裁剪时精确） |
+| 目标 | ~~`window` 保留对局不对称时，free-free 交叉项近似~~；**已关闭**：OpenSkill 切换删除了 `window` 与 `fit_ratings` 的联合 Hessian SE（ADR-0011），`tau` 承担动态，本项无对象 |
+| 依据 | EPV §4 遗留说明；ADR-0011 |
+| 依赖 | 无 |
+| 实现要点 | 无（如将来需要窗口语义，应在 OpenSkill 参数上重开任务，而不是恢复旧代码）|
+| 成本 | — |
+| 验收 | — |
+| 现状 | **关闭（2026-09-25，ADR-0011）** |
 
 ### T12. Arena 周期性定级 + PFSP 权重接口（工程支撑）
 
@@ -154,10 +172,10 @@
 
 | 字段 | 内容 |
 |---|---|
-| 目标 | 轨迹先验 + 结果似然的 BT-MAP 定级：10 局输出「点估计 + 诚实 CI + 最近档 + provisional」，后台继续对局直到 CI≤50 |
+| 目标 | 轨迹先验 + 结果似然的 **OpenSkill**（Plackett–Luce）定级（ADR-0011）：10 局输出「点估计 + CI + 最近档 + provisional」，后台继续对局直到 CI≤50 |
 | 依据 | HEP 顶部修订节（M1–M4、改动计划、不做清单）；HR §5（估计器规格）、§8（实现映射）、§9（验证计划）。**默认标签基准 = T2/去收缩标定（HR §1/§5.2），不是 manifest T1**；T1 仅作历史/契约引用（refit 前带相位偏移；2026-09-25 已 refit，见 LRP §4.4），新标定与 D3 先验不得以 T1 为目标 |
 | 依赖 | **真人标定是硬前置**（≥8 人、10 局定级 + 60–100 局参考局，HR §9.1）；**manifest refit 已执行（2026-09-25，LRP §4.4）**——先验仍默认 T2/去收缩标定（HR §5.2），不要改用 manifest T1 直接取数（HEP 修订节前置） |
-| 实现要点 | M1 `tools/fit_trace_prior.py` + `artifacts/human-elo/prior.json`（岭回归 + 去收缩 `(a,b)` + `σ_traj(n)` 表，默认 LOLO+去收缩）；M2 `src/seven523/placement/`（包：会话状态 + `select_opponent` info/Thompson + 10 副不同牌 + 5/5 座位轮换调度 + 逐局座位写入 trace + 停止规则 + 报告）；M3 `7g523-elo` CLI（`pyproject.toml [project.scripts]`）+ `play.py` 把对手 rung id 写进 `players` 标签（现已写 `anchor:greedy@seatN` / `opponent:<id>@seatN`），支持 bot/checkpoint/NeuralPolicy；M4 真人试点。`elo.py` 数学不改；轨迹 S2 逐决策 regret 模块与轨迹 S3 评分不做 |
+| 实现要点 | M1 `tools/fit_trace_prior.py` + `artifacts/human-elo/prior.json`（岭回归 + 去收缩 `(a,b)` + `σ_traj(n)` 表，默认 LOLO+去收缩）；M2 `src/seven523/placement/`（包：会话状态 + `select_opponent` info/Thompson + 10 副不同牌 + 5/5 座位轮换调度 + 逐局座位写入 trace + 停止规则 + 报告）；M3 `7g523-elo` CLI（`pyproject.toml [project.scripts]`）+ `play.py` 把对手 rung id 写进 `players` 标签（现已写 `anchor:greedy@seatN` / `opponent:<id>@seatN`），支持 bot/checkpoint/NeuralPolicy；M4 真人试点。**结果似然已按 ADR-0011 换成 OpenSkill Plackett–Luce**（不再有 `margin`/`window`/Hessian SE）；轨迹 S2 逐决策 regret 模块与轨迹 S3 评分不做 |
 | 成本 | M1 1 天；M2 1 天；M3 0.5 天；M4 2–3 天 |
 | 验收 | M1/M2/M3：`select_opponent` Fisher/单调性单测、`fit_trace_prior` 留一等级标定回归（锁定 `(a,b)`/`σ_traj` 表）、CLI 冒烟；M4 按 HR §9.1：一半真人标定、一半评估，报 RMSE / P50 / P100 / CI 覆盖率 / 最近档命中。预期（HR §7.1/§10）：10 局 RMSE 54–72、P100 83–93%、CI ±100–133；**不要把 10 局标成 ±50** |
 | 现状 | **M1 ✅ 完成（2026-09-25）**：`tools/fit_trace_prior.py` + `artifacts/human-elo/prior.json`（默认 T2 标签，sha256 `1895af98…`）与对照 `prior_manifest_labels.json`（`78e3535c…`）+ 6 项测试（`tests/test_fit_trace_prior.py`）；**M2 ✅ / M3 ✅（2026-09-25）**：`src/seven523/placement/`（包：会话编排 + `main`；全套 464 passed）、`7g523-elo` CLI + `play.py` rung 标签（+3 测试）、冒烟 `定级：1287 ± 182，最近档 greedy（1315），provisional`（`traces/sessions/smoke_m23/`），`elo.py` 零改动（sha256 `80641f13…`）；M4 真人试点**等 D-3**。结果回填 [`experiments/trace-prior-m1.md`](./experiments/trace-prior-m1.md) / [`experiments/placement-m2m3.md`](./experiments/placement-m2m3.md) |
@@ -177,13 +195,37 @@
 
 | 字段 | 内容 |
 |---|---|
-| 目标 | 2026-09-25 牌型族比较规则落地后，把旧 `tier` 口径的强度资产在新规则下重新产出：重新生成 `traces/study`、重测 manifest、重训 ladder，并重标定 human-elo 先验与 arena/`play_ladder` 强度列 |
+| 目标 | 2026-09-25 牌型族比较规则落地后，把旧 `tier` 口径的强度资产在新规则下重新产出：重新生成 `traces/study`、重测 manifest、重训 ladder，并重标定 human-elo 先验与 arena/`play_ladder` 强度列。**范围已扩大（ADR-0011/0012）**：评分核心换成了 OpenSkill，唯一基准是 RandomBot=0、GreedyBot 已退役，旧 `elo/se` manifest 会被拒绝，T2 标签/`prior.json`/置信区间阈值需在同一轮重测中重标（含坐标整体 −1000） |
 | 依据 | `docs/adr/0007-family-comparison.md`；`RULES.md` §3.1/§3.2、§7 R-Q12；`experiments/README.md` 顶部口径警告 |
 | 依赖 | 规则修复已在工作区；bot 侧重标定无硬前置；真人 M4 仍受 D-3 门控 |
-| 实现要点 | 用新规则重跑 `tools/build_ladder.py` 生成 `traces/study`；重测 manifest 契约值（沿用 refit 流程与 owner 批准，`study.py` 默认冻结）；重训/重测 ladder 梯级；重跑 arena 与 `prior.json` 标定；重训完成后把新 ckpt 路径重新登记回 `tools/play_ladder.py` 档位（`OPPONENTS` 注册表），并更新 `docs/human-play.md` 强度列与本页表格 |
+| 实现要点 | 用新规则重跑 `tools/build_ladder.py` 生成 `traces/study`；重测 manifest 契约值（沿用 refit 流程与 owner 批准，`study.py` 默认冻结）；重训/重测 ladder 梯级；重跑 arena 与 `prior.json` 标定；**按 OpenSkill 口径重标 T2 标签、`stop_ci` 与 `channel_weights`（ADR-0011）**；重训完成后把新 ckpt 路径重新登记回 `tools/play_ladder.py` 档位（`OPPONENTS` 注册表），并更新 `docs/human-play.md` 强度列与本页表格 |
 | 成本 | 中–大（依赖重训预算与真人数据；命令见 `experiments/README.md` §3） |
 | 验收 | 按 §1.2 统一口径；新口径数字单独成表并标明「牌型族规则后」，与旧 `tier` 数字严格隔离，禁止混比 |
-| 现状 | **部分实施（2026-09-25，ADR-0007）**：规则已修；旧模型资产已删（`runs/` 全量 `.pt`）、`play_ladder` 缩减为 `random`/`greedy` 脚本档。**进展**：新规则 500k 池（`s1`–`s10`，Elo 1407–1462）已训成并绑定为 `traces/pool10/manifest.json`（`7g523-elo` 默认），旧 `traces/study/manifest.json` 保留给旧 trace 标签。**待办**：重新生成 `traces/study`、重测 manifest 契约、重训 ladder、重标定 `prior.json` 与 `play_ladder` 强度列 |
+| 现状 | **已实施（2026-09-26，T15 重标定完成；仅剩真人 M4/D-3）**：牌型族规则（ADR-0007）、OpenSkill 评分核心与 RandomBot=0 单基准（ADR-0011/0012）、规则身份通道（ADR-0013）均已落地。本轮产出：新池 `traces/study`（`rules_id=fbd43015d526ee72`；**2026-09-26 撬底修订后整体转 legacy，见 T17**，5 级 4400 局：random 400 / lvl1 1600 / lvl2 1200 / lvl3 800 / lvl4 400）；manifest 契约值采用 homoscedastic probit-MLE 绝对表（`tools/refit_mle.py --manifest-out --refit`，4000 局、estimator kind=`probit-mle`、source=`runs/t15_mle/games.jsonl`，ADR-0013 §3）：lvl1 **54.85** / lvl2 **120.22** / lvl3 **191.74** / lvl4 **209.01**（random=0，σ≈6.0–6.6，deal 聚簇 CI 半宽≈12–15；旧 online PL 口径 96.26/158.46/353.26/413.49 作废）；`rungs` 按 spacing 契约重选为 lvl1/lvl3（min_spacing=100 下只选出 2 级，按实测间距接受）；T2 标签按新 manifest 重导（旧 BT-MAP 值作废）；`artifacts/human-elo/prior.json` 重标（sha256 `35f7227b…`，LOLO RMSE **72.2**、m_eff **23.49**、σ(5/10/20)=**43.7/38.0/34.4**），`prior_manifest_labels.json` 数值相同（sha256 `2389f6f9…`）；`tools/play_ladder.py` 重新登记 `lvl1`–`lvl4`（强度 55/120/192/209）并更新 `docs/human-play.md` 强度列。旧资产归档：`runs/archive/study-legacy-20260926/`（旧 1200 局 study+manifest）、`runs/archive/pool10-legacy-20260926/`（旧 pool10 manifest）；旧 `tier` 与旧 online PL 数字只作历史，禁止混比。**待办**：① 真人 M4 试点仍等 D-3 招募；② ✅ placement 固定常数尺度重标与 `tests/test_placement.py` shipped-prior 同步已在 T17（2026-09-26）以 `c=0.465621` 完成（见 T17 现状行）；本行全部 revision-2 资产只作历史，当前数字见 [`experiments/t17-recalibration.md`](./experiments/t17-recalibration.md)。 |
+
+### T16. 无漂移评分通道（drift taxonomy + 规则身份 + Prior 回流 + mle.py）
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 落地 [ADR-0013](./adr/0013-drift-free-rating-channel.md)：① 漂移分类口径；② `rules_id` 身份 + 跨版本拒绝 pooling；③ 冻结 manifest levels 回流为 `Prior`（warm start）；④ 独立纯 Python `mle.py` 出 order-free 绝对表；⑤ 门禁/比较统一走 `duel`（预注册 ≥3 seed × 400），不建 SPRT |
+| 依据 | [ADR-0013](./adr/0013-drift-free-rating-channel.md)；[`experiments/elo-reliability-audit.md`](./experiments/elo-reliability-audit.md)；[`experiments/evaluation-protocol-validation.md`](./experiments/evaluation-protocol-validation.md) §9；ADR-0007/0011/0012 |
+| 依赖 | T15 的 manifest 重测（无身份旧产物会被新门禁 fail-loud 拒绝）；`duel`/`combine_duel_seeds` 已就绪 |
+| 实现要点 | ① `rules.py`：`RULES_REVISION` + `rules_id()`（RULES.md 改规则必须同步 bump）；② `study.merge_manifest` 与 `placement.load_opponents` 的 `rules_id` 门禁；③ `ladder` 的 manifest→`Prior` 回流（显式 prior 优先）与 `play_games` JSONL 的 `rules_id`；④ 新 `src/seven523/mle.py`（纯 Python、MAP + separation guard、tie-aware、Gaussian link）与显式 tool，不进 `elo.py`；⑤ 门禁/比较接口统一到 `duel` |
+| 成本 | 中；`mle.py` 是长期维护的第二个估计器 |
+| 验收 | 单测：规则身份稳定/差异、merge/load 拒绝跨版本、Prior 回流、JSONL 身份、MLE 有限值与平局；旧无身份 manifest fail-loud；全套现有测试保持全绿 |
+| 现状 | **全部实施（2026-09-26，597 passed / 1 failed；余 1 项 out-of-scope 同步，见下）**：ADR-0013；`rules_id()`（当时 DEFAULT_RULES worked example `fbd43015d526ee72`；撬底 revision 3 后现为 `2e36dbea44893696`，旧值转历史，见 T17）、`merge_manifest`/`load_opponents`/`tools/build_ladder` 跨版本 fail-loud、`manifest_priors()` 回流（显式 `--prior` 优先）、`play_games` JSONL 带 `rules_id`；④ `src/seven523/mle.py`（统一 ordered-probit 阈值的 anchored MAP probit MLE、homoscedastic `s=√2·β`、稳定二阶导、`margin_identified`/`converged`、非有限 σ=inf）+ `tools/refit_mle.py`（rules 门禁、deal 聚簇 bootstrap、严格 JSON，非有限值 `null`+标记；`--out` 与 `--json` 逐字节一致；`--manifest-out --refit` 经 `merge_manifest` 发布并重选 `rungs`，无该 flag 不写 manifest）。旧 `traces/study`/`traces/pool10` 无身份会被新门禁拒绝（预期，并入 T15 重测）。**尺度问题已决（option a 采纳，2026-09-26）**：prior 的 σ 只进 MAP 正则、绝不进似然尺度——同一 4000 局在中性先验与 `--prior-manifest` 下共享 `s=√2·β`（中性 54.85/120.22/191.74/209.01 vs PL-prior 对照 60.33/126.25/199.80/217.66，差异只剩 shrinkage；全平局 + prior σ≈1e308 的 `draw_margin` 现为有限 tie-rate 值并标记 `margin_identified=False`/`converged=False`）；T15 manifest 已由 `tools/refit_mle.py --manifest-out --refit` 重发布为该表（`estimator` kind=`probit-mle`、`source=runs/t15_mle/games.jsonl`、games=4000），T2 标签、`prior.json`（sha256 `35f7227b…`）与 `play_ladder` 强度同步重导；ADR-0013 §3 已记录。placement 固定常数（COLD_START_PRIOR/RESULT_PRIOR/ANCHOR_CENTER/RUNG_PRIOR_SD）的尺度重标与 `tests/test_placement.py` 的 shipped-prior 常数同步**已由 T17（2026-09-26）以 `c=0.465621` 完成**（(500,300)→(232.8105,139.6863)、RESULT_PRIOR (500,200)→(232.8105,93.1242)、ANCHOR_CENTER 230→107.0928、RUNG_PRIOR_SD 30→13.9686；`prior.json` 随 `prior.py` 重新生成，shipped-prior 断言改为读产物 `sigma_traj`），见 T17 现状行与 [`experiments/t17-recalibration.md`](./experiments/t17-recalibration.md) §4；T16 的「全套现有测试保持全绿」验收已随 T17 完成（621 passed）。 |
+
+### T17. 撬底修订后的重训与重测（出空即撬底，revision 3）
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 落地 [ADR-0014](./adr/0014-on-empty-digs.md)（RULES.md 4.8/4.9、§7 R-Q13，2026-09-26 用户裁定）：出空即撬底、赢墩不再是前提；随后把 revision 3 下的强度资产全部重产：重生成 `traces/study`/pool、重测 manifest、重训 checkpoint、重标 `prior.json` 与 `play_ladder` 强度 |
+| 依据 | [ADR-0014](./adr/0014-on-empty-digs.md)；RULES.md §4.8/§4.9/§7 R-Q13；CONTEXT.md「撬底」；ADR-0013 的 `rules_id` 门禁 |
+| 依赖 | 规则/引擎/回放改造已落地（现状栏）；重训预算；真人 M4 仍受 D-3 门控 |
+| 实现要点 | ① `game.py` 立即结束 + 补牌角落（`GameState.empty_order`）；② `rules.py` `RULES_REVISION=3`（`rules_id` `fbd43015d526ee72` → `2e36dbea44893696`）；③ `trace.py` `TRACE_VERSION=3` + `rules.revision`，`play.replay_trace` 拒绝旧版本/旧 revision；④ 用新引擎重跑 `tools/build_ladder.py` 生成新 `traces/study`，重跑 `tools/refit_mle.py --manifest-out --refit` 发布 manifest，重跑 `tools/fit_trace_prior.py` 生成 `prior.json`，重训 ladder 并把新 ckpt 登记回 `tools/play_ladder.py`/`docs/human-play.md` |
+| 成本 | 中–大（依赖重训预算与真人数据） |
+| 验收 | 引擎/规则/回放单测全绿（观测维度、动作空间、`View` 逐位不变）；新产物一律带 `rules_id=2e36dbea44893696`；`placement.load_opponents` 拒绝旧 `fbd43015d526ee72` manifest；旧 ckpt/轨迹不得与新数字混比 |
+| 现状 | **已实施（2026-09-26，revision-3 全链重产完成）**：ADR-0014、`RULES_REVISION=3`、`TRACE_VERSION=3`、`GameState.empty_order`、立即撬底与补牌角落、旧 trace 拒绝；引擎/规则/回放单测全绿。本轮重产：8 个 revision-3 训练 run（`runs/t17early2k/4k/8k`、`runs/t17pool__{1,2,3}`、`runs/t17self`、`runs/t17long`，2k–2M 步；矩阵见报告 §0）→ 13 个去重候选 18200 局共享筛选（`runs/t17_screen/`：顶部 1M/2M/1.5M/512k/499k 平台 187.6–191.6，无 ≥200、无 ~55；self_500k 对发布 lvl4（l1_1M）合并 9 seed 显著更强 +16.62 Elo（p=2.8e-5）、对 l1_2M 打平，无过拟合证据；self_500k 未进发布梯级，若要以它作顶档需重新测量发布）→ 发布 4000 局 study `traces/study`（`rules_id=2e36dbea44893696`；lvl1–lvl4 = e1_2k/e1_8k/p1_65k/l1_1M，每档 n=1600，random 仅作对手）与 manifest（`tools/refit_mle.py --manifest-out --refit`，estimator kind=`probit-mle`、source=`runs/t17_mle/games.jsonl`、draw_margin=15.613、200 bootstrap）：**lvl1 82.75 / lvl2 106.90 / lvl3 147.71 / lvl4 185.34**（random=0，σ≈5.9–6.3，相邻 CI 不重叠；`rungs` 按 100–150 契约重选为 lvl1/lvl4，间距 102.60）；`traces/pool10/manifest.json` 逐字节镜像（sha256 `c8c491e3…`）。T2 标签按新 manifest 重导；`prior.json`（sha256 `abfea8e8…`，LOLO RMSE **42.6**、m_eff **68.07**、σ(5/10/20)=**26.0/22.0/20.5**）与 `prior_manifest_labels.json`（sha256 `3cdf71b3…`）重跑，`data.n_levels=4`；`tools/play_ladder.py`/`docs/human-play.md` 登记 lvl1–lvl4（强度 83/107/148/185）。**T15 遗留的 placement 常数重标已补做**：`c=0.465621`（新标签对旧 online-PL 参考的过原点最小二乘；残差 +37.9/+33.1/−16.8/−7.2），COLD_START_PRIOR (500,300)→(232.8105,139.6863)、RESULT_PRIOR (500,200)→(232.8105,93.1242)、ANCHOR_CENTER 230→107.0928、RUNG_PRIOR_SD 30→13.9686，`tests/test_placement.py` shipped-prior 断言改为读产物。**T17-F1**：`study.merge_manifest` 非 refit 合并不再覆盖已发布 estimator 块、不再刷新冻结 subject 的 sigma/games（新增测试）。旧 revision-2 资产归档：`runs/archive/study-legacy-rules2-20260926/`、`runs/archive/pool10-legacy-rules2-20260926/`；全部旧数字只作历史，禁止混比。全套测试 621 passed；详见 [`experiments/t17-recalibration.md`](./experiments/t17-recalibration.md)。**后续（2026-09-27，w2m/T23 重排）**：10 级池（T23 冠军 `ws_s2`、三条 w2m 2M 续训臂、`pself_s2`、`lvl1`–`lvl4`，18,000 局共享 probit-MLE，bootstrap 4000）经 `tools/refit_mle.py --manifest-out --refit --keep-rungs` 发布进 `traces/study/manifest.json`（=`traces/pool10/manifest.json`，sha256 `9bdb0edf…`，rungs 冻结 `lvl1`/`lvl4`，tail_gap 3.77）：lvl1–lvl4 = **84.68/113.60/134.40/187.72**，冠军簇 185.96–191.49；T2 标签与 v1 `prior.json` 随之重标（sha256 `7e1c41ab…`）；同日先验升级为 **v2/R1**（[`experiments/prior-opponent-correction.md`](./experiments/prior-opponent-correction.md)）：语料 `traces/study10`（39,960 条 9 级全 RR）、二次特征展开 + cell 惩罚 λ=3，发布 `prior.json` sha256 `15fddff1…`（LOLO RMSE **52.9**、m_eff **43.28**、σ(5/10/20)=**26.8/20.7/18.0**、cell_drift² 67、drift_sd 7.79）、`prior_manifest_labels.json` sha256 `0f331414…`；独立发牌 bank2（40k、相邻为主）transfer 复核 **CONFIRMED**（v2/v1 RMSE **53.20/58.30**、σ(5/10)=**24.61/17.69** vs 27.33/19.60、drift 6.29 vs 9.05，[`experiments/prior-v2-confirmation.md`](./experiments/prior-v2-confirmation.md)），v1 4k 归档 `runs/archive/prior-v1-4k-20260927/`；placement 固定常数不重折（与 T17 同处 probit-MLE 刻度）；`play_ladder` 登记 lvl1–lvl4（85/114/134/188）+ 顶部平台簇 `ws_s2`/`pself_s2`/三条 w2m 臂（186/187/190/190/191，可直接 `play <id>`）；旧 T17 manifest 归档 `runs/archive/*-t17-mle-20260927/`；报告 `runs/w2m/calibration/report.md`；全套测试 775 passed。 |
 
 **条件项（C-2，未触发不排期）**：ALS §6.2/§6.4 的 PPO 剩余对照——`lr_1e4` 轻量复测、`--num-minibatches 8`、Adam `eps` 对照、`loss_vf1` h2h 复测。
 - **触发条件**：A/B 线证伪后（T1 的 A1/A2 与 T2/T3 的 B0/B1 在 3×400 h2h 上均 CI 跨 0 或点估计 < +10），为排除「优化受限」才排期；未触发前维持 §6 N-1。
@@ -226,7 +268,10 @@
 | T13-M1：轨迹 S1 先验 `tools/fit_trace_prior.py` + `artifacts/human-elo/prior.json`（T2 默认：a=−890.92、b=1.7122、σ(5/10/20)=80.6/69.6/64.6、LOLO RMSE 133.9；manifest 对照；6 项测试） | [`experiments/trace-prior-m1.md`](./experiments/trace-prior-m1.md)；HEP 里程碑 M1；HR §5.2；ADR-0006 |
 | 结构性 F / T6：独立 actor/critic 双塔（`arch`/跨架构热启动/`--arch`，+13 测试、464 passed；三臂 500k `runs/t6_*__1__1790334485`；h2h 主臂不可分、交互臂 −15.51 vs A1、从零 −20.89 vs `w5_scratch`；梯度 cos +0.049、critic 仍塌缩 → 关闭该线） | [`experiments/twin-towers-500k.md`](./experiments/twin-towers-500k.md) §1–§8；SD §6A.5 |
 | T13-M2/M3：10 局定级会话 + `7g523-elo` CLI（`placement/` 包；全套 464 passed；`play.py` rung 标签 +3 测试；`elo.py` 零改动；冒烟 1287 ± 182/最近档 greedy；M4 等 D-3） | [`experiments/placement-m2m3.md`](./experiments/placement-m2m3.md)；HEP 里程碑 M2/M3；HR §5/§8 |
+| 搜索 rung 发布（2026-09-29，P4a `search_leafq`）：t=5/K=32/C=6、`t_leafq` value 头与 raw 10 级进**同一** 26,000 局 joint probit-MLE（ADR-0013）；`search_leafq` μ=**260.03±3.86**（CI [251.22,269.89]）、raw 顶 `w2m_ctl` 191.49→187.46；发布进 `traces/study`(=pool10) manifest 第 11 级（`refit_mle --spec` 写 spec、`--keep-rungs` 保 lvl1/lvl4、`rules_id` 不变）；消费侧 can-build 能力门 + 注入 factory；C3 调度开放。**P6 合并定级池并删实验模式**：`subject.search_config` 成为搜索身份单一来源（`--search-config ID=@file.json` seed/refresh，refit 默认保留）、`rated`/`unrated` 路径删除、轨迹先验按局排除（打到搜索 rung 的局记 `prior_off_reason`，raw 局照常） | [`search-config-plan.md`](./search-config-plan.md) §4.3（含文首 P6 更新）；[`experiments/README.md`](./experiments/README.md) §0 第 14 条；`artifacts/search-rung/search_rung.json`（provenance） |
 | 架构清理（2026-09-25，phase 2–7b）：单一观测 v5 + 单一牌型族比较（ADR-0009；v1–v4/`--obs-version`/段级重映射/`tier` 变体退役），单一 owner 接缝（ADR-0010：`record` 批量录制、`policies` spec 语法、`study` manifest writer、`prior` 核心上移、`metrics`/`league` 拆出 `train`、`ladder.play_games` 分片接口、`placement/` 包拆分）；`train.py` 877→668 行；全套 464 passed | [ADR-0009](./adr/0009-single-observation-and-comparison.md)/[ADR-0010](./adr/0010-single-owner-seams.md)；DES §1/§8 |
+| 评分核心换用 OpenSkill（2026-09-25，ADR-0011）：`elo.py` 的深接缝不变（`fit_ratings`/`select_rungs`/`expected_score`，纯函数），手写 BT-MAP/阻尼牛顿/`window`/分差似然/Hessian SE 退位给标准 Plackett–Luce（1500/200 标度、N 家、`tau` 动态）；`Rating(mu/sigma/n)`、`Fit(ratings/games)`、manifest/报告改 `mu/sigma` 键，旧 `elo/se` manifest 拒绝重测；全套 449 passed（`test_elo` 重写，含闭式高斯与库内更新对照） | [ADR-0011](./adr/0011-openskill-rating-core.md)；DES §1/§2.7/§2.8 |
+| 单一评分基准与 GreedyBot 退役（2026-09-25，ADR-0012）：RandomBot 钉死 `mu=0`（坐标整体 −1000）、GreedyBot 类/`greedy` spec/训练评估默认/锚点/工具注册表全部移除，测试侧改用 `tests/support.py:FirstLegalBot`；`build_ladder` 只要求 ≥1 gauge、`cross` 默认= `games_per_anchor`；全套 448 passed | [ADR-0012](./adr/0012-single-gauge-and-greedy-removal.md)；DES §1/§2.5/§2.7/§7 |
 | 观测精简静态审计 + 敏感性消融 + 200k 从零 pilot（观测 S1 不损失、观测 S2 落后） | OS §2–§5 |
 | 新评估口径独立验证（座位配对/聚簇 bootstrap/√N/功率） | EPV §0/§5/§6/§9 |
 | 锦标赛竞技场（W=1 vs W>1 逐位一致；6 worker 22,620 局 37.8s；bf16 实测无收益已移除；两 seed 排名 ρ=0.54 → 单 seed 排名不可靠；进度曲线 lvlbase ~184k 后平台、lvlsp 全程平） | TA §0/§2/§5/§6 |
@@ -238,7 +283,7 @@
 | M2 机器人阶梯（lvl1–lvl4 训练/评级/manifest 冻结） | LAD §2（经 LRP §2 引用）；DES §8 |
 | `--cross>0` 联合 Hessian 修复（历史 stageB ±4.8 不可复用，已记录） | ERA §2.3；EPV §4/§8 |
 | ADR-0006 评分接缝 + `study.py` manifest owner；wave1–4 run 归档 tarball | ADR-0006；DES §8；W5 头部 |
-| 测试面：座位配对/JSONL/合并/联合 Hessian/激活兼容等回归；当前全套 464 passed | EPV §4；`uv run --group train pytest -q` |
+| 测试面：座位配对/JSONL/合并/联合 Hessian/激活兼容等回归；当前 `uv run pytest` 收集 859 项（2026-09-29） | EPV §4；`uv run --group train pytest -q` |
 
 ## 6. 已否决 / 不要再做（负结果清单）
 
@@ -264,6 +309,11 @@
 | N-18 | 先做 >2 家 | 断了全部 2 家评估/迁移路径，且是另一个游戏 | SD §9.8；SD §5.4 |
 | N-19 | NEXT_STEP 保留 + 事后剔除死样本 | 直接 SAME_STEP 已修复；剔除方案改动更大、不推荐 | PAA §7 P1 |
 | N-20 | 架构忠实度（独立 actor/critic 双塔） | 主臂 vs `base680k` −9.13 [−20.57,+2.31]、vs `w5_ctrl` +5.21 [−5.93,+16.36] 不可分；交互臂 vs A1 −15.51 [−27.10,−3.92]、从零 vs `w5_scratch` −20.89 [−33.81,−7.97]；梯度 `cos(g_pol,g_val)=+0.049` 证伪「共享主干梯度干扰」，critic 照旧塌缩（V sd 0.113 vs A1 0.114）；参数 +69.6%。**关闭该线**：不做 E 组合、不加 Tanh 臂、不补 seed | [`experiments/twin-towers-500k.md`](./experiments/twin-towers-500k.md) §4–§6；SD §6A.5 |
+| N-21 | 离线策略动作蒸馏（硬 CE / soft-Q / margin 过滤）把搜索强度写进权重 | 主端点 −52.8 [−66.0,−39.6]；同 View 两次独立搜索的模板翻转率 51.7%（搜索动作是采样隐藏世界的函数、obs v5 不可决定）；剂量-反应「越拟合越差、不拟合=raw」；搜索包着损坏 53 Elo 的学生仍 +40.4 → 强度在推理算子。**关闭 EI 策略线**；若仍要权重路径，先改学生可见信息（belief/obs，ADR 级） | [`experiments/joint-search-training-wave1.md`](./experiments/joint-search-training-wave1.md) §4；`runs/ei/report.md` |
+| N-22 | 重训 value head 到搜索 E_w[Q] 以 bootstrap 截断搜索 | P1b（重训 critic vs 旧 critic，t=5 搜索）=+0.08 [−11.4,+11.6]；根分布 EV 0.844→0.829（P2b 未过）、叶分布 0.425→0.467（P2c 过）→ value 精度不是 t=5 截断的瓶颈。**关闭 bootstrap 循环**（预注册 §6 规则 2） | [`experiments/joint-search-training-wave1.md`](./experiments/joint-search-training-wave1.md) §5；`runs/ei2_value_t5/` |
+| N-23 | 深度 2（对手 top-3 应手 min 节点）搜索 | vs depth-1 配对 −11.5 [−29.3,+5.3]（3 seed）、成本 ~3×；vs raw +26.4 但 t-CI 跨 0。**关闭树深方向** | [`experiments/joint-search-training-wave1.md`](./experiments/joint-search-training-wave1.md) §6；`runs/o4lite-search/{depth2_k8,scale}/` |
+| N-24 | 同 recipe 重采叶子重训 critic（EI-3 round 1，t=5/t=10） | same-bank 配对 t5 **−4.44** [−15.37,+6.66]、t10 **−0.68** [−9.18,+7.99]（n=1200/臂）；leaf EV 差 +0.0002/+0.0026 且 final epoch 翻负（epoch 选择噪声）；479 真人决策 DQ/bias 无正信号；附 critic wd 单因子 **0.00** [−1.02,+1.02]（精确零效应，wd0 与 v2_t5 逐位一致）。**关闭“同 recipe 重采叶子”**；`t_leafq` 保持部署默认。**例外**：critic 容量（头部加宽）已由 cap0 clean 复核为负（见补记）；解冻 trunk 仍是未测的独立方向，未被本条目覆盖。**补记 2026-09-29**：采集器 K 世界同种子 bug 使该轮数据为单世界×8 复制（部署/h2h 不受影响，已修复+contract 30/30）。**clean re-run（t=5，seed 9400；55,792 决策/384,221 叶子，世界多样性 6.97/8，fallback 0）** 配对 **−1.37** [−11.99,+8.91]（n=1200、sign p 0.628）→ **结论复核为仍关闭**；同数据 cap0 clean 宽头 ΔEV 全 ≤ 0（w128 −0.0068、w256 −0.0011、w256x2 −0.0209，CI 均排除 0 但为负）→ critic 容量线亦负关闭。`t_leafq` 保持部署默认。 | [`experiments/ei3-value-loop-round1.md`](./experiments/ei3-value-loop-round1.md)；`runs/o4lite-search/ei3_value_loop/` |
+| N-25 | 学习隐藏手牌后验替换均匀 determinization（② belief） | 4000 局 study / 195,066 决策训练逐牌后验（按 seed 切分）：held-out AUC 0.742 < count-only 0.748（K1 kill，公开历史相对“数牌”无增量）；人类 bank ROI（370 searched，K=32/t=5）主门 chosen-value Δ(post−uniform)=**−0.217** [−0.589,+0.160] FAIL、翻转率 22.2% < 均匀重采样噪声 23.5%，oracle 真手牌 +3.117 [+2.019,+4.271]。**停止：不集成 rolloutt:、不跑 h2h**；重访条件 = held-out top-k placement 优势显著变大（更强历史编码/更多数据）或改做局部/端局算牌 | [`experiments/belief-posterior-probe.md`](./experiments/belief-posterior-probe.md)；`runs/belief_posterior_probe/` |
 
 ## 7. 冲突裁定结果（2026-09-25 文档治理：只统一口径，不改实验数字）
 
@@ -276,7 +326,7 @@
 | C-2 | PPO 剩余对照 | 裁定为**条件项**：默认不排期（§6 N-1 维持）；仅当 A/B 线证伪（T1、T2/T3 的 3×400 h2h 均 CI 跨 0 或点估计 < +10）后触发，用于排除「优化受限」。范围 = ALS §6.2 `lr_1e4` 轻量复测、§6.4 `--num-minibatches 8` / Adam eps / `loss_vf1` h2h 复测 | ALS §6.2/§6.4；SD §9.1；EPV §6（优化受限可能性低） | plans T14 新增条件项（触发条件 + 存放位置）；§6 N-1 加例外注 |
 | C-3 | 「S1」命名 | 统一别名：**轨迹 S1** = HEP/HR 逐墩轨迹特征（评分先验）；**观测 S1** = OS 103 维精简观测布局；同理 轨迹 S2/S3、观测 S2。**裸 S1 视为歧义，不得用于新文本** | HEP §2；HR §0/§5；OS §3.1/§3.2 | README §0.2 新增别名表；plans §1.3 改写术语注 + 全篇裸 S1 改前缀（§0.1、T3、D-4、D-7、§5）；轨迹语境的裸 S2/S3 同步加前缀（T13、§5、N-12/N-13、Q-10/Q-11） |
 | C-4 | 平台顶部数值 | 建立**规范数字表**（数值+口径+出处+禁止用法）：平台顶唯一规范值 = `base680k` **1443.3 ± 14.7**（座位平衡口径）；lvl4 已于 2026-09-25 **refit 为 manifest 契约值 1429.7 ± 7.1**（LRP §4.4）；旧 **1489.4 ± 34.3** 仅历史（相位产物），禁止与平衡口径混比 | ERA §5.2；LRP §2.1；EPV §7；W5 §4.2；ALS §2.4（1443.7 复核） | README §0.1 新增规范数字表；ladder-report 顶部加勘误；HR §9.2 一处旧区间加注（不改实验数字） |
-| C-5 | 协议冻结边界 | 裁定：**工具/统计管线冻结**（`ladder.py` 换座配对、`duel.py`/`head_to_head.py` twin + 牌聚簇 bootstrap、`elo.py` 联合 Hessian、`combine_duel_seeds` 公式、SAME_STEP）；本轮只统一阈值与表述。已确认 bug 的修复与 T10/T11 遗留缺陷（z/confidence 联动、window 近似）不算「再改协议」；N-17 维持 | SD §9.9；EPV §9/§4/§8；plans §6 N-17、§3 T10/T11 | README §3 新增冻结边界段；plans §1.2 同步。**2026-09-25 注记**：T1 工程伴随改动按本边界记录——owner 授权的纯速度评估并行化（`--workers`，默认 1 逐位不变、>1 与串行逐位一致）与已确认的 `duel.py` p 值 `1<<trials` 溢出修复（≤800 逐位不变，3 回归测试）；详见 [`experiments/reward-shaping-500k.md`](./experiments/reward-shaping-500k.md) §6 |
+| C-5 | 协议冻结边界 | 裁定：**工具/统计管线冻结**（`ladder.py` 换座配对、`duel.py`/`head_to_head.py` twin + 牌聚簇 bootstrap、`elo.py` 联合 Hessian、`combine_duel_seeds` 公式、SAME_STEP）；本轮只统一阈值与表述。已确认 bug 的修复与 T10/T11 遗留缺陷（z/confidence 联动、window 近似）不算「再改协议」；N-17 维持。**注：ADR-0011（2026-09-25）已把评分器换成 OpenSkill，联合 Hessian 与 window 不再存在；本冻结边界的精神（评估管线不随实验随意改动）不变** | SD §9.9；EPV §9/§4/§8；plans §6 N-17、§3 T10/T11；ADR-0011 | README §3 新增冻结边界段；plans §1.2 同步。**2026-09-25 注记**：T1 工程伴随改动按本边界记录——owner 授权的纯速度评估并行化（`--workers`，默认 1 逐位不变、>1 与串行逐位一致）与已确认的 `duel.py` p 值 `1<<trials` 溢出修复（≤800 逐位不变，3 回归测试）；详见 [`experiments/reward-shaping-500k.md`](./experiments/reward-shaping-500k.md) §6 |
 | C-6 | human-elo 标签基准 | 裁定：**默认基准 = T2/去收缩标定（HR §1/§5.2），不是 manifest T1**；T1 仅历史/契约引用（带相位偏移）。修订节替代范围扩大：§2–§4、§6–§8 的旧假设失效；§5 工程约束仍有效，但其中旧 20 局窗口示例以 HR §5.3 为准 | HEP 修订节；HR §1/§5.2/§5.3；LRP §2.1 | human-elo-plan 修订节补 §5/§8 说明 + §8 标题加注；plans T13 注明默认基准 |
 | C-7 | LAD §4 旧破局路线 | 裁定：**LAD §4 仅作背景，不单独立项**；其绝对 Elo 与路线以新报告为准（对手池/容量/超参见 SD §9、W5 §4.2、ALS §5；margin 由 HR §5.3 定为轨迹先验在场时 σ×2） | LAD §4；SD §9.1/§9.3/§9.4；W5 §4.2；ALS §5；HR §5.3 | ladder-report 顶部加最小勘误行（指向 README §0.1/plans §7，不改原文）；plans §0.1 仍将 LAD 列为二手引用、§3 优先级不含 LAD §4 |
 
@@ -317,9 +367,9 @@
 | # | 问题 | 现状/下一步观察 | 依据 |
 |---|---|---|---|
 | Q-1 | 信息受限 vs 优化受限 | A（改优化）与 B（改上界）就是判别实验；两者都 null 则需回答 Q-2 | SD §10 Q1 |
-| Q-2 | 2 家 7鬼523 vs 固定 GreedyBot 的真实上限是多少 | 可用 1-ply 搜索 bot/强参考测 Greedy 可被利用空间；若上限 ~70% 则应换课程对手（并入 T5 强对手） | SD §10 Q2 |
+| Q-2 | 2 家 7鬼523 vs 固定脚本对手（现为 RandomBot）的真实上限是多少 | 可用 1-ply 搜索 bot/强参考测脚本对手可被利用空间；若上限 ~70% 则应换课程对手（并入 T5 强对手） | SD §10 Q2；ADR-0012 |
 | Q-3 | 更细的逐墩 credit（自己赢墩 vs 对手赢墩） | A1 只是时间重分配；更细需要搜索/值分解，成本高，未排期 | SD §10 Q3 |
-| Q-4 | PFSP 是否对平局/分差加权 | 可用分差作软标签（与 `FitConfig.margin` 一致），在 T5 实现时决定 | SD §10 Q4 |
+| Q-4 | PFSP 是否对平局/分差加权 | 可用分差作软标签；**旧 `FitConfig.margin` 已随 ADR-0011 删除**，如要做需在 OpenSkill 之上另设观测模型（当前不做） | SD §10 Q4；ADR-0011 |
 | Q-5 | 观测记忆需求：unseen 不够时是否上显式剩余大牌估计/GRU | 属 B 下一档，破坏「纯 MLP + 全观测」契约，未排期 | SD §10 Q5 |
 | Q-6 | 3 家内部相对强度小实验（先于 D 的工程投入） | 3 家 500k vs 2 家 500k（取 obs 前 191 维）内部比较 | SD §10 Q6 |
 | Q-7 | 真人 OOD | LOLO 只是 bot 风格代理；真人 τ 未知，必须真人标定（D-3） | HR §9.2 |

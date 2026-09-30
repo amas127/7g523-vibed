@@ -28,10 +28,13 @@ from collections.abc import Sequence
 from pathlib import Path
 
 # Run as ``python tools/head_to_head.py``: reuse the shared spec grammar.
-
-from seven523.duel import combine_duel_seeds, paired_duel_stats, plan_duel_schedule  # noqa: E402
-from seven523.ladder import Entrant, play_games  # noqa: E402
-from seven523.policies import split_entrant, validate_spec  # noqa: E402
+from seven523.duel import (
+    combine_duel_seeds,
+    paired_duel_stats,
+    plan_duel_schedule,
+)
+from seven523.ladder import Entrant, play_games
+from seven523.policies import split_entrant, validate_spec
 
 __all__ = ["main", "parse_args", "run_duel_seeds"]
 
@@ -48,13 +51,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--left",
         required=True,
         metavar="[ID=]SPEC",
-        help="left candidate (random / greedy / ckpt:<path>)",
+        help="left candidate (random / ckpt:<path>)",
     )
     parser.add_argument(
         "--right",
         required=True,
         metavar="[ID=]SPEC",
-        help="right candidate (random / greedy / ckpt:<path>)",
+        help="right candidate (random / ckpt:<path>)",
     )
     parser.add_argument(
         "--pairs",

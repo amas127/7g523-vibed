@@ -59,5 +59,5 @@ per-seat 策略 seed 一处按调度下标、一处按座位派生；`random`/`g
 - `src` 不再依赖 `tools`（反向 import 为 0）；工具可以独立运行、独立删改，不影响库测试。
 - 所有既有入口保持不变：`7g523` / `7g523-play` / `7g523-train` / `7g523-eval` /
   `7g523-elo`（= `seven523.placement:main`）。
-- 当前全套 `uv run --group train pytest -q` 收集 464 项；本清理不改变任何行为，
-  只改变知识的归属。
+- 当时全套 `uv run --group train pytest -q` 收集 464 项（现行计数以 `uv run pytest` 为准）；
+  本清理不改变任何行为，只改变知识的归属。

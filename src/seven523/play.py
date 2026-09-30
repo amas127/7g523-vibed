@@ -1,8 +1,8 @@
 """Play one game in the terminal against a scripted bot or a trained agent.
 
 Human plays one seat (``--seat``, default 0); every other seat is an opponent
-policy.  Without ``--checkpoint`` the opponent is ``GreedyBot`` (default) or
-``RandomBot``.
+policy.  Without ``--checkpoint`` the opponent is ``RandomBot`` (the only
+scripted bot; ADR-0012).
 
     uv run 7g523-play
     uv run --group train 7g523-play --checkpoint runs/<run>/agent.pt
@@ -14,17 +14,18 @@ from __future__ import annotations
 
 import argparse
 import random
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any
 
 from .actions import legal_ids, resolve, suit_options
-from .cards import SUIT_LABELS, Suit, card_key
+from .cards import SUIT_LABELS, Suit, card_key, is_point_card
 from .combos import Combo, ComboKind
 from .game import Game, GameState, StepResult, View
 from .match import Match
-from .policies import GreedyBot, Policy, RandomBot
-from .rules import DEFAULT_RULES, Rules
+from .policies import Policy, RandomBot
+from .rules import DEFAULT_RULES, RULES_REVISION, Rules
 from .trace import (
     TRACE_VERSION,
     build_trace,
@@ -180,7 +181,13 @@ def state_panel(game: Game, state: GameState, human_seat: int) -> str:
     return "\n".join(lines)
 
 
-def _trick_text(result: StepResult, names: list[str]) -> str:
+def _trick_text(
+    result: StepResult,
+    names: list[str],
+    human_seat: int,
+    *,
+    human_hand_points: bool,
+) -> str:
     winner = result.winner
     assert winner is not None
     text = f"墩结束：{names[winner]} 收下 {result.points_taken} 分"
@@ -188,7 +195,14 @@ def _trick_text(result: StepResult, names: list[str]) -> str:
         who = "、".join(names[seat] for seat in result.refilled)
         text += f"（补牌：{who}）"
     if result.dug:
-        text += "，撬底！"
+        # 撬底 sweeps every point card still on the table — the current trick
+        # and *all* remaining hands.  Say so, and name the human's hand only
+        # when it actually held point cards at the sweep: the caller captures
+        # that from the pre-step state, so an empty or point-free hand is not
+        # claimed.  Message only: mechanics live in Game.
+        text += "，撬底！收走全场剩余分"
+        if winner != human_seat and human_hand_points:
+            text += "（含你手上的点牌）"
     return text
 
 
@@ -206,10 +220,30 @@ def replay_trace(
 
     Raises ``ValueError`` on any divergence (illegal action, wrong seat,
     different score), which makes a trace an integrity check of the engine.
+    Traces from another trace version or rules revision are refused before
+    the first step: the 撬底 terminal rule changed in revision 3 (ADR-0014),
+    so replaying a legacy record would silently diverge.
     """
     version = int(trace.get("version", 1))
     if version > TRACE_VERSION:
         raise ValueError(f"trace version {version} is newer than {TRACE_VERSION}")
+    if version < TRACE_VERSION:
+        # Pre-v3 traces predate the rules-revision stamp and were recorded under
+        # the old 撬底 semantics, so they cannot be replayed by this engine.
+        raise ValueError(
+            f"trace version {version} predates the rules-revision stamp "
+            f"(version {TRACE_VERSION}); 撬底 semantics changed in rules "
+            f"revision {RULES_REVISION}, so legacy traces must be re-recorded"
+        )
+    recorded_revision = trace.get("rules", {}).get("revision")
+    # Revision identity is the engine integer: a JSON ``3.0`` (float), ``"3"``
+    # or ``true`` must not pass a value-lax comparison.
+    if type(recorded_revision) is not int or recorded_revision != RULES_REVISION:
+        raise ValueError(
+            f"trace was recorded under rules revision {recorded_revision!r}, "
+            f"but this engine is revision {RULES_REVISION}; traces from "
+            "another rule version are not replayable — re-record them"
+        )
     rules = rules_from_json(trace["rules"])
     state = state_from_snapshot(trace["initial"], rules)
     match = Match(rules, [None] * rules.num_players, state=state)
@@ -236,9 +270,8 @@ def replay_trace(
                 f"step {index}: seat {state.current} is to move, "
                 f"but the trace says {step['seat']}"
             )
-        if pause:
-            if input_fn("回车继续（q 退出回放）> ").strip() in {"q", "quit", "退出"}:
-                raise QuitGame
+        if pause and input_fn("回车继续（q 退出回放）> ").strip() in {"q", "quit", "退出"}:
+            raise QuitGame
         view = match.view()
         action_id = int(step["action"])
         suit = step.get("suit")
@@ -248,6 +281,11 @@ def replay_trace(
             f"[{index:>3}] {names[step['seat']]}："
             + action_text(match.game, action_id, view.hand, suit)
         )
+        # 撬底 empties the human's hand; name it only when the pre-step hand
+        # really held a point card (empty/point-free hands must not be claimed).
+        human_hand_points = any(
+            is_point_card(card) for card in match.state.hands[human_seat]
+        )
         result = match.step(action_id, suit)
         state = match.state
         if list(state.scores) != [int(score) for score in step["scores"]]:
@@ -256,7 +294,12 @@ def replay_trace(
                 f"{state.scores} != {step['scores']}"
             )
         if result.trick_over:
-            print_fn("      " + _trick_text(result, names))
+            print_fn(
+                "      "
+                + _trick_text(
+                    result, names, human_seat, human_hand_points=human_hand_points
+                )
+            )
 
     if not state.done:
         raise ValueError("trace ended before the game did")
@@ -330,6 +373,11 @@ def play_game(
         record["initial"] = initial_snapshot(match.state)
         record["steps"] = []
 
+    # The pre-step human hand, set by the drive loop before every step and
+    # read by ``on_turn``: 撬底 messages must not claim a sweep that took no
+    # point cards from the human.
+    human_hand_points = False
+
     def on_turn(seat, action_id, suit, view, result):
         label = "你" if seat == human_seat else names[seat]
         text = action_text(game, action_id, view.hand, suit)
@@ -346,7 +394,11 @@ def play_game(
                 )
             )
         if result.trick_over:
-            print_fn(_trick_text(result, names))
+            print_fn(
+                _trick_text(
+                    result, names, human_seat, human_hand_points=human_hand_points
+                )
+            )
 
     match.on_turn = on_turn
 
@@ -356,7 +408,14 @@ def play_game(
     )
     print_fn(f"亮牌：{reveal}（{names[state.current]}先手）")
 
-    match.run_to_end()
+    while not match.done:
+        # The human's hand before this step: in the step that triggers 撬底
+        # that is the hand the sweep takes from (its own plays and earlier
+        # trick-end refills are already folded into the live state).
+        human_hand_points = any(
+            is_point_card(card) for card in match.state.hands[human_seat]
+        )
+        match.step()
 
     state = match.state
     best = max(state.scores)
@@ -376,23 +435,22 @@ def play_game(
     return state.scores
 
 
-def opponent_identity(checkpoint: str | None, opponent: str = "greedy") -> tuple[str, str]:
+def opponent_identity(checkpoint: str | None, opponent: str = "random") -> tuple[str, str]:
     """Trace identity ``(role, id)`` of a ``7g523-play`` opponent.
 
     A checkpoint labels by its run directory: ``runs/<new-run>/agent.pt``
     becomes ``opponent:<new-run>@seatN`` (the directory name carries the run
     id), so a human trace can be calibrated against the measured ladder
     (HR §6.3/§8).
-    The scripted bots are the pinned anchors and label as
-    ``anchor:greedy@seatN`` / ``anchor:random@seatN``, matching the study
-    traces.  Display names (``贪心 bot`` …) are not identities and never reach
-    the trace.
+    The scripted bot is the pinned gauge and labels as
+    ``anchor:random@seatN``, matching the study traces.  Display names are not
+    identities and never reach the trace.
     """
     if checkpoint:
         path = Path(checkpoint)
-        name = path.parent.name if path.parent != Path(".") else path.stem
+        name = path.parent.name if path.parent != Path() else path.stem
         return "opponent", name or "agent"
-    if opponent not in {"greedy", "random"}:
+    if opponent != "random":
         raise ValueError(f"unknown scripted opponent {opponent!r}")
     return "anchor", opponent
 
@@ -432,7 +490,7 @@ def interactive_chooser(
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="和 bot / 训练好的 agent 玩一局 7鬼523")
     parser.add_argument("--checkpoint", type=str, default=None, help="agent.pt（不传则用脚本 bot）")
-    parser.add_argument("--opponent", choices=["greedy", "random"], default="greedy")
+    parser.add_argument("--opponent", choices=["random"], default="random")
     parser.add_argument("--seat", type=int, default=0, help="你坐哪一家（默认 0）")
     parser.add_argument("--num-players", type=int, default=2)
     parser.add_argument("--seed", type=int, default=None, help="缺省随机")
@@ -480,9 +538,8 @@ def main(argv: list[str] | None = None) -> None:
     elif args.opponent == "random":
         policy = RandomBot()
         opponent_name = "随机 bot"
-    else:
-        policy = GreedyBot(rules)
-        opponent_name = "贪心 bot"
+    else:  # pragma: no cover - argparse restricts the choice
+        raise SystemExit(f"unknown opponent {args.opponent!r}")
 
     policies = [policy] * rules.num_players
     chooser = interactive_chooser(args.seat)

@@ -10,6 +10,7 @@ matches the observation just returned by ``reset``/``step``.
 """
 from __future__ import annotations
 
+import math
 import random
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -38,10 +39,46 @@ _KINDS = len(ComboKind)
 _NUM_CARDS = 54
 
 #: Legal :attr:`Seven523Env.reward_shaping` modes; see the constructor docs.
-_REWARD_SHAPING_MODES = ("terminal", "trick_diff", "win", "trick_diff_win")
+_REWARD_SHAPING_MODES = (
+    "terminal",
+    "trick_diff",
+    "win",
+    "trick_diff_win",
+    "terminal_win",
+    "saturate",
+)
+
+#: Largest accepted ``win_jump``.  Terminal margins live in ``[−1, 1]``, so any
+#: ``λ > 2`` already makes the outcome jump dominate every margin difference;
+#: the cap only keeps the reward scale bounded (λ→∞ is the ``win`` limit).
+_MAX_WIN_JUMP = 10.0
 
 #: ``obs``/``offset`` writer for one segment of the observation vector.
 _Writer = Callable[[View, Rules, list[float], int], None]
+
+
+def validate_reward_cap(reward_shaping: str, reward_cap: float | None) -> None:
+    """Validate the reward-cap contract shared by the env and the trainer.
+
+    ``saturate`` requires an explicit cap in ``[0, 1]``; every other mode must
+    leave it unset.  There is no silent fallback: ``reward_cap=None`` under
+    ``saturate`` is an error, never ``terminal``.
+    """
+    if reward_shaping == "saturate":
+        if reward_cap is None:
+            raise ValueError(
+                "reward_shaping='saturate' requires an explicit reward_cap "
+                "(tau in [0, 1]); None would silently fall back to terminal"
+            )
+    elif reward_cap is not None:
+        raise ValueError(
+            f"reward_cap is only valid with reward_shaping='saturate', not "
+            f"{reward_shaping!r}"
+        )
+    if reward_cap is not None and (
+        not math.isfinite(reward_cap) or not 0.0 <= reward_cap <= 1.0
+    ):
+        raise ValueError(f"reward_cap must be in [0, 1], got {reward_cap!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,8 +296,28 @@ class Seven523Env(gym.Env):
         ``trick_diff`` on every step, plus the ``win`` bonus added on the
         terminal step; an episode sums to the terminal return plus the win
         term.
+    ``terminal_win``
+        ``0.0`` on every non-terminal step; on the terminal step the legacy
+        margin plus a discrete jump at the win/loss boundary:
+        ``Game.returns()[learner] + win_jump * seat_outcome(scores, learner)``.
+        Two players reduce to ``(own−other)/100 + λ·sign(own−other)``; other
+        player counts use ``seat_outcome`` uniformly (never a 50-point
+        threshold).  ``win_jump = 0`` is exactly ``terminal``, and ``win_jump
+        → ∞`` tends to ``win``.  Only this mode reads :attr:`win_jump`.
+    ``saturate``
+        ``0.0`` on every non-terminal step; on the terminal step the margin is
+        clamped from above on a win.  The branch is outcome-conditioned (never
+        a 50-point threshold), so it generalises to ``n`` players: losses keep
+        ``Game.returns()[learner]``, ties score ``0.0``, and wins score
+        ``min(margin, reward_cap)``.  Two players reduce to ``own < 50:
+        margin``, ``own == 50: 0``, ``own > 50: min(margin, τ)``; ``τ = 0.2``
+        is ``d = 20``.  Only this mode reads :attr:`reward_cap`, and it must be
+        given explicitly (``None`` is an error, never ``terminal``); ``τ`` is
+        a return-unit cap in ``[0, 1]``.
 
-    An unknown mode raises :class:`ValueError`.
+    An unknown mode raises :class:`ValueError`; ``win_jump`` must be finite
+    and in ``[0, 10]``; ``reward_cap`` must be finite and in ``[0, 1]``, is
+    required by ``saturate``, and is rejected by every other mode.
     """
 
     metadata = {"render_modes": []}
@@ -272,17 +329,28 @@ class Seven523Env(gym.Env):
         seed: int | None = None,
         learner: int = 0,
         reward_shaping: str = "terminal",
+        win_jump: float = 1.0,
+        reward_cap: float | None = None,
     ) -> None:
         if reward_shaping not in _REWARD_SHAPING_MODES:
             raise ValueError(
                 f"unknown reward_shaping {reward_shaping!r}; expected one of "
                 f"{', '.join(_REWARD_SHAPING_MODES)}"
             )
+        if not math.isfinite(win_jump):
+            raise ValueError(f"win_jump must be finite, got {win_jump!r}")
+        if not 0.0 <= win_jump <= _MAX_WIN_JUMP:
+            raise ValueError(
+                f"win_jump must be in [0, {_MAX_WIN_JUMP}], got {win_jump!r}"
+            )
+        validate_reward_cap(reward_shaping, reward_cap)
         self.rules = rules
         self.game = Game(rules)
         self.num_players = rules.num_players
         self.learner = learner
         self.reward_shaping = reward_shaping
+        self.win_jump = win_jump
+        self.reward_cap = reward_cap
         self.obs_dim = observation_dim(self.num_players)
         self.nvec = nvec_for(rules)
         self.action_space_n = self.nvec[0]
@@ -363,6 +431,22 @@ class Seven523Env(gym.Env):
             return after - before
         if self.reward_shaping == "win":
             return self._win_bonus(state) if state.done else 0.0
+        if self.reward_shaping == "terminal_win":
+            if not state.done:
+                return 0.0
+            return self.game.returns(state)[self.learner] + self.win_jump * (
+                self._win_bonus(state)
+            )
+        if self.reward_shaping == "saturate":
+            if not state.done:
+                return 0.0
+            margin = self.game.returns(state)[self.learner]
+            outcome = seat_outcome(state.scores, self.learner)
+            if outcome > 0:
+                cap = self.reward_cap
+                assert cap is not None  # __init__ rejects saturate without a cap
+                return min(margin, cap)
+            return 0.0 if outcome == 0 else margin
         # trick_diff_win: local credit plus the terminal outcome term.
         reward = after - before
         if state.done:

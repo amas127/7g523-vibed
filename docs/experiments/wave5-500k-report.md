@@ -64,7 +64,7 @@ wave1–4 的 29 个 run 曾归档进 `runs/archive/waves1-4-runs-2026-09-25.tar
 `runs/probe/base_step00573440.pt`、`runs/probe_sp/sp_step00020480.pt`、
 `runs/probe_sp/sp_step00040960.pt`，加权 `1/1/1/1`；再加 `2@greedy`。
 
-启动脚本：[`runs/w5_launch.sh`](../../runs/w5_launch.sh)（内含每臂完整命令），
+启动脚本：`runs/w5_launch.sh`（内含每臂完整命令；运行产物，工作区原路径已不可用，归档副本见 `runs/archive/legacy-20260926/experiments/`），
 日志 `runs/w5_*_train.log`，run 目录 `runs/w5_*__1__<ts>/`（`metrics.csv` +
 `agent.pt`）。实际执行分两批各 3 并发：batch A（ctrl/bigbatch/scratch）
 03:01:37→03:07:45（3×500k，~6 分钟）；batch B（pool4g/vf1/mix_samp）
@@ -85,7 +85,7 @@ wave1–4 的 29 个 run 曾归档进 `runs/archive/waves1-4-runs-2026-09-25.tar
 - 一次同 fit 给 6 个 `w5_*` + `base680k` 定级：
   `tools/build_ladder.py --games-per-anchor 400 --no-traces --seed <s>
   --device cuda`（400 = 200 副牌 × 双座位；每候选 800 局，锚点 Random=1000 /
-  Greedy=1315 固定）。脚本 [`runs/w5_eval.sh`](../../runs/w5_eval.sh)。
+  Greedy=1315 固定）。脚本 `runs/w5_eval.sh`（运行产物，同上）。
 - 计划本是 seed 0 + 可选 seed 1。因为 seed 0/1 的父子差整体翻符号（见 §4），
   **补跑 seed 2** 作为稳健性检查；三份结果
   `runs/w5_ladder_seed{0,1,2}.txt`。

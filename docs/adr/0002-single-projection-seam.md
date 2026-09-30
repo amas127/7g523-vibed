@@ -10,4 +10,4 @@
 
 ## 后果
 
-选投影接缝 + 差分泄漏测试（`tests/test_game.py::test_view_does_not_leak`）双保险；代价是 `GameState` 仍在 in-repo 代码里公开，泄露只能由测试而非编译器拦截。
+选投影接缝 + 差分泄漏测试（`tests/test_game.py::test_view_and_observation_do_not_leak_hidden_state`）双保险；代价是 `GameState` 仍在 in-repo 代码里公开，泄露只能由测试而非编译器拦截。

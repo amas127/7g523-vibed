@@ -8,3 +8,4 @@ build/
 runs/
 traces/
 artifacts/
+/.pi/

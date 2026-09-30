@@ -1,5 +1,10 @@
 # 观测布局 v5：观测 S1 + B0 + B1 成为默认，v4 保留为前缀链中间版本
 
+> **已被 [ADR-0009](./0009-single-observation-and-comparison.md) 取代（2026-09-25）**：
+> “v5 = 观测 S1+B0+B1 成为默认”的决策仍现行；本文保留 v1–v4、`--obs-version` 与跨版本
+> 热启动列重映射（`_first_layer_remap`/`_REMAP_VERSION_PAIRS`）的兼容条款全部退役——
+> `env.py` 只有 v5 一张段表，`load_agent` 对缺失或非 v5 的 payload 硬拒绝。
+
 观测 S1 的静态审计与 200k 从零 pilot（[observation-slimming.md](../experiments/observation-slimming.md)
 §2–§5）表明，原 191 维布局里有一批可推导或低效表达的维度：`rank_counts` 完全由 `hand` 决定；
 `current` 在全部生产路径里恒等于 acting seat；自身 `hand_counts` 恒等于 `len(hand)/7`；

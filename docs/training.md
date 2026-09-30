@@ -1,8 +1,8 @@
 # 训练与评估使用手册
 
-> **规则口径（2026-09-25）**：非炸弹比较已改为牌型族（[ADR-0007](adr/0007-family-comparison.md)、`RULES.md` §3）。本文引用的历史 Elo/胜率/训练结论均为旧 `tier` 口径，不可与新规则结果混比；重标定见 [plans.md](plans.md) T15 与 [experiments/README.md](experiments/README.md) 顶部警告。
+> **规则口径（2026-09-29 更新）**：非炸弹比较为牌型族（[ADR-0007](adr/0007-family-comparison.md)、`RULES.md` §3），当前为 revision-3「出空即撬底」（[ADR-0014](adr/0014-on-empty-digs.md)）。本文引用的历史 Elo/胜率/训练结论均为旧 `tier` 口径，不可与新规则结果混比；重标定见 [plans.md](plans.md) T17 与 [experiments/README.md](experiments/README.md) 顶部警告。
 
-> **模型资产状态（2026-09-25）**：牌型族规则变更前的全部 checkpoint 已从 `runs/` 删除（含本文示例曾引用的 `runs/probe/*`、`runs/lvl*` 等），旧路径不再可用。下文 `--load-checkpoint` / `--checkpoint` / `--pool-member` 中的 `runs/<...>/agent.pt` 均为占位符：先按「阶段 1」训练出新模型；整体重标定计划见 [plans.md](plans.md) T15。
+> **模型资产状态（2026-09-29 更新）**：旧规则（revision-2 及更早，含 `tier` 口径）的 checkpoint 已从 `runs/` 删除（含本文示例曾引用的 `runs/probe/*`、`runs/lvl*` 等），旧路径不再可用。T17（出空即撬底，rules revision 3）已在当前规则下重训并重测 `lvl1`–`lvl4`（`runs/t17*`），`tools/play_ladder.py` 现登记 `random` + 梯级 + 顶部平台簇，2026-09-29 起含搜索 rung `search_leafq`；现行资产与强度见 [`human-play.md`](human-play.md) 与 `tools/play_ladder.py list`，结论入口见 [experiments/README.md](experiments/README.md)。下文 `--load-checkpoint` / `--checkpoint` / `--pool-member` 的 `runs/<...>/agent.pt` 仍为占位符：可指向 T17 产物或按「阶段 1」自训的新模型；重标定记录见 [plans.md](plans.md) T17（T15 转 revision-2 历史）。
 
 依赖一次性安装（gymnasium + cu132 版 torch 已在 `train` 组里）：
 
@@ -10,13 +10,14 @@
 uv sync --group train
 ```
 
-## 阶段 1：学 seat 0，打 GreedyBot
+## 阶段 1：学 seat 0，打 RandomBot
 
 ```bash
 uv run --group train 7g523-train --exp-name stage1 --total-timesteps 300000
 ```
 
-- 默认 `--opponent greedy`、8 env × 128 steps 一个 batch；本机 300k 步约 3 分钟。
+- 默认 `--opponent random`（唯一的脚本对手；GreedyBot 已随 ADR-0012 退役）、
+  8 env × 128 steps 一个 batch；本机 300k 步约 3 分钟。
 - 动作空间是 `MultiDiscrete([134, 4])`：134 个牌型模板 + 4 个顶牌花色（ADR-0004）。
   同一 v5 布局、动作头更小的 checkpoint（如旧的单头 134）可直接 `--load-checkpoint`：
   会自动 warm start（主干/价值头全拷，模板头权重平移，花色头新初始化）；
@@ -42,28 +43,28 @@ uv run --group train 7g523-train --exp-name stage1 --total-timesteps 300000 \
 ```bash
 uv run --group train 7g523-train --exp-name stage2 \
     --opponent self --load-checkpoint runs/<stage1-run>/agent.pt \
-    --total-timesteps 300000 --eval-interval 20 --eval-opponent greedy
+    --total-timesteps 300000 --eval-interval 20 --eval-opponent random
 ```
 
 对手是当前策略的冻结快照，每 `--self-play-refresh`（默认 50）次 update 刷新；
 `--self-play-sample` 让对手按 mask 采样而不是 argmax。`--load-checkpoint`
 只是热启动，不影响 `--opponent` 的选择。
 
-对手池（league）：`--opponent mix` 是「冻结自己 + GreedyBot」的按决策混合
-（比例由 `--mix-greedy-prob` 控制）；`--opponent pool` 是真正的多成员池：
+对手池（league）：`--opponent mix` 是「冻结自己 + RandomBot」的按决策混合
+（比例由 `--mix-random-prob` 控制）；`--opponent pool` 是真正的多成员池：
 
 ```bash
 uv run --group train 7g523-train --exp-name league --opponent pool \
     --pool-member 1@ckpt:runs/<run-a>/agent.pt \
     --pool-member 1@ckpt:runs/<run-b>/agent.pt \
-    --pool-member 2@greedy \
+    --pool-member 2@random \
     --load-checkpoint runs/<new-run>/agent.pt --total-timesteps 200000
 ```
 
-示例里的两个 ckpt 成员是占位符（旧 probe 快照已删除），可先只留 `2@greedy`
+示例里的两个 ckpt 成员是占位符（旧 probe 快照已删除），可先只留 `2@random`
 跑通；替换成自己训练的新 ckpt 后再补多成员池。
 
-每个 `--pool-member` 形如 `[WEIGHT@]SPEC`，`SPEC` 支持 `greedy` / `random` /
+每个 `--pool-member` 形如 `[WEIGHT@]SPEC`，`SPEC` 支持 `random` /
 `ckpt:<agent.pt>` / `self`（`self` 走 `--self-play-refresh` 原地刷新）。
 `MixturePolicy` 在每次决策按权重抽一个成员，各 env 用独立 RNG。
 
@@ -71,7 +72,7 @@ uv run --group train 7g523-train --exp-name league --opponent pool \
 
 ```bash
 uv run --group train 7g523-eval --checkpoint runs/<run>/agent.pt \
-    --episodes 1000 --opponent greedy
+    --episodes 1000 --opponent random
 
 uv run --group train 7g523-eval --checkpoint ... --opponent random --json
 # ckpt 策略可用 --device cuda 指定推理设备（小 MLP 下与 CPU 同速，见评测报告）
@@ -123,8 +124,8 @@ uv run --group train python tools/h2h_screen.py --help   # 多对 × 3 seed × 2
 - `--activation {relu,tanh,gelu,silu}`：隐藏层激活（默认 relu；激活存入 checkpoint，旧 ckpt 缺省按 relu 加载）
 - `--arch {shared,towers}`：网络架构（默认 `shared`，共享主干）。`towers` = 独立 actor/critic 两塔（参数 +69.6%），为实验性选项、T6 已判负并关闭该线（见 [experiments/twin-towers-500k.md](./experiments/twin-towers-500k.md)）；默认 `shared` 逐位不变
 - 观测布局固定为 **v5 = 观测 S1+B0+B1（`119+21n`、2 家 161）**，没有 `--obs-version` 开关。`save_agent` 把 `obs_version=5` 写进 payload，`load_agent` 对缺失或其他版本直接报错；v1–v4 已随兼容层退役，旧 ckpt 需重训（见 [ADR-0009](./adr/0009-single-observation-and-comparison.md)）
-- `--reward-shaping {terminal,trick_diff,win,trick_diff_win}`：奖励分解（默认 `terminal` 旧行为逐位不变）。`trick_diff` 每步 `Φ(s')−Φ(s)`（一局求和 = 终局回报，telescoping）；`win` 终局 `sign(own−max(others)) ∈ {−1,0,+1}`；`trick_diff_win` 为两者叠加。T1 结果见 [experiments/reward-shaping-500k.md](./experiments/reward-shaping-500k.md)（A1 正信号在训练 seed 复现后未复现）
-- `--opponent mix|pool`：对手混合 / 多成员联赛；`--pool-member [WEIGHT@]SPEC`（SPEC = `greedy`/`random`/`self`/`ckpt:<agent.pt>`，可重复，权重默认 1）
+- `--reward-shaping {terminal,trick_diff,win,trick_diff_win,terminal_win,saturate}`：奖励分解（默认 `terminal` 旧行为逐位不变）。`trick_diff` 每步 `Φ(s')−Φ(s)`（一局求和 = 终局回报，telescoping）；`win` 终局 `sign(own−max(others)) ∈ {−1,0,+1}`；`trick_diff_win` 为两者叠加；`terminal_win` 用 `--win-jump λ`（默认 1.0）在边界加跳变；`saturate` 用 `--reward-cap τ`（必需，0≤τ≤1）截断胜局分差。T1 结果见 [experiments/reward-shaping-500k.md](./experiments/reward-shaping-500k.md)（A1 未复现）；revision-3 的跳变/饱和两波见 [experiments/reward-alignment-terminal-win.md](./experiments/reward-alignment-terminal-win.md)、[experiments/reward-alignment-saturate.md](./experiments/reward-alignment-saturate.md)（均未过门，饱和线关闭）
+- `--opponent mix|pool`：对手混合 / 多成员联赛；`--pool-member [WEIGHT@]SPEC`（SPEC = `random`/`self`/`ckpt:<agent.pt>`，可重复，权重默认 1）
 - `--pool-episode`（默认关）：`--opponent pool/mix` 时改为**逐局**冻结一个成员
   （`EpisodeMixturePolicy`，在 `env.reset` 时抽一次），代替旧的逐决策重抽（`MixturePolicy`）；
   关闭时逐位保持旧行为。
@@ -176,11 +177,11 @@ CSV 列：`global_step`、`episodic_return`、`episodic_length`、`episodes`、
 
 ## 人机对战
 
-不加参数就是和贪心 bot 玩：
+不加参数就是和 RandomBot 玩（GreedyBot 已随 [ADR-0012](adr/0012-single-gauge-and-greedy-removal.md) 退役；对手清单与更多用法见 [human-play.md](human-play.md)）：
 
 ```bash
-uv run 7g523-play                          # 默认：贪心 bot，你坐 0 号位
-uv run 7g523-play --opponent random        # 先打随机 bot
+uv run 7g523-play                          # 默认：RandomBot，你坐 0 号位
+uv run 7g523-play --opponent random        # 显式指定 RandomBot（与默认等价）
 uv run --group train 7g523-play --checkpoint runs/<run>/agent.pt   # 打训练好的模型
 uv run 7g523-play --seat 1 --seed 7 --rounds 3                     # 坐 1 号位、玩 3 局
 ```

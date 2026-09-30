@@ -18,7 +18,7 @@ from seven523.trace import load_trace, trace_filename
 
 SILENT = lambda *args, **kwargs: None  # noqa: E731
 
-PLAYERS = ("subject:hero@seat0", "anchor:greedy@seat1")
+PLAYERS = ("subject:hero@seat0", "anchor:random@seat1")
 
 
 def _recorded(tmp_path: Path, **overrides) -> RecordedGame:
@@ -30,7 +30,7 @@ def _recorded(tmp_path: Path, **overrides) -> RecordedGame:
         "created_at": "2025-01-01T00:00:00",
         "trace_dir": tmp_path,
         "trace_index": 7,
-        "opponent": "greedy",
+        "opponent": "random",
         "print_fn": SILENT,
     }
     settings.update(overrides)
@@ -44,8 +44,8 @@ def test_play_recorded_scores_name_and_round_trip(tmp_path):
     assert recorded.scores == tuple(recorded.trace["final_scores"])
     assert sum(recorded.scores) == DEFAULT_RULES.total_points
     assert recorded.trace_path is not None
-    assert recorded.trace_path == tmp_path / trace_filename(7, 42, 0, "greedy")
-    assert recorded.trace_path.name == trace_filename(7, 42, 0, "greedy")
+    assert recorded.trace_path == tmp_path / trace_filename(7, 42, 0, "random")
+    assert recorded.trace_path.name == trace_filename(7, 42, 0, "random")
 
     loaded = load_trace(recorded.trace_path)
     assert loaded == recorded.trace

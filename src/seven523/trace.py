@@ -21,7 +21,7 @@ from typing import Any
 
 from .cards import CARD_ORDER, card_id, sorted_cards
 from .game import Deal, Game, GameState, StepResult
-from .rules import Rules
+from .rules import RULES_REVISION, Rules
 
 __all__ = [
     "TRACE_VERSION",
@@ -42,7 +42,7 @@ __all__ = [
     "trace_filename",
 ]
 
-TRACE_VERSION = 2
+TRACE_VERSION = 3
 
 
 # -- cards -------------------------------------------------------------------
@@ -66,8 +66,16 @@ def rules_json(rules: Rules) -> dict[str, Any]:
 def rules_from_json(data: dict[str, Any]) -> Rules:
     # Traces recorded while ``Rules.comparison`` existed carry a stale key;
     # family comparison is now the only semantics, so drop it instead of
-    # rejecting the record (and never mutate the caller's dict).
-    return Rules(**{key: value for key, value in data.items() if key != "comparison"})
+    # rejecting the record (and never mutate the caller's dict).  The
+    # ``revision`` stamp is trace metadata, not a ``Rules`` field, and is
+    # checked by ``play.replay_trace`` before a replay starts.
+    return Rules(
+        **{
+            key: value
+            for key, value in data.items()
+            if key not in ("comparison", "revision")
+        }
+    )
 
 
 # -- the opening deal --------------------------------------------------------
@@ -110,7 +118,7 @@ def state_from_snapshot(snapshot: dict[str, Any], rules: Rules) -> GameState:
 
 
 def player_label(role: str, player_id: str, seat: int) -> str:
-    """The trace's player identity: ``role:id@seatN`` (e.g. ``anchor:greedy@seat1``)."""
+    """The trace's player identity: ``role:id@seatN`` (e.g. ``anchor:random@seat1``)."""
     return f"{role}:{player_id}@seat{seat}"
 
 
@@ -154,7 +162,7 @@ def step_record(
 
 
 def trace_filename(index: int, seed: int, human_seat: int, opponent: str) -> str:
-    """The study-file convention: ``g0007__s42__seat1__vsgreedy.json``."""
+    """The study-file convention: ``g0007__s42__seat1__vsrandom.json``."""
     return f"g{index:04d}__s{seed}__seat{human_seat}__vs{opponent}.json"
 
 
@@ -170,11 +178,16 @@ def build_trace(
     created_at: str,
     **record: Any,
 ) -> dict[str, Any]:
-    """Assemble a complete trace document around ``record`` (initial/steps/...)."""
+    """Assemble a complete trace document around ``record`` (initial/steps/...).
+
+    The rules block carries the semantic revision so a replay can refuse a
+    trace recorded under a different rule version instead of silently
+    mis-replaying it (ADR-0013/ADR-0014).
+    """
     return {
         "version": TRACE_VERSION,
         "created_at": created_at,
-        "rules": rules_json(rules),
+        "rules": {**rules_json(rules), "revision": RULES_REVISION},
         "seed": seed,
         "human_seat": human_seat,
         "players": list(players),

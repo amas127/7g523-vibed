@@ -1,10 +1,11 @@
-"""Checkpoint arena: one Bradley-Terry league over many snapshots at once.
+"""Checkpoint arena: one OpenSkill league over many snapshots at once.
 
 Where ``ladder.build_ladder`` rates a handful of candidates against pinned
 anchors and ``duel.plan_duel_schedule`` resolves a single pair, the arena puts
 *the whole league* into one tournament: every entrant plays both pinned anchors
 and every other entrant (seat-paired twins from :func:`ladder.plan_games`), and
-one joint :func:`elo.fit_ratings` MAP turns all of it into a common Elo scale.
+one joint :func:`elo.fit_ratings` replay turns all of it into a common rating
+scale.
 
 Two things this module adds over ``build_ladder``:
 
@@ -25,9 +26,9 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
 
 from .elo import Fit, FitConfig, PlayedGame, expected_score, fit_ratings
 from .ladder import Entrant, ScheduledGame, plan_games, play_games
@@ -108,7 +109,6 @@ def run_arena(
     device: str = "cpu",
     rules: Rules = DEFAULT_RULES,
     games_out: str | Path | None = None,
-    window: int | None = None,
     config: FitConfig = FitConfig(),
 ) -> ArenaResult:
     """Plan, play (possibly in parallel) and fit one league tournament.
@@ -140,7 +140,7 @@ def run_arena(
         rules=rules,
         games_out=games_out,
     )
-    fit = fit_ratings(games, anchors=anchors, priors=priors, window=window, config=config)
+    fit = fit_ratings(games, anchors=anchors, priors=priors, config=config)
     return ArenaResult(entrants, fit, schedule, tuple(games))
 
 
@@ -171,7 +171,7 @@ def auto_id_from_path(path: str | Path) -> str:
 def ranking_rows(
     result: ArenaResult, *, steps: Mapping[str, int] | None = None
 ) -> list[dict]:
-    """One row per entrant, highest Elo first (ties broken by id).
+    """One row per entrant, highest rating first (ties broken by id).
 
     ``step`` comes from the explicit ``steps`` map first, then from the id or
     spec (``step00020480``); ``None`` means the entrant has no training step.
@@ -191,13 +191,13 @@ def ranking_rows(
                 "spec": entrant.spec,
                 "role": "anchor" if entrant.is_anchor else "candidate",
                 "pinned": entrant.pinned,
-                "elo": rating.elo,
-                "se": rating.se,
+                "mu": rating.mu,
+                "sigma": rating.sigma,
                 "games": rating.n,
                 "step": step,
             }
         )
-    rows.sort(key=lambda row: (-row["elo"], row["id"]))
+    rows.sort(key=lambda row: (-row["mu"], row["id"]))
     return rows
 
 
@@ -241,9 +241,9 @@ def pair_stats(games: Iterable[PlayedGame]) -> dict[str, dict]:
 def pair_diagnostics(
     result: ArenaResult, *, min_games: int = 20
 ) -> list[dict]:
-    """Largest observed-vs-Elo disagreements, a transitivity smoke test.
+    """Largest observed-vs-model disagreements, a transitivity smoke test.
 
-    The Bradley-Terry fit assumes the pair probabilities are consistent with
+    The Plackett–Luce fit assumes the pair probabilities are consistent with
     one rating per entrant; a pair whose observed rate is far from the model's
     expectation is the first place a cycle would show.  ``z`` uses a
     deal-clustered binomial approximation (``games // 2`` effective deals, the
@@ -257,7 +257,7 @@ def pair_diagnostics(
         if games_played < min_games:
             continue
         expected = expected_score(
-            result.fit.ratings[a].elo, result.fit.ratings[b].elo
+            result.fit.ratings[a], result.fit.ratings[b]
         )
         deals = max(1, games_played // 2)
         se = math.sqrt(max(expected * (1.0 - expected), 1e-12) / deals)
@@ -302,8 +302,8 @@ def arena_document(
             if entrant.is_anchor
         },
         "fit": {
-            "iterations": result.fit.iterations,
-            "converged": result.fit.converged,
+            "estimator": "openskill-plackett-luce",
+            "games": result.fit.games,
         },
         "entrants": rows,
         "ranking": [row["id"] for row in rows],
@@ -318,7 +318,7 @@ def write_tensorboard(
     *,
     steps: Mapping[str, int] | None = None,
 ) -> int:
-    """Log each measured Elo at its training step as ``arena/elo/<id>``.
+    """Log each measured rating at its training step as ``arena/rating/<id>``.
 
     Ids sharing the ``arena/elo`` prefix group into one TensorBoard chart, so
     the scalar dashboard draws the progress curves directly.  Entrants without
@@ -341,7 +341,7 @@ def write_tensorboard(
             if step is None:
                 continue
             writer.add_scalar(
-                f"arena/elo/{entrant.id}", result.fit.ratings[entrant.id].elo, int(step)
+                f"arena/rating/{entrant.id}", result.fit.ratings[entrant.id].mu, int(step)
             )
             written += 1
     return written

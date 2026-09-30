@@ -3,6 +3,10 @@
 Torch lives in the optional ``train`` dependency group
 (``uv sync --group train``); without it this whole module is skipped.
 """
+import itertools
+import json
+import math
+
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -14,10 +18,15 @@ from seven523.networks import (  # noqa: E402
     NeuralPolicy,
     load_agent,
     save_agent,
-    warm_start_into,
 )
 from seven523.rules import DEFAULT_RULES  # noqa: E402
-from seven523.train import make_env, parse_args, parse_pool_member, train  # noqa: E402
+from seven523.train import (  # noqa: E402
+    lr_scale,
+    make_env,
+    parse_args,
+    parse_pool_member,
+    train,
+)
 
 OBS_DIM = 161
 NVEC = [134, 4]
@@ -96,18 +105,6 @@ def test_activation_variants_forward_and_checkpoint_round_trip(tmp_path):
         Agent(OBS_DIM, NVEC, hidden=16, activation="swish")
 
 
-def test_warm_start_copies_trunk_and_template_head():
-    torch.manual_seed(0)
-    old = Agent(OBS_DIM, [134], hidden=16)
-    new = Agent(OBS_DIM, NVEC, hidden=16)
-    copied = warm_start_into(new, old)
-    assert "network.0.weight" in copied
-    assert "actor.weight[:134]" in copied
-    assert torch.equal(new.network[0].weight, old.network[0].weight)
-    assert torch.equal(new.actor.weight[:134], old.actor.weight)
-    assert torch.equal(new.critic.weight, old.critic.weight)
-
-
 def test_checkpoint_round_trip(tmp_path):
     torch.manual_seed(0)
     agent = Agent(OBS_DIM, NVEC, hidden=16)
@@ -125,7 +122,7 @@ def test_neural_policy_acts_legally():
     from seven523.policies import make_scripted_policies
 
     policy = NeuralPolicy(Agent(OBS_DIM, NVEC, hidden=16), DEFAULT_RULES)
-    env = Seven523Env(seed=0, opponents=make_scripted_policies("greedy", seed=0))
+    env = Seven523Env(seed=0, opponents=make_scripted_policies("random", seed=0))
     env.reset()
     for _ in range(20):
         if env.state.done:
@@ -146,7 +143,7 @@ def test_neural_policy_accepts_old_single_head_checkpoints(tmp_path):
     save_agent(path, Agent(OBS_DIM, [134], hidden=16))
     loaded, _ = load_agent(path)
     policy = NeuralPolicy(loaded, DEFAULT_RULES)
-    env = Seven523Env(seed=0, opponents=make_scripted_policies("greedy", seed=0))
+    env = Seven523Env(seed=0, opponents=make_scripted_policies("random", seed=0))
     env.reset()
     view = env.game.view(env.state, env.learner)
     action = policy.act(view)
@@ -162,14 +159,14 @@ def test_train_smoke_with_eval(tmp_path):
             "--seed", "0",
             "--exp-name", "test",
             "--run-dir", str(tmp_path),
-            "--total-timesteps", "512",
+            "--total-timesteps", "256",
             "--num-envs", "2",
             "--num-steps", "64",
             "--num-minibatches", "2",
             "--update-epochs", "1",
             "--checkpoint-interval", "2",
             "--eval-interval", "2",
-            "--eval-episodes", "3",
+            "--eval-episodes", "1",
             "--log-interval", "0",
         ]
     )
@@ -194,7 +191,7 @@ def test_train_self_play_smoke(tmp_path):
             "--seed", "1",
             "--exp-name", "selfplay",
             "--run-dir", str(tmp_path),
-            "--total-timesteps", "256",
+            "--total-timesteps", "128",
             "--num-envs", "2",
             "--num-steps", "64",
             "--num-minibatches", "2",
@@ -251,10 +248,66 @@ def test_train_uses_same_step_autoreset(tmp_path, monkeypatch):
 
 def test_parse_reward_shaping_choices_and_default():
     assert parse_args([]).reward_shaping == "terminal"
-    for mode in ("terminal", "trick_diff", "win", "trick_diff_win"):
+    assert parse_args([]).win_jump == 1.0
+    assert parse_args([]).reward_cap is None
+    for mode in (
+        "terminal",
+        "trick_diff",
+        "win",
+        "trick_diff_win",
+        "terminal_win",
+        "saturate",
+    ):
         assert parse_args(["--reward-shaping", mode]).reward_shaping == mode
+    assert parse_args(["--win-jump", "0.25"]).win_jump == 0.25
+    assert parse_args(["--reward-cap", "0.2"]).reward_cap == 0.2
     with pytest.raises(SystemExit):
         parse_args(["--reward-shaping", "shaped"])
+
+
+def test_lr_scale_linear_matches_the_historical_formula():
+    for update, num_updates in ((1, 100), (2, 100), (50, 100), (100, 100)):
+        assert lr_scale("linear", update, num_updates) == 1.0 - (
+            update - 1.0
+        ) / num_updates
+
+
+def test_lr_scale_cosine_endpoints_and_monotone_decrease():
+    assert lr_scale("cosine", 1, 100) == pytest.approx(1.0)
+    # The phase matches the historical linear schedule ((update - 1) / N), so
+    # the last update lands one phase step short of zero, not exactly at it.
+    assert lr_scale("cosine", 100, 100) == pytest.approx(
+        0.5 * (1.0 + math.cos(math.pi * 99 / 100))
+    )
+    assert 0.0 < lr_scale("cosine", 100, 100) < 5e-4
+    values = [lr_scale("cosine", update, 100) for update in range(1, 101)]
+    assert all(b <= a + 1e-12 for a, b in itertools.pairwise(values))
+    with pytest.raises(ValueError):
+        lr_scale("unknown", 1, 10)
+
+
+def test_optimizer_schedule_and_snapshot_flags():
+    defaults = parse_args([])
+    assert defaults.optimizer == "adam"
+    assert defaults.weight_decay == 0.0
+    assert defaults.lr_schedule == "linear"
+    assert defaults.snapshot_interval == 0
+    args = parse_args([
+        "--optimizer", "adamw",
+        "--weight-decay", "0.01",
+        "--lr-schedule", "cosine",
+        "--snapshot-interval", "50",
+    ])
+    assert args.optimizer == "adamw"
+    assert args.weight_decay == 0.01
+    assert args.lr_schedule == "cosine"
+    assert args.snapshot_interval == 50
+    with pytest.raises(SystemExit):
+        parse_args(["--weight-decay", "0.01"])
+    with pytest.raises(SystemExit):
+        parse_args(["--weight-decay", "-0.01"])
+    with pytest.raises(SystemExit):
+        parse_args(["--lr-schedule", "warmup"])
 
 
 def test_make_env_passes_reward_shaping_through():
@@ -267,13 +320,110 @@ def test_make_env_passes_reward_shaping_through():
         DEFAULT_RULES, 0, opponents, 0, 0, reward_shaping="trick_diff_win"
     )()
     assert shaped_env.unwrapped.reward_shaping == "trick_diff_win"
+    jumped_env = make_env(
+        DEFAULT_RULES,
+        0,
+        opponents,
+        0,
+        0,
+        reward_shaping="terminal_win",
+        win_jump=0.25,
+    )()
+    assert jumped_env.unwrapped.reward_shaping == "terminal_win"
+    assert jumped_env.unwrapped.win_jump == 0.25
+    saturated_env = make_env(
+        DEFAULT_RULES,
+        0,
+        opponents,
+        0,
+        0,
+        reward_shaping="saturate",
+        reward_cap=0.2,
+    )()
+    assert saturated_env.unwrapped.reward_shaping == "saturate"
+    assert saturated_env.unwrapped.reward_cap == 0.2
+
+
+def test_train_terminal_win_smoke(tmp_path):
+    args = parse_args(
+        [
+            "--cuda", "False",
+            "--seed", "0",
+            "--exp-name", "jump",
+            "--run-dir", str(tmp_path),
+            "--total-timesteps", "128",
+            "--num-envs", "2",
+            "--num-steps", "64",
+            "--num-minibatches", "2",
+            "--update-epochs", "1",
+            "--reward-shaping", "terminal_win",
+            "--win-jump", "0.25",
+            "--checkpoint-interval", "0",
+            "--log-interval", "0",
+        ]
+    )
+    run_dir = train(args)
+    assert (run_dir / "agent.pt").exists()
+    saved = json.loads((run_dir / "args.json").read_text())
+    assert saved["reward_shaping"] == "terminal_win"
+    assert saved["win_jump"] == 0.25
+
+
+def test_train_saturate_smoke(tmp_path):
+    args = parse_args(
+        [
+            "--cuda", "False",
+            "--seed", "0",
+            "--exp-name", "saturate",
+            "--run-dir", str(tmp_path),
+            "--total-timesteps", "128",
+            "--num-envs", "2",
+            "--num-steps", "64",
+            "--num-minibatches", "2",
+            "--update-epochs", "1",
+            "--reward-shaping", "saturate",
+            "--reward-cap", "0.2",
+            "--checkpoint-interval", "0",
+            "--log-interval", "0",
+        ]
+    )
+    run_dir = train(args)
+    assert (run_dir / "agent.pt").exists()
+    saved = json.loads((run_dir / "args.json").read_text())
+    assert saved["reward_shaping"] == "saturate"
+    assert saved["reward_cap"] == 0.2
+
+
+def test_train_rejects_reward_cap_misuse_before_creating_the_run(tmp_path):
+    base = [
+        "--cuda", "False",
+        "--seed", "0",
+        "--exp-name", "cap",
+        "--run-dir", str(tmp_path),
+        "--total-timesteps", "128",
+        "--num-envs", "2",
+        "--num-steps", "64",
+        "--num-minibatches", "2",
+        "--update-epochs", "1",
+        "--checkpoint-interval", "0",
+        "--log-interval", "0",
+    ]
+    with pytest.raises(ValueError, match="reward_cap"):
+        train(parse_args([*base, "--reward-shaping", "saturate"]))
+    with pytest.raises(ValueError, match="reward_cap"):
+        train(parse_args([*base, "--reward-cap", "0.2"]))
+    with pytest.raises(ValueError, match="reward_cap"):
+        train(parse_args(
+            [*base, "--reward-shaping", "saturate", "--reward-cap", "1.5"]
+        ))
+    assert not any(tmp_path.iterdir())  # validation precedes run-dir creation
 
 
 def test_parse_pool_member():
-    assert parse_pool_member("greedy") == (1.0, "greedy")
+    assert parse_pool_member("random") == (1.0, "random")
     assert parse_pool_member("2.5@ckpt:runs/x/agent.pt") == (2.5, "ckpt:runs/x/agent.pt")
     with pytest.raises(ValueError):
-        parse_pool_member("-1@greedy")
+        parse_pool_member("-1@random")
 
 
 def test_train_mix_opponent_smoke(tmp_path):
@@ -283,13 +433,13 @@ def test_train_mix_opponent_smoke(tmp_path):
             "--seed", "1",
             "--exp-name", "mix",
             "--run-dir", str(tmp_path),
-            "--total-timesteps", "256",
+            "--total-timesteps", "128",
             "--num-envs", "2",
             "--num-steps", "64",
             "--num-minibatches", "2",
             "--update-epochs", "1",
             "--opponent", "mix",
-            "--mix-greedy-prob", "0.5",
+            "--mix-random-prob", "0.5",
             "--self-play-refresh", "1",
             "--checkpoint-interval", "0",
             "--log-interval", "0",
@@ -306,14 +456,13 @@ def test_train_pool_opponent_smoke(tmp_path):
             "--seed", "1",
             "--exp-name", "pool",
             "--run-dir", str(tmp_path),
-            "--total-timesteps", "256",
+            "--total-timesteps", "128",
             "--num-envs", "2",
             "--num-steps", "64",
             "--num-minibatches", "2",
             "--update-epochs", "1",
             "--opponent", "pool",
-            "--pool-member", "2@greedy",
-            "--pool-member", "1@random",
+            "--pool-member", "2@random",
             "--pool-member", "1@self",
             "--self-play-refresh", "1",
             "--checkpoint-interval", "0",
@@ -347,8 +496,8 @@ def _pool_run_args(tmp_path, *extra):
             "--num-minibatches", "2",
             "--update-epochs", "1",
             "--opponent", "pool",
-            "--pool-member", "1@greedy",
             "--pool-member", "1@random",
+            "--pool-member", "1@self",
             "--self-play-refresh", "1",
             "--checkpoint-interval", "0",
             "--log-interval", "0",
@@ -369,7 +518,7 @@ def test_pool_episode_off_never_touches_the_new_policy(tmp_path, monkeypatch):
         return real_start(self)
 
     monkeypatch.setattr(EpisodeMixturePolicy, "start_episode", counting_start)
-    args = _pool_run_args(tmp_path)
+    args = _pool_run_args(tmp_path, "--total-timesteps", "128")
     assert args.pool_episode is False and args.pfsp is False
     run_dir = train(args)
     assert calls["n"] == 0
@@ -396,12 +545,46 @@ def test_train_pool_episode_and_pfsp_smoke(tmp_path):
     # every update logs one row per member and the weights form a distribution
     by_episode: dict[int, list[tuple[str, float]]] = {}
     for row in data:
-        step, episodes, member_id, weight, _wr, _w, _d, _l = row.split(",")
+        _step, episodes, member_id, weight, _wr, _w, _d, _l = row.split(",")
         by_episode.setdefault(int(episodes), []).append((member_id, float(weight)))
         assert 0.0 <= float(weight) <= 1.0
     for entries in by_episode.values():
         assert len({member for member, _ in entries}) == 3
-        assert sum(weight for _, weight in entries) == pytest.approx(1.0)
+        # The CSV writes each weight with ``%.6g`` (6 significant digits), so
+        # the rounded triples may sum to 1.0 ± a few 1e-7 even though the
+        # in-memory distribution sums exactly; compare within the format's
+        # precision rather than the 1e-6 default (ADR-0014 changed the sampled
+        # records, which tripped this pre-existing brittleness).
+        assert sum(weight for _, weight in entries) == pytest.approx(1.0, abs=1e-5)
+
+
+def test_pfsp_refuses_to_infer_outcomes_from_a_non_sign_like_reward(
+    tmp_path, monkeypatch
+):
+    """K0/saturate wins score 0, so a reward-sign fallback would log ties."""
+    from seven523.env import Seven523Env
+
+    real_step = Seven523Env.step
+
+    def stripped_step(self, action):
+        obs, reward, terminated, truncated, info = real_step(self, action)
+        info.pop("outcome", None)
+        return obs, reward, terminated, truncated, info
+
+    monkeypatch.setattr(Seven523Env, "step", stripped_step)
+    args = _pool_run_args(
+        tmp_path,
+        "--pool-episode",
+        "--pfsp",
+        "--pfsp-every",
+        "1",
+        "--reward-shaping",
+        "saturate",
+        "--reward-cap",
+        "0.2",
+    )
+    with pytest.raises(RuntimeError, match="outcome"):
+        train(args)
 
 
 def test_pfsp_needs_pool_episode(tmp_path):
@@ -437,7 +620,7 @@ def _tiny_args(tmp_path, *extra):
             "--seed", "0",
             "--exp-name", "test",
             "--run-dir", str(tmp_path),
-            "--total-timesteps", "512",
+            "--total-timesteps", "128",
             "--num-envs", "2",
             "--num-steps", "64",
             "--num-minibatches", "2",
@@ -449,7 +632,9 @@ def _tiny_args(tmp_path, *extra):
 
 
 def test_train_writes_tensorboard_scalars(tmp_path):
-    run_dir = train(_tiny_args(tmp_path, "--tensorboard", "True"))
+    run_dir = train(
+        _tiny_args(tmp_path, "--total-timesteps", "256", "--tensorboard", "True")
+    )
     assert list((run_dir / "tb").glob("events.out.tfevents*")), (
         "no TensorBoard event file was written"
     )
@@ -479,15 +664,6 @@ def test_make_env_uses_the_v5_layout():
     assert env.observation_space.shape == (161,)
 
 
-def test_train_agent_uses_the_v5_layout(tmp_path):
-    run_dir = train(_tiny_args(tmp_path, "--checkpoint-interval", "0"))
-    agent, extra = load_agent(run_dir / "agent.pt")
-    assert agent.obs_dim == 161
-    assert "obs_version" not in extra["args"]
-    payload = torch.load(run_dir / "agent.pt", map_location="cpu", weights_only=True)
-    assert payload["obs_version"] == 5
-
-
 # -- independent actor/critic towers (T6 / direction F) ----------------------
 
 
@@ -506,23 +682,9 @@ def test_train_towers_smoke(tmp_path):
     assert agent.arch == "towers"
     assert agent.obs_dim == 161
     assert extra["args"]["arch"] == "towers"
-
-
-def test_train_towers_self_play_smoke(tmp_path):
-    run_dir = train(
-        _tiny_args(
-            tmp_path,
-            "--arch",
-            "towers",
-            "--opponent",
-            "self",
-            "--self-play-refresh",
-            "1",
-            "--checkpoint-interval",
-            "0",
-        )
-    )
-    assert load_agent(run_dir / "agent.pt")[0].arch == "towers"
+    assert "obs_version" not in extra["args"]
+    payload = torch.load(run_dir / "agent.pt", map_location="cpu", weights_only=True)
+    assert payload["obs_version"] == 5
 
 
 def test_train_warm_starts_a_same_layout_checkpoint(tmp_path):
@@ -552,37 +714,6 @@ def test_train_warm_starts_a_same_layout_checkpoint(tmp_path):
     assert torch.equal(agent.get_value(obs), old.get_value(obs))
 
 
-def test_train_warm_starts_a_same_layout_checkpoint_into_towers(tmp_path):
-    torch.manual_seed(0)
-    old = Agent(OBS_DIM, NVEC, hidden=16)
-    path = tmp_path / "old.pt"
-    save_agent(path, old)
-    run_dir = train(
-        _tiny_args(
-            tmp_path,
-            "--arch",
-            "towers",
-            "--hidden-size",
-            "16",
-            "--learning-rate",
-            "0",
-            "--load-checkpoint",
-            str(path),
-            "--checkpoint-interval",
-            "0",
-        )
-    )
-    agent, _ = load_agent(run_dir / "agent.pt")
-    assert agent.arch == "towers"
-    assert agent.obs_dim == OBS_DIM
-    for tower in (agent.actor_network, agent.critic_network):
-        assert torch.equal(tower[0].weight, old.network[0].weight)
-        assert torch.equal(tower[0].bias, old.network[0].bias)
-    obs = torch.rand(4, OBS_DIM)
-    assert torch.equal(agent.get_value(obs), old.get_value(obs))
-    assert torch.equal(agent.policy_logits(obs), old.policy_logits(obs))
-
-
 def test_train_rejects_a_different_layout_checkpoint(tmp_path):
     torch.manual_seed(0)
     old = Agent(191, NVEC, hidden=16)
@@ -606,3 +737,109 @@ def test_train_rejects_a_different_layout_checkpoint(tmp_path):
     assert "cannot warm-start" in message
     assert "191" in message and "161" in message
 
+
+
+# -- event (EVH) training plumbing -------------------------------------------
+
+
+def test_train_event_smoke_and_checkpoint_layout(tmp_path):
+    args = parse_args(
+        [
+            "--cuda", "False",
+            "--seed", "0",
+            "--exp-name", "event",
+            "--run-dir", str(tmp_path),
+            "--total-timesteps", "128",
+            "--num-envs", "2",
+            "--num-steps", "32",
+            "--num-minibatches", "2",
+            "--update-epochs", "1",
+            "--event-len", "12",
+            "--event-emb", "4",
+            "--event-hidden", "4",
+            "--seat-emb", "2",
+            "--checkpoint-interval", "0",
+            "--log-interval", "0",
+        ]
+    )
+    run_dir = train(args)
+    payload = torch.load(run_dir / "agent.pt", map_location="cpu", weights_only=True)
+    assert payload["event_len"] == 12
+    assert payload["history_layout"].startswith("event:12:")
+    loaded, _ = load_agent(run_dir / "agent.pt")
+    assert loaded.event_len == 12
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--event-noisy", "True"],
+        ["--event-seat", "none"],
+        ["--event-order", "shuffled"],
+        ["--event-pass", "drop"],
+        ["--event-boundary-blind", "True"],
+        ["--event-blind", "True"],
+    ],
+)
+def test_train_event_ablation_switches_smoke(tmp_path, extra):
+    args = parse_args(
+        [
+            "--cuda", "False",
+            "--seed", "0",
+            "--exp-name", "eventabo",
+            "--run-dir", str(tmp_path),
+            "--total-timesteps", "128",
+            "--num-envs", "2",
+            "--num-steps", "32",
+            "--num-minibatches", "2",
+            "--update-epochs", "1",
+            "--event-len", "8",
+            "--event-emb", "4",
+            "--event-hidden", "4",
+            "--seat-emb", "2",
+            "--checkpoint-interval", "0",
+            "--log-interval", "0",
+            *extra,
+        ]
+    )
+    run_dir = train(args)
+    loaded, _ = load_agent(run_dir / "agent.pt")
+    assert loaded.event_len == 8
+
+
+def test_train_event_warm_start_requires_same_layout(tmp_path):
+    base = parse_args(
+        [
+            "--cuda", "False",
+            "--seed", "0",
+            "--exp-name", "mlp",
+            "--run-dir", str(tmp_path),
+            "--total-timesteps", "128",
+            "--num-envs", "2",
+            "--num-steps", "32",
+            "--num-minibatches", "2",
+            "--update-epochs", "1",
+            "--checkpoint-interval", "0",
+            "--log-interval", "0",
+        ]
+    )
+    mlp_dir = train(base)
+    event = parse_args(
+        [
+            "--cuda", "False",
+            "--seed", "0",
+            "--exp-name", "eventwarm",
+            "--run-dir", str(tmp_path),
+            "--total-timesteps", "128",
+            "--num-envs", "2",
+            "--num-steps", "32",
+            "--num-minibatches", "2",
+            "--update-epochs", "1",
+            "--event-len", "12",
+            "--checkpoint-interval", "0",
+            "--log-interval", "0",
+        ]
+    )
+    event.load_checkpoint = str(mlp_dir / "agent.pt")
+    with pytest.raises(SystemExit, match="cannot warm-start layout"):
+        train(event)

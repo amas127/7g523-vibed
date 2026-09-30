@@ -15,10 +15,10 @@ through :func:`seven523.play.play_game` (the same recorder as
 :func:`seven523.play.replay_trace` (the same integrity path as ``--replay``),
 so a study trace and a human trace are the same artifact.
 
-M1 smoke test (random subject first, then the plan's Random+Greedy pair):
+M1 smoke test (random subject, the pinned gauge):
 
     uv run python tools/measure_trace_signal.py run \\
-        --subject random --subject greedy --games 200 \\
+        --subject random --games 200 \\
         --study traces/study --artifacts artifacts/trace-signal
 
 The three stages can also be run separately with ``generate`` / ``features`` /
@@ -38,9 +38,10 @@ import json
 import math
 import random
 import sys
+from collections.abc import Iterable, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any
 
 import numpy as np
 
@@ -55,7 +56,7 @@ from seven523.prior import (
     trace_paths,
 )
 from seven523.record import play_recorded, policy_seed
-from seven523.rules import Rules
+from seven523.rules import Rules, rules_id, rules_identity
 from seven523.study import load_manifest, merge_manifest, save_manifest
 from seven523.trace import load_trace, parse_player_label, player_label
 
@@ -69,9 +70,10 @@ __all__ = [
     "main",
 ]
 
-#: Anchor ratings from ``docs/human-elo-plan.md`` §3.1 (window-MAP of scripted
-#: bots; re-derive once the M2 ladder exists and record it in the manifest).
-DEFAULT_LEVEL_ELO: dict[str, float] = {"random": 1000.0, "greedy": 1315.0}
+#: Anchor rating (the RandomBot gauge defines 0; ADR-0012).  The old
+#: ``human-elo-plan`` §3.1 window-MAP numbers (random=1000 / greedy=1315) are
+#: retired with the GreedyBot; re-derive labels once the M2 ladder is re-measured.
+DEFAULT_LEVEL_ELO: dict[str, float] = {"random": 0.0}
 
 Z95 = 1.959963984540054
 
@@ -178,7 +180,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
     subjects = [
         _parse_subject(item, levels) for item in (expand(args.subject) or ["random"])
     ]
-    anchors = expand(args.anchor) or ["random", "greedy"]
+    anchors = expand(args.anchor) or ["random"]
     for anchor in anchors:
         if anchor not in levels:
             raise SystemExit(
@@ -237,11 +239,13 @@ def cmd_generate(args: argparse.Namespace) -> int:
             {
                 "id": subject_id,
                 "spec": subject_spec,
-                "elo": levels[subject_id],
+                "mu": levels[subject_id],
             }
             for subject_id, subject_spec in subjects
         ],
-        anchors=[{"id": anchor, "elo": levels[anchor]} for anchor in anchors],
+        anchors=[{"id": anchor, "mu": levels[anchor]} for anchor in anchors],
+        rules=rules_identity(rules),
+        rules_id=rules_id(rules),
     )
     document.update(
         {
@@ -647,13 +651,13 @@ def _add_study_flags(parser: argparse.ArgumentParser) -> None:
         "--subject",
         action="append",
         default=None,
-        help="random | greedy | id=ckpt:<agent.pt> (repeat or comma-separate)",
+        help="random | id=ckpt:<agent.pt> (repeat or comma-separate)",
     )
     parser.add_argument(
         "--anchor",
         action="append",
         default=None,
-        help="opponent levels, default random,greedy (repeat or comma-separate)",
+        help="opponent levels, default random (repeat or comma-separate)",
     )
     parser.add_argument("--level", action="append", default=[], help="NAME=ELO override")
     parser.add_argument("--no-verify", dest="verify", action="store_false", default=True)

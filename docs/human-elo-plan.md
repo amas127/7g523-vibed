@@ -1,10 +1,28 @@
 # 真人 Elo 快速定级实验计划（轨迹信号）
 
-> **状态横幅（2026-09-25 架构清理）**：本文是历史计划，部分已被取代——M2/M3 已交付为
-> [`seven523/placement/`](../src/seven523/placement/) 包与 `7g523-elo` CLI（细节见
-> [`experiments/placement-m2m3.md`](./experiments/placement-m2m3.md)），实验报告集中在
-> [`docs/experiments/`](./experiments/)，仍未完成的 M4 真人试点（等 D-3 招募）由
+> **状态横幅（2026-09-25 架构清理 + OpenSkill 切换）**：本文是历史计划，部分已被取代——
+> M2/M3 已交付为 [`seven523/placement/`](../src/seven523/placement/) 包与 `7g523-elo` CLI
+> （细节见 [`experiments/placement-m2m3.md`](./experiments/placement-m2m3.md)），实验报告
+> 集中在 [`docs/experiments/`](./experiments/)，仍未完成的 M4 真人试点（等 D-3 招募）由
 > [`plans.md`](./plans.md) §3 T13/§4 D-3 跟踪。本文保留作计划与背景记录，不再逐条更新。
+>
+> **估计器与基准已被取代（2026-09-25，[ADR-0011](./adr/0011-openskill-rating-core.md) /
+> [ADR-0012](./adr/0012-single-gauge-and-greedy-removal.md)）**：
+> 结果似然从手写 Bradley–Terry MAP（阻尼牛顿、窗口、分差似然、Hessian SE）换成了标准
+> OpenSkill Plackett–Luce 高斯模型；GreedyBot 策略与 `greedy=1315` 预设锚点已从仓库
+> 退役，唯一基准是 RandomBot（锚 0，坐标整体 −1000）。本文（尤其 §3、§5 估计器规格）
+> 里的 BT-MAP、`FitConfig(margin=…)`、`window=None`、联合 Hessian SE、Random/Greedy
+> 锚点与全部以旧 `elo/se` 标定的 RMSE/CI/σ 数字都不再是当前实现；T15 重标定已完成
+> （2026-09-26）：manifest 契约值与 T2 标签已改用 homoscedastic probit-MLE 绝对表
+> （`tools/refit_mle.py --manifest-out --refit`，ADR-0013），`prior.json` 已重标。
+> **T17（2026-09-26，出空即撬底 revision 3）已把上述全部资产再重产一遍**，
+> **2026-09-27 的 w2m/T23 重排又把当前池扩为 10 个 raw 级**（`ws_s2`/`pself_s2`/三条 w2m 臂
+> + `lvl1`–`lvl4`，18,000 局共享 probit-MLE；rungs 仍为 `lvl1`/`lvl4`），**2026-09-29
+> `search_leafq` 搜索 rung 并入同一发布表后定级池为 11 级**（见 [`human-play.md`](./human-play.md)
+> §3/§6）：当前池与 T2 标签以 `runs/w2m/calibration/report.md`（发布记录 §8.1）为准，当前先验（v2/R1，sha256
+> `15fddff1…`）以 [`experiments/prior-opponent-correction.md`](./experiments/prior-opponent-correction.md)
+> 与 [`experiments/prior-v2-confirmation.md`](./experiments/prior-v2-confirmation.md) 为准；
+> T17 与 T15 的历史数字（T15 含 sha256 `35f7227b…`）只作历史，禁止混比。
 
 > 探索原型（一次性，未提交）：`elo_prototype.html`（评分规则）、
 > `elo_calibration_prototype.html`（真人定级流程）、
@@ -12,7 +30,7 @@
 > 2026-09-25 架构清理中删除。
 > 本文件只写计划；实验报告另见 `docs/experiments/`（已建）。
 >
-> **规则口径（2026-09-25）**：非炸弹比较已改为牌型族（[ADR-0007](./adr/0007-family-comparison.md)）。本文引用的 `traces/study` T2 标签、`prior.json` 与全部 RMSE/Elo 数字均为旧 `tier` 口径产物；在 [plans.md](./plans.md) T15 重标定完成前，不得与新规则结果混比，也不得直接用于新规则下的定级。
+> **规则口径（2026-09-27 更新）**：非炸弹比较已改为牌型族（[ADR-0007](./adr/0007-family-comparison.md)），随后出空即撬底（[ADR-0014](./adr/0014-on-empty-digs.md)）把规则推进到 revision 3（`rules_id=2e36dbea44893696`）。T15（revision 2）、T17（revision 3）与 2026-09-27 的 w2m/T23 重排均已重产新 `traces/study`、新 manifest、新 T2 标签与 `prior.json`；**当前池/标签以 `runs/w2m/calibration/report.md`（发布记录 §8.1）为准**，**当前先验 v2/R1 以 [`experiments/prior-opponent-correction.md`](./experiments/prior-opponent-correction.md) + [`experiments/prior-v2-confirmation.md`](./experiments/prior-v2-confirmation.md) 为准**，T17 的 [`experiments/t17-recalibration.md`](./experiments/t17-recalibration.md) 与 T15 报告只作历史（manifest 契约值由 homoscedastic probit-MLE 绝对表（ADR-0013）发布）。本文正文引用的旧 `traces/study` T2 标签、旧 `prior.json` 与全部 RMSE/Elo 数字仍为旧 `tier`/旧 BT-MAP 口径产物，只作历史对照，不得与新规则结果混比，也不得直接用于新规则下的定级。
 
 ## 修订（2026-09-25）：10 局定级结论与改动计划（先读）
 

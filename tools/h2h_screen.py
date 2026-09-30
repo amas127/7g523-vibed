@@ -8,7 +8,7 @@
                candidate_c=ckpt:runs/<new-run-c>/agent.pt \
         --seeds 0,1,2 --pairs 200 --bootstrap 1000
 
-Every ``--pair`` is a ``[ID=]SPEC`` duo (``random`` / ``greedy`` / ``ckpt:``),
+Every ``--pair`` is a ``[ID=]SPEC`` duo (``random`` / ``ckpt:``),
 played with the seat-balanced duel of ``tools/head_to_head.py`` on each seed;
 the readings are merged under the wave5 §4.2 rule
 (``seven523.duel.combine_duel_seeds``).  The default screening is 3 seeds x 200
@@ -28,6 +28,7 @@ if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
 import head_to_head as h2h  # noqa: E402
+
 from seven523.elo import DEFAULT_ELO_SCALE as ELO_SCALE  # noqa: E402
 from seven523.ladder import Entrant  # noqa: E402
 

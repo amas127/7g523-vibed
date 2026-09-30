@@ -59,6 +59,14 @@ class RolloutBatch:
     returns: torch.Tensor
     values: torch.Tensor
     action_masks: torch.Tensor
+    #: D1-lite history tokens ``(batch, length)``; ``None`` on the MLP path.
+    seqs: torch.Tensor | None = None
+    #: EVH event tensors ``(batch, event_length, EVENT_DIM)`` float32, relative
+    #: seats ``(batch, event_length)`` int64 and mask ``(batch, event_length)``
+    #: bool; all ``None`` on the non-event paths and always set/absent together.
+    events: torch.Tensor | None = None
+    event_seats: torch.Tensor | None = None
+    event_mask: torch.Tensor | None = None
 
     @property
     def size(self) -> int:
@@ -74,6 +82,10 @@ class RolloutBatch:
         returns: torch.Tensor,
         values: torch.Tensor,
         action_masks: torch.Tensor,
+        seqs: torch.Tensor | None = None,
+        events: torch.Tensor | None = None,
+        event_seats: torch.Tensor | None = None,
+        event_mask: torch.Tensor | None = None,
     ) -> "RolloutBatch":
         """Collapse the ``(steps, envs, ...)`` storage into flat batches."""
         return cls(
@@ -84,6 +96,24 @@ class RolloutBatch:
             returns=returns.reshape(-1),
             values=values.reshape(-1),
             action_masks=action_masks.reshape((-1, action_masks.shape[-1])),
+            seqs=(
+                None if seqs is None else seqs.reshape((-1, seqs.shape[-1]))
+            ),
+            events=(
+                None
+                if events is None
+                else events.reshape((-1, events.shape[-2], events.shape[-1]))
+            ),
+            event_seats=(
+                None
+                if event_seats is None
+                else event_seats.reshape((-1, event_seats.shape[-1]))
+            ),
+            event_mask=(
+                None
+                if event_mask is None
+                else event_mask.reshape((-1, event_mask.shape[-1]))
+            ),
         )
 
 
@@ -155,6 +185,16 @@ def ppo_update(
                 batch.obs[mb_inds],
                 batch.action_masks[mb_inds],
                 batch.actions.long()[mb_inds].T,
+                seqs=None if batch.seqs is None else batch.seqs[mb_inds],
+                events=None if batch.events is None else batch.events[mb_inds],
+                event_seats=(
+                    None
+                    if batch.event_seats is None
+                    else batch.event_seats[mb_inds]
+                ),
+                event_mask=(
+                    None if batch.event_mask is None else batch.event_mask[mb_inds]
+                ),
             )
             logratio = newlogprob - batch.logprobs[mb_inds]
             ratio = logratio.exp()

@@ -24,9 +24,10 @@ import hashlib
 import json
 import math
 import sys
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 import numpy as np
 
@@ -47,6 +48,9 @@ __all__ = [
     "DEFAULT_REPS",
     "DEFAULT_SCHEME",
     "DEFAULT_SEED",
+    "EXPANSIONS",
+    "EXPANSION_LINEAR",
+    "EXPANSION_QUADRATIC_PAIRWISE",
     "INTERACTION_FEATURE",
     "MAX_SESSION",
     "MODEL_FEATURES",
@@ -55,6 +59,7 @@ __all__ = [
     "SINGLE_GAME_SE",
     "T2_LABELS",
     "VERSION",
+    "VERSION_QUADRATIC",
     "TracePrior",
     "build_prior",
     "data_fingerprint",
@@ -91,6 +96,20 @@ BOMB_KINDS: frozenset[ComboKind] = frozenset(
 SCHEMA = "seven523.trace-prior"
 VERSION = 1
 
+#: Design expansions for :func:`design_matrix`.  ``linear`` is the shipped v1
+#: design (features + anchor + ``trick_win_rate``×anchor, 17 columns);
+#: ``quadratic_pairwise`` is the optional v2 research design (R1):
+#: ``[φ, a, a², φ·a, φ², φ_i·φ_j (i<j)]``, 152 columns.  The column order is an
+#: artifact contract shared by the fit and :func:`predict_elo` — never move it.
+EXPANSION_LINEAR = "linear"
+EXPANSION_QUADRATIC_PAIRWISE = "quadratic_pairwise"
+EXPANSIONS = (EXPANSION_LINEAR, EXPANSION_QUADRATIC_PAIRWISE)
+
+#: ``version`` written into v2 (quadratic expansion) artifacts; v1 artifacts
+#: keep :data:`VERSION`.  :func:`load_prior` and :class:`TracePrior` validate
+#: only ``schema``, so both generations stay readable.
+VERSION_QUADRATIC = 2
+
 #: The study's ``CLEAN + PACE`` S1 feature set, matching the research pipeline
 #: (``runs/human_elo_10g/calibrate.py``; HR §5.2 "12–17 维").
 CLEAN_FEATURES: tuple[str, ...] = (
@@ -112,12 +131,18 @@ PACE_FEATURES: tuple[str, ...] = ("decisions_per_trick", "tricks_total")
 MODEL_FEATURES: tuple[str, ...] = CLEAN_FEATURES + PACE_FEATURES
 
 #: HR §5.2 requires the opponent strength plus the ``trick_win_rate``
-#: interaction so a rung change is not read as a skill change.  The fixed
-#: center/scale are the research design constants (``calibrate.py``); only the
+#: interaction so a rung change is not read as a skill change.  The scale is
+#: still the research design constant (``calibrate.py``); the center was
+#: rescaled in T17 by ``c = 0.4656209850248892`` (the least-squares-through-the-
+#: origin factor of the new MLE labels against the retired online-PL reference,
+#: same rule as the other placement constants): 230.0 -> 107.09282655572451.
+#: The 2026-09-27 w2m/T23 rerating is on the same homoscedastic probit-MLE
+#: gauge (same beta, same RandomBot gauge), so the center is unchanged: a new
+#: ``c`` against the retired online-PL reference is not applicable.  Only the
 #: interaction's centering is not absorbed by the ridge standardization.
 ANCHOR_FEATURE = "opponent_elo_ref"
 INTERACTION_FEATURE = "trick_win_rate"
-ANCHOR_CENTER = 1230.0
+ANCHOR_CENTER = 107.09282655572451
 ANCHOR_SCALE = 300.0
 
 #: HR §5.2 recommends ``α ≈ 30``; the session table is built for n=1..20 so
@@ -129,21 +154,46 @@ DEFAULT_REPS = 400
 DEFAULT_SEED = 0
 MAX_SESSION = 20
 
-#: Cold start (n=0): the research's first-game prior (HR §5.4).
-COLD_START_PRIOR: dict[str, float] = {"mean": 1500.0, "sd": 300.0}
+#: Cold start (n=0): the research's first-game prior (HR §5.4), translated
+#: by -1000 to the RandomBot-0 gauge (ADR-0012) and then scaled to the
+#: published MLE label scale by ``c = 0.4656209850248892`` (T15 §7 deferral,
+#: applied in T17): (500.0, 300.0) -> (232.8104925124446, 139.68629550746675).
+COLD_START_PRIOR: dict[str, float] = {
+    "mean": 232.8104925124446,
+    "sd": 139.68629550746675,
+}
 
-#: HR §1 T2 targets: full-data estimates of each study level under the shipped
-#: estimator (anchors pinned random=1000/greedy=1315, margin=(0.143, 44.5),
-#: neutral prior).  The default calibration target per C-6/T13; re-derived from
-#: ``traces/study`` and matching HR §1 to 0.1 Elo.  ``--level NAME=ELO``
-#: refreshes them for a different study.
+#: HR §1 T2 targets: the label table the shipped prior artifact is calibrated
+#: against (``data.labels``).  These are the 2026-09-27 w2m/T23 rerating
+#: (rules revision 3): one shared homoscedastic probit-MLE absolute table over
+#: the 18,000-game, 10-level pool — the T23 champion ``ws_s2``, the three w2m
+#: 2M-continuation arms, the second reference ``pself_s2`` and the T17
+#: ``lvl1``-``lvl4`` — published by ``tools/refit_mle.py`` (ADR-0013
+#: decision 3).  They supersede the T17 values (lvl1-lvl4 =
+#: 82.75/106.90/147.71/185.34) and must not be mixed with them or with the
+#: retired Bradley-Terry MAP / T15 revision-2 / online-Plackett-Luce numbers:
+#: a probit-MLE table is only comparable within its own fit.
+#:
+#: 2026-09-29: the ``search_leafq`` publication re-fit the raw ladder in the
+#: same joint MLE over 26,000 games (ADR-0013), so the manifest
+#: (``traces/study/manifest.json`` = ``traces/pool10/manifest.json``) now
+#: carries an 11th level and raw values shifted by <=8.2 (e.g. ``w2m_ctl``
+#: 191.49 -> 187.46); the rungs stay ``lvl1``/``lvl4`` (``--keep-rungs``).
+#: T2 stays frozen at the shipped prior's calibration table until the prior
+#: is re-fitted against an extended corpus that can also cover the search
+#: rung (search-config-plan.md §4.3/§5); sessions that schedule ``search_leafq``
+#: force the trace channel off, so μ≈260 is never extrapolated.
 T2_LABELS: dict[str, float] = {
-    "random": 1026.9,
-    "greedy": 1314.4,
-    "lvl1": 1128.6,
-    "lvl2": 1232.1,
-    "lvl3": 1356.1,
-    "lvl4": 1447.8,
+    "random": 0.0,
+    "lvl1": 84.68039955139497,
+    "lvl2": 113.59840294812228,
+    "lvl3": 134.39575022531008,
+    "lvl4": 187.7188102655843,
+    "pself_s2": 187.27092280701837,
+    "w2m_ctl": 191.49039136761593,
+    "w2m_low": 190.02147844096504,
+    "w2m_plain": 190.2826214288363,
+    "ws_s2": 185.96380656765228,
 }
 
 
@@ -407,17 +457,40 @@ def data_fingerprint(
 
 
 def ridge_fit(
-    x: np.ndarray, y: np.ndarray, alpha: float
+    x: np.ndarray,
+    y: np.ndarray,
+    alpha: float,
+    *,
+    cells: Sequence[Any] | np.ndarray | None = None,
+    cell_penalty: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
-    """Standardize ``x`` and solve the ridge normal equations for ``y``."""
+    """Standardize ``x`` and solve the ridge normal equations for ``y``.
+
+    ``cells`` (fit-time only) plus ``cell_penalty`` add the research's cell
+    calibration penalty ``λ · Σ_cells n_c · (mean residual in cell)²`` on top
+    of the plain ridge through one augmented least-squares row per cell.
+    ``cell_penalty=0.0`` (the default) is exactly the v1 solve, bit for bit.
+    The cell ids never reach :func:`predict_elo`: a prediction only sees the
+    row's own features and opponent Elo.
+    """
+    if cell_penalty < 0.0:
+        raise ValueError(f"cell_penalty must be non-negative, got {cell_penalty}")
+    if cell_penalty and cells is None:
+        raise ValueError("cell_penalty requires one cell id per row")
     mean = x.mean(axis=0)
     scale = x.std(axis=0)
     scale = np.where(scale < 1e-12, 1.0, scale)
     z = (x - mean) / scale
     center = float(y.mean())
-    weights = np.linalg.solve(
-        z.T @ z + alpha * np.eye(x.shape[1]), z.T @ (y - center)
-    )
+    lhs = z.T @ z + alpha * np.eye(x.shape[1])
+    rhs = z.T @ (y - center)
+    if cells is not None and cell_penalty:
+        augmented_z, augmented_r = _cell_penalty_rows(
+            z, y - center, cells, cell_penalty
+        )
+        lhs += augmented_z.T @ augmented_z
+        rhs += augmented_z.T @ augmented_r
+    weights = np.linalg.solve(lhs, rhs)
     return mean, scale, weights, center
 
 
@@ -426,6 +499,27 @@ def ridge_predict(
 ) -> np.ndarray:
     mean, scale, weights, center = model
     return ((x - mean) / scale) @ weights + center
+
+
+def _cell_penalty_rows(
+    z: np.ndarray, residual: np.ndarray, cells: Any, cell_penalty: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """Augmented least-squares rows for ``λ·n_c·(cell mean residual)²``.
+
+    One row per cell: ``√(λ·n_c)·(cell mean of z, cell mean of the residual)``.
+    Its contribution to the normal equations is exactly the penalty's Hessian
+    and gradient, so no separate optimizer is needed.  ``cells`` is a 1-D
+    sequence of hashable ids, one per row, aligned with ``z``.
+    """
+    ids = np.asarray(cells)
+    blocks = []
+    targets = []
+    for cell in np.unique(ids):
+        mask = ids == cell
+        weight = math.sqrt(cell_penalty * int(mask.sum()))
+        blocks.append(weight * z[mask].mean(axis=0))
+        targets.append(weight * float(residual[mask].mean()))
+    return np.vstack(blocks), np.asarray(targets)
 
 
 def fill_values(
@@ -447,25 +541,67 @@ def fill_values(
 
 
 def design_matrix(
-    rows: Sequence[Mapping[str, Any]], fill: Mapping[str, float]
+    rows: Sequence[Mapping[str, Any]],
+    fill: Mapping[str, float],
+    *,
+    expansion: str = EXPANSION_LINEAR,
 ) -> np.ndarray:
-    """``[CLEAN+PACE features, anchor, trick_win_rate×anchor]`` (17 columns)."""
-    index = {name: position for position, name in enumerate(MODEL_FEATURES)}
-    matrix = np.empty((len(rows), len(MODEL_FEATURES) + 2), dtype=float)
+    """The design matrix for ``expansion`` (v1 ``linear`` = 17 columns).
+
+    ``linear`` is ``[CLEAN+PACE features, anchor, trick_win_rate×anchor]``;
+    ``quadratic_pairwise`` is the v2 research expansion
+    ``[φ, a, a², φ×a, φ², φ_iφ_j (i<j)]`` = 152 columns.  The column order is
+    owned by :func:`_expand_design`, shared with :func:`predict_elo`.
+    """
+    if expansion not in EXPANSIONS:
+        raise ValueError(
+            f"unknown design expansion {expansion!r}; expected one of {EXPANSIONS}"
+        )
+    values = np.empty((len(rows), len(MODEL_FEATURES)), dtype=float)
+    anchors = np.empty(len(rows), dtype=float)
     for position, row in enumerate(rows):
-        values = np.array(
-            [
-                float(row[feature]) if _finite(row.get(feature)) else float(fill[feature])
-                for feature in MODEL_FEATURES
-            ]
+        values[position] = [
+            float(row[feature]) if _finite(row.get(feature)) else float(fill[feature])
+            for feature in MODEL_FEATURES
+        ]
+        anchors[position] = (
+            float(row[ANCHOR_FEATURE]) - ANCHOR_CENTER
+        ) / ANCHOR_SCALE
+    index = MODEL_FEATURES.index(INTERACTION_FEATURE)
+    return _expand_design(values, anchors, index, expansion)
+
+
+def _expand_design(
+    values: np.ndarray,
+    anchors: np.ndarray,
+    interaction_index: int,
+    expansion: str,
+) -> np.ndarray:
+    """Expand feature rows into design columns; the single column-order owner.
+
+    ``values`` is ``(n, len(MODEL_FEATURES))`` and ``anchors`` is ``(n,)``.
+    Both the fit (:func:`design_matrix`) and the online prediction
+    (:func:`predict_elo`) go through here, so the two cannot drift.
+    """
+    if expansion == EXPANSION_LINEAR:
+        return np.column_stack(
+            [values, anchors, values[:, interaction_index] * anchors]
         )
-        anchor = (float(row[ANCHOR_FEATURE]) - ANCHOR_CENTER) / ANCHOR_SCALE
-        matrix[position, : len(MODEL_FEATURES)] = values
-        matrix[position, len(MODEL_FEATURES)] = anchor
-        matrix[position, len(MODEL_FEATURES) + 1] = (
-            values[index[INTERACTION_FEATURE]] * anchor
-        )
-    return matrix
+    if expansion == EXPANSION_QUADRATIC_PAIRWISE:
+        columns = [
+            values,
+            anchors[:, None],
+            (anchors**2)[:, None],
+            values * anchors[:, None],
+            values**2,
+        ]
+        for left in range(values.shape[1]):
+            for right in range(left + 1, values.shape[1]):
+                columns.append((values[:, left] * values[:, right])[:, None])
+        return np.column_stack(columns)
+    raise ValueError(
+        f"unknown design expansion {expansion!r}; expected one of {EXPANSIONS}"
+    )
 
 
 def _affine_on_training_levels(
@@ -493,38 +629,113 @@ def _affine_on_training_levels(
     return float(slope), float(intercept)
 
 
+def _cell_ids(
+    rows: Sequence[Mapping[str, Any]], level_values: np.ndarray
+) -> np.ndarray:
+    """Fit-time cell ids ``<subject level>|<opponent>`` for the penalty.
+
+    Cell identity is only ever used while fitting; :func:`predict_elo` takes
+    the row's own features and opponent Elo and nothing else.
+    """
+    return np.array(
+        [
+            f"{level}|{row['opponent_id']}"
+            for level, row in zip(level_values, rows)
+        ]
+    )
+
+
+def _drift_stats(
+    rows: Sequence[Mapping[str, Any]],
+    y: np.ndarray,
+    predictions: np.ndarray,
+    level_values: np.ndarray,
+) -> tuple[float, float]:
+    """``(cell_drift_var, drift_sd)`` of the calibrated OOF (report §2.1/§3.1).
+
+    ``cell_drift_var`` is the row mean of ``(cell mean residual − level mean
+    residual)²`` — the report's ANOVA ``cell_drift²``.  ``drift_sd`` is the SD
+    of each cell's mean prediction minus its level's mean prediction, over
+    cells with at least 10 rows — the report's drift SD.  Diagnostics only.
+    """
+    residual = y - predictions
+    levels = set(map(str, level_values))
+    level_residual = {
+        level: float(residual[level_values == level].mean()) for level in levels
+    }
+    level_prediction = {
+        level: float(predictions[level_values == level].mean()) for level in levels
+    }
+    cells: dict[tuple[str, str], list[int]] = {}
+    for index, row in enumerate(rows):
+        cells.setdefault(
+            (str(level_values[index]), str(row["opponent_id"])), []
+        ).append(index)
+    cell_drift = []
+    drift = []
+    for (level, _opponent), indices in cells.items():
+        rows_in_cell = np.asarray(indices)
+        cell_drift.append(
+            len(indices)
+            * (float(residual[rows_in_cell].mean()) - level_residual[level]) ** 2
+        )
+        if len(indices) >= 10:
+            drift.append(
+                float(predictions[rows_in_cell].mean()) - level_prediction[level]
+            )
+    cell_drift_var = float(np.sum(cell_drift) / len(rows)) if cell_drift else 0.0
+    drift_sd = float(np.std(drift, ddof=1)) if len(drift) > 1 else 0.0
+    return cell_drift_var, drift_sd
+
+
 def _cv_predictions(
-    x: np.ndarray,
+    rows: Sequence[Mapping[str, Any]],
+    fill: Mapping[str, float],
     y: np.ndarray,
     level_values: np.ndarray,
     groups: np.ndarray,
     alpha: float,
     *,
+    expansion: str = EXPANSION_LINEAR,
+    cell_penalty: float = 0.0,
     deshrink: bool,
-) -> tuple[np.ndarray, np.ndarray, dict[str, float]]:
+) -> tuple[np.ndarray, np.ndarray, dict[str, float], np.ndarray]:
     """Out-of-fold raw and de-shrunk predictions.
 
     ``grouped`` holds out whole deals (seeds, all levels in every fold);
     ``lolo`` holds out whole levels (style transfer, the honest scheme).
     De-shrink is re-fit inside every fold so the held-out level never feeds
-    its own affine calibration.
+    its own affine calibration.  A positive ``cell_penalty`` fits every fold
+    with the (level, opponent) mean-residual penalty whose cell ids come from
+    the training rows only.  Returns ``(raw, calibrated, slopes, x)``; ``x`` is
+    the full design shared with the caller's full-data fit, so fit and CV can
+    never disagree on ``expansion``.
     """
+    x = design_matrix(rows, fill, expansion=expansion)
+    cells = _cell_ids(rows, level_values) if cell_penalty else None
     raw = np.empty_like(y)
     calibrated = np.empty_like(y)
     slopes: dict[str, float] = {}
     for group in sorted(set(map(str, groups))):
         held_out = groups == group
-        model = ridge_fit(x[~held_out], y[~held_out], alpha)
+        train = ~held_out
+        model = ridge_fit(
+            x[train],
+            y[train],
+            alpha,
+            cells=None if cells is None else cells[train],
+            cell_penalty=cell_penalty,
+        )
         raw[held_out] = ridge_predict(model, x[held_out])
         if deshrink:
             slope, intercept = _affine_on_training_levels(
-                model, x, y, level_values, ~held_out
+                model, x, y, level_values, train
             )
             calibrated[held_out] = intercept + slope * raw[held_out]
             slopes[group] = slope
         else:
             calibrated[held_out] = raw[held_out]
-    return raw, calibrated, slopes
+    return raw, calibrated, slopes, x
 
 
 def session_prior_sd(
@@ -570,10 +781,25 @@ def build_prior(
     reps: int = DEFAULT_REPS,
     seed: int = DEFAULT_SEED,
     label_source: str = "t2_full_data",
+    expansion: str = EXPANSION_LINEAR,
+    cell_penalty: float = 0.0,
 ) -> dict[str, Any]:
-    """Calibrate the artifact document (no ``data``/``created_at`` fields)."""
+    """Calibrate the artifact document (no ``data``/``created_at`` fields).
+
+    ``expansion``/``cell_penalty`` select the optional v2 research model (R1:
+    quadratic expansion plus cell calibration penalty); the defaults keep the
+    shipped v1 path and its numbers.  A positive ``cell_penalty`` never enters
+    the prediction channel — it only constrains the fit's per-cell residual
+    means (see :func:`ridge_fit`).
+    """
     if scheme not in ("lolo", "grouped"):
         raise ValueError(f"scheme must be 'lolo' or 'grouped', got {scheme!r}")
+    if expansion not in EXPANSIONS:
+        raise ValueError(
+            f"expansion must be one of {EXPANSIONS}, got {expansion!r}"
+        )
+    if cell_penalty < 0.0:
+        raise ValueError(f"cell_penalty must be non-negative, got {cell_penalty}")
     if not rows:
         raise ValueError("no usable rows to calibrate")
     level_values = np.array([str(row["level_id"]) for row in rows])
@@ -584,7 +810,6 @@ def build_prior(
         raise ValueError(f"rows carry levels missing from the label map: {unknown}")
     y = np.array([float(row["level_elo_ref"]) for row in rows], dtype=float)
     fill = fill_values(rows)
-    x = design_matrix(rows, fill)
     if scheme == "lolo":
         groups = level_values
     else:
@@ -595,10 +820,24 @@ def build_prior(
             ]
         )
 
-    raw_oof, calibrated_oof, fold_slopes = _cv_predictions(
-        x, y, level_values, groups, alpha, deshrink=deshrink
+    _raw_oof, calibrated_oof, fold_slopes, x = _cv_predictions(
+        rows,
+        fill,
+        y,
+        level_values,
+        groups,
+        alpha,
+        expansion=expansion,
+        cell_penalty=cell_penalty,
+        deshrink=deshrink,
     )
-    full_model = ridge_fit(x, y, alpha)
+    full_model = ridge_fit(
+        x,
+        y,
+        alpha,
+        cells=_cell_ids(rows, level_values) if cell_penalty else None,
+        cell_penalty=cell_penalty,
+    )
     slope, intercept = _affine_on_training_levels(
         full_model, x, y, level_values, np.ones(len(rows), dtype=bool)
     )
@@ -620,6 +859,7 @@ def build_prior(
     within = np.concatenate(within) if within else np.array([])
     tau_between = float(biases.std(ddof=1)) if len(biases) > 1 else 0.0
     sigma_within = float(within.std(ddof=1)) if len(within) > 1 else 0.0
+    cell_drift_var, drift_sd = _drift_stats(rows, y, calibrated_oof, level_values)
 
     sigma_traj: dict[str, float] = {}
     for n in range(1, MAX_SESSION + 1):
@@ -647,6 +887,8 @@ def build_prior(
         "m_eff": m_eff,
         "tau_between": tau_between,
         "sigma_within": sigma_within,
+        "cell_drift_var": cell_drift_var,
+        "drift_sd": drift_sd,
         "single_game_se": float(SINGLE_GAME_SE),
         "fold_slopes": {key: float(value) for key, value in fold_slopes.items()},
         "level_means": {
@@ -661,8 +903,12 @@ def build_prior(
     }
     return {
         "schema": SCHEMA,
-        "version": VERSION,
-        "kind": f"trace-s1-ridge-{'deshrunk' if deshrink else 'raw'}",
+        "version": VERSION if expansion == EXPANSION_LINEAR else VERSION_QUADRATIC,
+        "kind": (
+            f"trace-s1-ridge-{'deshrunk' if deshrink else 'raw'}"
+            if expansion == EXPANSION_LINEAR
+            else f"trace-s1-poly2-ridge-{'deshrunk' if deshrink else 'raw'}"
+        ),
         "labels": label_source,
         "prior": dict(COLD_START_PRIOR),
         "scheme": scheme,
@@ -670,6 +916,7 @@ def build_prior(
         "sigma_traj": sigma_traj,
         "model": {
             "features": list(MODEL_FEATURES),
+            "expansion": expansion,
             "anchor": {
                 "name": ANCHOR_FEATURE,
                 "center": ANCHOR_CENTER,
@@ -685,6 +932,7 @@ def build_prior(
         "calibration": calibration,
         "hyperparams": {
             "alpha": float(alpha),
+            "cell_penalty": float(cell_penalty),
             "scheme": scheme,
             "deshrink": bool(deshrink),
             "reps": int(reps),
@@ -704,9 +952,15 @@ def predict_elo(
     *,
     opponent_elo: float | None = None,
 ) -> float:
-    """De-shrunk Elo prediction ``f'(φ)`` for one feature row."""
+    """De-shrunk Elo prediction ``f'(φ)`` for one feature row.
+
+    Legacy v1 artifacts have no ``model.expansion`` and keep the linear
+    17-column design; v2 artifacts declare ``quadratic_pairwise`` and go
+    through the same :func:`_expand_design` column order as the fit.
+    """
     model = doc["model"]
     names = model["features"]
+    expansion = model.get("expansion", EXPANSION_LINEAR)
     values = np.array(
         [
             float(row[feature])
@@ -721,8 +975,12 @@ def predict_elo(
     anchor = (anchor_elo - float(model["anchor"]["center"])) / float(
         model["anchor"]["scale"]
     )
-    interaction = values[names.index(model["interaction"])] * anchor
-    design = np.concatenate([values, [anchor, interaction]])
+    design = _expand_design(
+        values[None, :],
+        np.array([anchor]),
+        names.index(model["interaction"]),
+        expansion,
+    )[0]
     raw = float(
         ((design - np.asarray(model["mean"])) / np.asarray(model["scale"]))
         @ np.asarray(model["coefficients"])
@@ -763,11 +1021,17 @@ def session_mean(
 def prior_for_session(
     doc: Mapping[str, Any], mu_traj: float, n: int
 ) -> Prior:
-    """``Prior(μ_traj, σ_traj(n))``; ``n=0`` returns the cold-start prior."""
+    """``Prior(μ_traj, σ_traj(n))``; ``n=0`` returns the cold-start prior.
+
+    The artifact's ``prior``/``sigma_traj`` schema keeps its historical
+    ``mean``/``sd`` keys (they are a Gaussian prior, independent of the rating
+    estimator), so this adapter maps them onto :class:`Prior`'s ``mu``/``sigma``.
+    """
     if n < 0:
         raise ValueError("session length must be non-negative")
     if n == 0:
-        return Prior(**doc["prior"])
+        prior = doc["prior"]
+        return Prior(float(prior["mean"]), float(prior["sd"]))
     table = doc.get("sigma_traj") or {}
     key = str(int(n))
     if key not in table:

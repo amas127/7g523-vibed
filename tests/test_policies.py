@@ -1,6 +1,6 @@
 """The shared policy-spec grammar: one owner for id/spec parsing and checks.
 
-``random`` / ``greedy`` / ``ckpt:<path>`` is parsed here, not in each tool; the
+``random`` / ``ckpt:<path>`` is parsed here, not in each tool; the
 error strings are the CLI contracts the tools turn into ``SystemExit``.
 """
 from __future__ import annotations
@@ -13,13 +13,12 @@ from seven523.policies import (
     validate_spec,
 )
 
-
 # -- default_id_for_spec -----------------------------------------------------
 
 
 def test_default_id_for_scripted_specs_is_the_spec():
     assert default_id_for_spec("random") == "random"
-    assert default_id_for_spec("greedy") == "greedy"
+    assert default_id_for_spec("other") == "other"
 
 
 def test_default_id_for_ckpt_uses_the_parent_directory(tmp_path):
@@ -43,7 +42,7 @@ def test_split_entrant_explicit_id_wins_and_strips():
 
 def test_split_entrant_derives_an_id_for_bare_specs():
     assert split_entrant("random") == ("random", "random")
-    assert split_entrant(" greedy ") == ("greedy", "greedy")
+    assert split_entrant(" other ") == ("other", "other")
     assert split_entrant("ckpt:runs/run_b/agent.pt") == (
         "run_b",
         "ckpt:runs/run_b/agent.pt",
@@ -62,7 +61,6 @@ def test_split_entrant_only_splits_at_the_first_equals():
 def test_missing_ckpt_path_ignores_non_ckpt_specs():
     assert missing_ckpt_path(None) is None
     assert missing_ckpt_path("random") is None
-    assert missing_ckpt_path("greedy") is None
     assert missing_ckpt_path("other") is None
 
 
@@ -88,7 +86,6 @@ def test_validate_spec_accepts_scripted_and_live_ckpt(tmp_path):
     live = tmp_path / "agent.pt"
     live.write_bytes(b"live")
     assert validate_spec("random") is None
-    assert validate_spec("greedy") is None
     assert validate_spec(f"ckpt:{live}") is None
 
 
@@ -103,7 +100,11 @@ def test_validate_spec_reports_a_missing_checkpoint(tmp_path):
 
 def test_validate_spec_reports_unknown_specs():
     assert validate_spec("banana") == (
-        "unknown policy spec 'banana' (want random / greedy / ckpt:<path>)"
+        "unknown policy spec 'banana' (want random / ckpt:<path>)"
+    )
+    # The retired greedy spec is rejected like any other unknown spec.
+    assert validate_spec("greedy") == (
+        "unknown policy spec 'greedy' (want random / ckpt:<path>)"
     )
 
 

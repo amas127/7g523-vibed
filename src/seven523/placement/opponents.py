@@ -9,11 +9,13 @@ from __future__ import annotations
 import math
 import random
 import warnings
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any
 
-from ..elo import Prior, expected_score
+from ..elo import Prior, Rating, expected_score
 from ..policies import missing_ckpt_path
+from ..rules import DEFAULT_RULES, Rules, rules_id
 from ..trace import player_label
 
 if TYPE_CHECKING:
@@ -29,6 +31,31 @@ def _finite(value: Any) -> bool:
         return False
 
 
+def _reject_legacy_rating_keys(*collections: object) -> None:
+    """Fail fast on a pre-OpenSkill manifest instead of silently misreading it.
+
+    The retired Bradley–Terry manifests wrote ``elo``/``se``; the OpenSkill
+    schema writes ``mu``/``sigma`` and the values were measured on a different
+    estimator, so a stale manifest must be re-measured, not reinterpreted.
+    """
+
+    def entries(collection: object) -> Sequence[object]:
+        if isinstance(collection, Mapping):
+            return list(collection.values())
+        if isinstance(collection, (list, tuple)):
+            return list(collection)
+        return []
+
+    for collection in collections:
+        for entry in entries(collection):
+            if isinstance(entry, Mapping) and ({"elo", "se"} & set(entry)):
+                raise ValueError(
+                    "manifest uses the retired BT-MAP 'elo'/'se' keys; its values "
+                    "were measured on the old estimator. Re-measure it with "
+                    "tools/build_ladder.py (ADR-0011) before running a session."
+                )
+
+
 # -- opponents ---------------------------------------------------------------
 
 
@@ -37,18 +64,20 @@ class Opponent:
     """One selectable opponent: a pinned anchor or a free ladder rung."""
 
     id: str
-    elo: float
-    se: float = 0.0
+    mu: float
+    sigma: float = 0.0
     spec: str | None = None
     anchor: bool = False
 
     def __post_init__(self) -> None:
         if not self.id or "@" in self.id:
             raise ValueError(f"opponent id must be non-empty and '@'-free: {self.id!r}")
-        if not _finite(self.elo):
-            raise ValueError(f"opponent {self.id!r} needs a finite elo, got {self.elo!r}")
-        if not _finite(self.se) or self.se < 0.0:
-            raise ValueError(f"opponent {self.id!r} needs a non-negative se, got {self.se!r}")
+        if not _finite(self.mu):
+            raise ValueError(f"opponent {self.id!r} needs a finite mu, got {self.mu!r}")
+        if not _finite(self.sigma) or self.sigma < 0.0:
+            raise ValueError(
+                f"opponent {self.id!r} needs a non-negative sigma, got {self.sigma!r}"
+            )
 
 
 class MissingCheckpointWarning(UserWarning):
@@ -57,6 +86,9 @@ class MissingCheckpointWarning(UserWarning):
 
 def load_opponents(
     manifest: Mapping[str, Any],
+    *,
+    rules: Rules = DEFAULT_RULES,
+    can_build: Callable[[str | None], bool] | None = None,
 ) -> tuple[tuple[Opponent, ...], dict[str, float]]:
     """Read the selectable pool and the pinned anchors from a study manifest.
 
@@ -64,10 +96,18 @@ def load_opponents(
     the trained rungs — sorted by rating then id so selection is deterministic.
     Each opponent's policy spec comes from the matching ``subjects`` entry.
 
+    The manifest must carry the ``rules_id`` it was measured under; a missing
+    identity refuses with ``ValueError`` (legacy; re-measure) and a different
+    one refuses grouping ratings across rule versions (ADR-0013).
+
     A rung whose ``ckpt:<path>`` spec names a file that no longer exists is
     skipped with a :class:`MissingCheckpointWarning` (the frozen study manifest
-    may outlive the checkpoints it lists).  Anchors are never skipped: a missing
-    anchor checkpoint raises ``ValueError`` because the pins are load-bearing.
+    may outlive the checkpoints it lists).  The optional ``can_build`` gate is
+    a second, caller-owned capability check (e.g. "is this spec buildable by
+    the injected search factory?"): a non-anchor rung the gate rejects — a
+    ``None`` spec included — is skipped with the same warning, while an anchor
+    the gate rejects raises ``ValueError`` because the pins are load-bearing.
+    ``can_build=None`` behaves exactly as before this parameter existed.
     """
     levels = manifest.get("levels")
     if not isinstance(levels, Mapping) or not levels:
@@ -75,6 +115,22 @@ def load_opponents(
     anchor_entries = manifest.get("anchors")
     if not anchor_entries:
         raise ValueError("manifest needs 'anchors' for a placement session")
+    _reject_legacy_rating_keys(levels, anchor_entries, manifest.get("subjects"))
+    expected_rules_id = rules_id(rules)
+    manifest_rules_id = manifest.get("rules_id")
+    if not manifest_rules_id:
+        raise ValueError(
+            "manifest has no 'rules_id'; its ratings have no rule identity and "
+            "cannot be pooled (ADR-0013). Re-measure it with "
+            "tools/build_ladder.py before running a session."
+        )
+    if str(manifest_rules_id) != expected_rules_id:
+        raise ValueError(
+            f"manifest rules_id {str(manifest_rules_id)!r} does not match the "
+            f"session rules_id {expected_rules_id!r}; ratings measured under "
+            "different rule versions are never pooled (ADR-0013). Re-measure it "
+            "with tools/build_ladder.py before running a session."
+        )
     subjects = {
         str(subject["id"]): subject for subject in manifest.get("subjects") or []
     }
@@ -82,6 +138,20 @@ def load_opponents(
     def spec_for(id_: str) -> str | None:
         spec = subjects.get(id_, {}).get("spec")
         return str(spec) if spec is not None else None
+
+    def unbuildable(spec: str | None) -> str | None:
+        """Why the optional gate would drop this spec, else ``None``."""
+        if can_build is None:
+            return None
+        try:
+            allowed = bool(can_build(spec))
+        except Exception as exc:  # noqa: BLE001 - a gate bug must not be silent
+            return f"can_build raised {type(exc).__name__}: {exc}"
+        if allowed:
+            return None
+        if spec is None:
+            return "spec is missing and the capability gate rejected it"
+        return "the injected policy factory cannot build this spec"
 
     anchors: dict[str, float] = {}
     for entry in anchor_entries:
@@ -95,36 +165,45 @@ def load_opponents(
                 f"anchor {id_!r} spec {spec!r} points at a missing checkpoint "
                 f"{missing!r}"
             )
-        anchors[id_] = float(entry["elo"])
+        reason = unbuildable(spec)
+        if reason is not None:
+            raise ValueError(
+                f"anchor {id_!r} spec {spec!r} is not buildable: {reason}"
+            )
+        anchors[id_] = float(entry["mu"])
     opponents: list[Opponent] = []
     skipped: list[tuple[str, str, str]] = []
-    for id_, elo in levels.items():
+    for id_, value in levels.items():
         id_ = str(id_)
         spec = spec_for(id_)
         missing = missing_ckpt_path(spec)
         if missing is not None:
-            skipped.append((id_, str(spec), missing))
+            skipped.append((id_, str(spec), f"missing checkpoint {missing!r}"))
+            continue
+        reason = unbuildable(spec)
+        if reason is not None:
+            skipped.append((id_, str(spec), reason))
             continue
         subject = subjects.get(id_, {})
         opponents.append(
             Opponent(
                 id=id_,
-                elo=float(elo),
-                se=float(subject.get("se") or 0.0),
+                mu=float(value),
+                sigma=float(subject.get("sigma") or 0.0),
                 spec=spec,
                 anchor=id_ in anchors,
             )
         )
     if skipped:
         details = "; ".join(
-            f"{id_!r} spec={spec!r} path={path!r}" for id_, spec, path in skipped
+            f"{id_!r} spec={spec!r} path={reason}" for id_, spec, reason in skipped
         )
         warnings.warn(
-            f"skipping {len(skipped)} opponent(s) with missing checkpoints: {details}",
+            f"skipping {len(skipped)} opponent(s) that cannot be built: {details}",
             MissingCheckpointWarning,
             stacklevel=2,
         )
-    opponents.sort(key=lambda opponent: (opponent.elo, opponent.id))
+    opponents.sort(key=lambda opponent: (opponent.mu, opponent.id))
     return tuple(opponents), anchors
 
 
@@ -171,10 +250,10 @@ def select_opponent(
     ``info`` maximises the Bernoulli Fisher information
     ``β²·p(1−p)`` at the posterior mean (HR §6.1/§6.2); ``thompson`` samples the
     human rating from ``posterior`` and each candidate from its own
-    ``N(elo, se)`` before taking the same argmax — the first ``explore_games``
+    ``N(mu, sigma)`` before taking the same argmax — the first ``explore_games``
     games use it so a biased trace prior cannot lock the session onto the wrong
     rung (HR §6.2: "前 1–2 局用 Thompson").  ``mode="auto"`` is Thompson while
-    ``n_games < explore_games`` and info afterwards; ties break by (elo, id).
+    ``n_games < explore_games`` and info afterwards; ties break by (mu, id).
     """
     if mode not in ("auto", "info", "thompson"):
         raise ValueError(f"mode must be auto/info/thompson, got {mode!r}")
@@ -183,7 +262,7 @@ def select_opponent(
     candidates = tuple(candidates)
     if not candidates:
         raise ValueError("no opponents to choose from")
-    ordered = sorted(candidates, key=lambda opponent: (opponent.elo, opponent.id))
+    ordered = sorted(candidates, key=lambda opponent: (opponent.mu, opponent.id))
     chosen = mode
     if mode == "auto":
         chosen = "thompson" if n_games < explore_games else "info"
@@ -192,7 +271,7 @@ def select_opponent(
     best_score = -1.0
     if chosen == "info":
         for opponent in ordered:
-            p = expected_score(posterior.mean, opponent.elo)
+            p = expected_score(posterior, opponent)
             score = p * (1.0 - p)
             if score > best_score:
                 best, best_score = opponent, score
@@ -200,10 +279,17 @@ def select_opponent(
         return best
 
     rng = rng or random.Random()
-    human_rating = rng.gauss(posterior.mean, posterior.sd)
+    human_rating = rng.gauss(posterior.mu, posterior.sigma)
     for opponent in ordered:
-        rating = rng.gauss(opponent.elo, opponent.se) if opponent.se > 0.0 else opponent.elo
-        p = expected_score(human_rating, rating)
+        rating = (
+            rng.gauss(opponent.mu, opponent.sigma)
+            if opponent.sigma > 0.0
+            else opponent.mu
+        )
+        p = expected_score(
+            Rating(human_rating, posterior.sigma, 0),
+            Rating(rating, opponent.sigma, 0),
+        )
         score = p * (1.0 - p)
         if score > best_score:
             best, best_score = opponent, score

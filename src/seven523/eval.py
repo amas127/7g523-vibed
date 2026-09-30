@@ -9,7 +9,7 @@ import argparse
 import json
 import random
 import statistics
-from typing import Sequence
+from collections.abc import Sequence
 
 from .game import seat_outcome
 from .match import Match
@@ -23,7 +23,7 @@ def evaluate(
     policy: Policy,
     *,
     rules: Rules = DEFAULT_RULES,
-    opponent: str = "greedy",
+    opponent: str = "random",
     episodes: int = 200,
     seed: int = 0,
     learner: int = 0,
@@ -80,7 +80,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate a PPO checkpoint for 7鬼523")
     parser.add_argument("--checkpoint", type=str, required=True, help="agent.pt")
     parser.add_argument("--episodes", type=int, default=500)
-    parser.add_argument("--opponent", choices=["greedy", "random"], default="greedy")
+    parser.add_argument("--opponent", choices=["random"], default="random")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--num-players", type=int, default=2)

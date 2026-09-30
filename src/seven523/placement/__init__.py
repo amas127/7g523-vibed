@@ -9,11 +9,10 @@ Thompson exploration for the first games — HR §6.2), and the D3 estimator fro
   (``artifacts/human-elo/prior.json``): the S1 features are extracted with the
   D1 extractor, ``f'(φ)`` is predicted with the M1 model, and the running mean
   becomes ``μ_traj``; ``Prior(μ_traj, σ_traj(n))`` is the human's prior,
-* **result channel** — the win/loss Bernoulli plus the 分差 Gaussian
-  (``FitConfig.margin``) enter the same :func:`seven523.elo.fit_ratings`, with
-  ``margin=(c, 2σ)`` while the trace prior is present (HR §5.3/§7.4) so the two
-  channels do not double-count,
-* **honest posterior** — the joint Hessian SE, a 95% CI, the nearest manifest
+* **result channel** — the 牌局 results replay through the OpenSkill
+  Plackett–Luce update (ADR-0011); the trace and result Gaussians are combined
+  by precision (HR §5.5) so the two channels do not double-count,
+* **honest posterior** — the OpenSkill sigma, a 95% CI, the nearest manifest
   level, and a ``provisional`` flag; 10 games are never dressed up as ±50.
 
 The session persists ``traces/sessions/<id>/`` without any ``--save-trace``:
@@ -30,13 +29,10 @@ the rating math.  ``run()`` takes any chooser factory, so tests and the
 """
 from __future__ import annotations
 
-from .cli import build_parser as build_parser
-from .cli import main as main
+from ..prior import SCHEMA as TRACE_PRIOR_SCHEMA, TracePrior
+from .cli import build_parser as build_parser, main as main
 from .estimator import (
     COLD_START_PRIOR,
-    MARGIN_C,
-    MARGIN_SIGMA,
-    MARGIN_TRACE_FACTOR,
     RESULT_PRIOR as RESULT_PRIOR,
     RUNG_PRIOR_SD,
     SessionConfig,
@@ -44,7 +40,6 @@ from .estimator import (
     channel_weights,
     fit_session,
     nearest_level,
-    session_margin,
 )
 from .opponents import (
     MissingCheckpointWarning,
@@ -56,30 +51,27 @@ from .opponents import (
     session_player_labels,
     stop_reason,
 )
-from ..prior import SCHEMA as TRACE_PRIOR_SCHEMA
-from ..prior import TracePrior
 from .session import (
     REPORT_SCHEMA,
     SESSION_SCHEMA,
     VERSION as VERSION,
     GameRecord,
     PlacementSession,
+    ScheduledGame,
     new_session_id,
 )
 
 __all__ = [
     "COLD_START_PRIOR",
-    "MARGIN_C",
-    "MARGIN_SIGMA",
-    "MARGIN_TRACE_FACTOR",
     "REPORT_SCHEMA",
-    "SESSION_SCHEMA",
     "RUNG_PRIOR_SD",
+    "SESSION_SCHEMA",
     "TRACE_PRIOR_SCHEMA",
     "GameRecord",
     "MissingCheckpointWarning",
     "Opponent",
     "PlacementSession",
+    "ScheduledGame",
     "SessionConfig",
     "TracePrior",
     "build_parser",
@@ -93,6 +85,5 @@ __all__ = [
     "plan_seats",
     "select_opponent",
     "session_player_labels",
-    "session_margin",
     "stop_reason",
 ]

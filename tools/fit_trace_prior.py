@@ -3,12 +3,16 @@
 
 Pipeline (HR = ``docs/experiments/human-elo-10-games-research.md`` §5):
 
-1. read a trace study (``traces/study``); the **default label target is T2**
-   (HR §1: the full-200-game estimates random=1026.9 / greedy=1314.4 /
-   lvl1=1128.6 / lvl2=1232.1 / lvl3=1356.1 / lvl4=1447.8, re-verified against
-   the shipped study with the shipped estimator).  The manifest labels (refit
-   or not) are T1 and are kept as a comparison mode only, per C-6/T13: "新标定
-   与 D3 先验不得以 T1 为目标",
+1. read a trace study (``--study``; the shipped corpus is ``traces/study10``);
+   the **default label target is T2**
+   (HR §1, translated to the RandomBot-0 gauge per ADR-0012; the retired
+   GreedyBot level is gone and the labels were re-derived on the revision-3
+   study, most recently by the w2m/T23 rerating 2026-09-27: a shared
+   probit-MLE table over the 10-level pool — random=0.0 / lvl1=84.68 /
+   lvl2=113.60 / lvl3=134.40 / lvl4=187.72 plus ws_s2 / pself_s2 / the three
+   w2m arms; T17 values 82.75/106.90/147.71/185.34 are superseded).  The
+   manifest labels (refit or not) are T1 and are kept as a comparison mode
+   only, per C-6/T13: "新标定与 D3 先验不得以 T1 为目标",
 2. extract one per-game 轨迹 S1 feature row per trace through the shared
    extractor (:func:`seven523.prior.extract_features` — features are never
    re-implemented here).  The opponent-strength feature and the subject label
@@ -26,24 +30,28 @@ CLI only wires the study and the files.  The artifacts are
 ``artifacts/human-elo/prior.json`` (default T2 labels) and
 ``artifacts/human-elo/prior_manifest_labels.json`` (``--labels manifest``,
 comparison).  Their ``prior`` object is the cold-start
-:class:`seven523.elo.Prior` (``Prior(**doc["prior"])``), and
+:class:`seven523.elo.Prior` (from the artifact's ``mean``/``sd``), and
 :func:`seven523.prior.prior_for_session` builds the ``Prior(μ_traj, σ_traj(n))``
 that D3 feeds to ``fit_ratings(priors=...)`` without touching ``elo.py`` math.
 
-Reproduce the shipped artifacts::
+Reproduce the shipped artifacts (2026-09-27 v2/R1: the ``traces/study10``
+39,960-trace corpus, 152-column quadratic expansion + cell penalty 3; the v1
+4k artifacts are archived under ``runs/archive/prior-v1-4k-20260927/``)::
 
-    .venv/bin/python tools/fit_trace_prior.py fit \
-        --study traces/study --out artifacts/human-elo/prior.json
-    .venv/bin/python tools/fit_trace_prior.py fit --labels manifest \
-        --study traces/study --out artifacts/human-elo/prior_manifest_labels.json
+    .venv/bin/python tools/fit_trace_prior.py fit --study traces/study10 \
+        --expansion quadratic_pairwise --cell-penalty 3 \
+        --out artifacts/human-elo/prior.json
+    .venv/bin/python tools/fit_trace_prior.py fit --study traces/study10 \
+        --expansion quadratic_pairwise --cell-penalty 3 --labels manifest \
+        --out artifacts/human-elo/prior_manifest_labels.json
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
 import sys
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 from seven523.prior import (
     ANCHOR_CENTER,
@@ -55,6 +63,7 @@ from seven523.prior import (
     DEFAULT_REPS,
     DEFAULT_SCHEME,
     DEFAULT_SEED,
+    EXPANSIONS,
     MAX_SESSION,
     MODEL_FEATURES,
     PACE_FEATURES,
@@ -87,6 +96,7 @@ __all__ = [
     "DEFAULT_REPS",
     "DEFAULT_SCHEME",
     "DEFAULT_SEED",
+    "EXPANSIONS",
     "MAX_SESSION",
     "MODEL_FEATURES",
     "PACE_FEATURES",
@@ -139,6 +149,8 @@ def cmd_fit(args: argparse.Namespace) -> int:
             reps=args.reps,
             seed=args.seed,
             label_source=label_source,
+            expansion=args.expansion,
+            cell_penalty=args.cell_penalty,
         )
     except ValueError as exc:
         print(f"cannot calibrate: {exc}", file=sys.stderr)
@@ -153,6 +165,8 @@ def cmd_fit(args: argparse.Namespace) -> int:
         "failed": stats["failed"],
         "skipped_cap": stats["skipped_cap"],
         "verify": bool(args.verify),
+        "expansion": args.expansion,
+        "cell_penalty": float(args.cell_penalty),
         "fingerprint": data_fingerprint(study, paths),
         "label_source": label_source,
         "labels": {name: float(value) for name, value in sorted(levels.items())},
@@ -173,6 +187,7 @@ def cmd_fit(args: argparse.Namespace) -> int:
         f"fit_trace_prior: {len(rows)} traces / "
         f"{doc['data']['n_levels']} levels (verify={args.verify}), "
         f"alpha={args.alpha:g} scheme={args.scheme} "
+        f"expansion={args.expansion} cell_penalty={args.cell_penalty:g} "
         f"deshrink={doc['deshrink']['applied']}"
     )
     print(f"labels: {levels_text}")
@@ -182,7 +197,9 @@ def cmd_fit(args: argparse.Namespace) -> int:
         f"{args.scheme} OOF: RMSE={calibration['rmse_oof']:.1f} "
         f"s={calibration['residual_sd']:.1f} m_eff={m_eff_text} "
         f"tau={calibration['tau_between']:.1f} "
-        f"sigma_w={calibration['sigma_within']:.1f}"
+        f"sigma_w={calibration['sigma_within']:.1f} "
+        f"cell_drift²={calibration['cell_drift_var']:.1f} "
+        f"drift_sd={calibration['drift_sd']:.2f}"
     )
     print(
         f"deshrink: a={doc['deshrink']['a']:.1f} b={doc['deshrink']['b']:.3f}"
@@ -198,7 +215,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
     fit = sub.add_parser("fit", help="fit the prior artifact from a trace study")
-    fit.add_argument("--study", default="traces/study", help="trace study directory")
+    fit.add_argument(
+        "--study",
+        default="traces/study10",
+        help="trace study directory (default: the shipped v2 corpus)",
+    )
     fit.add_argument(
         "--out",
         default="artifacts/human-elo/prior.json",
@@ -221,6 +242,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     fit.add_argument(
         "--alpha", type=float, default=DEFAULT_ALPHA, help="ridge strength"
+    )
+    fit.add_argument(
+        "--expansion",
+        choices=EXPANSIONS,
+        default=EXPANSIONS[0],
+        help=(
+            "design expansion: linear = shipped v1 17-column model (default); "
+            "quadratic_pairwise = v2 research model (152 columns)"
+        ),
+    )
+    fit.add_argument(
+        "--cell-penalty",
+        type=float,
+        default=0.0,
+        help=(
+            "v2 cell calibration penalty lambda (0 = off, default); each "
+            "fit-time (level, opponent) cell is pushed toward zero mean residual"
+        ),
     )
     fit.add_argument(
         "--scheme",

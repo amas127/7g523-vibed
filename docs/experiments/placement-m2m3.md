@@ -10,6 +10,13 @@
 > 输出 `定级：1287 ± 182（95% CI），最近档 greedy（1315），临时 provisional`，会话产物在
 > `traces/sessions/smoke_m23/`；全套 **418 passed**（`tests/test_play.py` +3）。**
 >
+> **后续取代（2026-09-25 架构清理 + OpenSkill 切换）**：本文的 BT-MAP/`margin`/联合
+> Hessian、`random`/`greedy` 双锚与单文件 `src/seven523/placement.py` 均已退役：placement
+> 已拆为 [`placement/`](../../src/seven523/placement/) 包，结果似然改为 OpenSkill
+> Plackett–Luce（[ADR-0011](../adr/0011-openskill-rating-core.md)）、单 gauge RandomBot=0
+> （[ADR-0012](../adr/0012-single-gauge-and-greedy-removal.md)）、发布表走 probit-MLE
+> （[ADR-0013](../adr/0013-drift-free-rating-channel.md)）；正文路径、命令与数字均为 T13 当时口径。
+>
 > 设计来源：[`../human-elo-plan.md`](../human-elo-plan.md) 修订节 / 里程碑 M2–M3；
 > 估计器规格：[`human-elo-10-games-research.md`](./human-elo-10-games-research.md) §5（两通道
 > BT-MAP）、§8（实现映射）；先验产物：[`trace-prior-m1.md`](./trace-prior-m1.md)（M1）；

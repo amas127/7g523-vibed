@@ -8,12 +8,12 @@ learner's observed record.  These tests are torch-free on purpose.
 import random
 
 import pytest
+from support import FirstLegalBot
 
 from seven523.env import Seven523Env
 from seven523.policies import (
     EpisodeMixturePolicy,
     EpisodePolicy,
-    GreedyBot,
     MixturePolicy,
     RandomBot,
     WeightedPolicy,
@@ -49,7 +49,7 @@ def test_policy_protocols_separate_plain_bots_from_episode_mixtures():
     assert not isinstance(RandomBot(random.Random(0)), WeightedPolicy)
 
     mixture = EpisodeMixturePolicy(
-        [(1.0, GreedyBot(), "greedy"), (0.0, RandomBot(random.Random(1)), "random")],
+        [(1.0, FirstLegalBot(), "fixed"), (0.0, RandomBot(random.Random(1)), "random")],
         random.Random(0),
     )
     assert isinstance(mixture, EpisodePolicy)
@@ -71,7 +71,7 @@ def test_episode_mixture_act_forwards_only_to_the_frozen_member():
 
 
 def test_episode_mixture_draws_members_by_weight_across_episodes():
-    low, high, members = _members()
+    _low, _high, members = _members()
     policy = EpisodeMixturePolicy(members, random.Random(0))
     picks = [policy.start_episode() for _ in range(400)]
     share = picks.count("high") / len(picks)
@@ -191,10 +191,10 @@ def test_pfsp_weights_epsilon_and_uniform_mix_boundaries():
 
 
 class _DuckOpponent:
-    """GreedyBot wrapped with the optional ``start_episode`` hook."""
+    """FirstLegalBot wrapped with the optional ``start_episode`` hook."""
 
     def __init__(self, rules=DEFAULT_RULES) -> None:
-        self.inner = GreedyBot(rules)
+        self.inner = FirstLegalBot(rules)
         self.starts = 0
 
     def start_episode(self):
@@ -218,7 +218,7 @@ def _finish_episode(env, action_seed=0):
 
 def test_env_reset_calls_start_episode_on_duck_typed_opponents():
     duck = _DuckOpponent()
-    env = Seven523Env(seed=0, opponents=[GreedyBot(), duck])
+    env = Seven523Env(seed=0, opponents=[FirstLegalBot(), duck])
     assert duck.starts == 0
     env.reset()
     assert duck.starts == 1
@@ -230,7 +230,7 @@ def test_env_reset_calls_start_episode_on_duck_typed_opponents():
 def test_env_reset_ignores_policies_without_start_episode():
     # Legacy policies (and the default random opponents) have no hook; reset
     # must not require one.
-    env = Seven523Env(seed=0, opponents=[GreedyBot(), GreedyBot()])
+    env = Seven523Env(seed=0, opponents=[FirstLegalBot(), FirstLegalBot()])
     obs, _info = env.reset()
     assert obs.shape == (env.obs_dim,)
     run = Seven523Env(seed=1)
@@ -242,12 +242,12 @@ def test_env_accepts_an_episode_mixture_opponent_end_to_end():
     # The new policy must be a drop-in env opponent: one member per episode
     # and no error at the auto-advance boundary.
     mixture = EpisodeMixturePolicy(
-        [(0.5, GreedyBot(), "greedy"), (0.5, RandomBot(random.Random(0)), "random")],
+        [(0.5, FirstLegalBot(), "fixed"), (0.5, RandomBot(random.Random(0)), "random")],
         random.Random(0),
     )
-    env = Seven523Env(seed=0, opponents=[GreedyBot(), mixture])
+    env = Seven523Env(seed=0, opponents=[FirstLegalBot(), mixture])
     env.reset()
-    assert mixture.current_id in {"greedy", "random"}
+    assert mixture.current_id in {"fixed", "random"}
     _finish_episode(env, action_seed=3)
 
 

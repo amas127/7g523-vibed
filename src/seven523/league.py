@@ -12,17 +12,15 @@ through :mod:`seven523.networks`.
 """
 from __future__ import annotations
 
+import copy
 import random
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-import numpy as np
 import torch
 
-from .actions import nvec_for
-from .env import observation_dim
-from .networks import Agent, NeuralPolicy
+from .networks import Agent, NeuralPolicy, history_layout
 from .policies import (
     EpisodeMixturePolicy,
     MixturePolicy,
@@ -51,7 +49,7 @@ _LEARNER = 0
 class LeagueConfig:
     """Everything :func:`build_league` needs beyond rules / learner / device.
 
-    ``opponent`` is the CLI mode (``greedy`` / ``random`` / ``self`` / ``mix`` /
+    ``opponent`` is the CLI mode (``random`` / ``self`` / ``mix`` /
     ``pool``); the pool-only fields are ignored by the other modes.
     """
 
@@ -60,7 +58,7 @@ class LeagueConfig:
     num_players: int
     seed: int
     pool_member: tuple[str, ...] = ()
-    mix_greedy_prob: float = 0.5
+    mix_random_prob: float = 0.5
     pool_episode: bool = False
     self_play_sample: bool = False
 
@@ -151,25 +149,27 @@ def build_league(
     opponents: list[list[Policy]]
 
     if config.opponent in {"self", "mix", "pool"}:
+        # Snapshot the learner *with its full second-input config* (seq/event):
+        # an explicitly rebuilt MLP loses the encoders and the strict
+        # ``load_state_dict`` refresh below would raise.  ``deepcopy`` also
+        # guarantees the frozen layout can never diverge from the learner's.
         frozen = NeuralPolicy(
-            Agent(
-                observation_dim(rules.num_players),
-                np.asarray(nvec_for(rules), dtype=np.int64),
-                hidden=agent.hidden,
-                activation=agent.activation,
-                arch=agent.arch,
-            ),
+            copy.deepcopy(agent),
             rules,
             device=device,
             sample=config.self_play_sample,
             seed=seed,
         )
+        assert history_layout(frozen.agent) == history_layout(agent), (
+            "frozen self-play opponent history layout diverged from the learner: "
+            f"{history_layout(frozen.agent)!r} vs {history_layout(agent)!r}"
+        )
         frozen.agent.load_state_dict(agent.state_dict())
         if config.opponent == "mix":
-            greedy = make_scripted_policies("greedy", rules, seed=seed)[0]
+            scripted = make_scripted_policies("random", rules, seed=seed)[0]
             mix_members: list[tuple[float, Policy, str]] = [
-                (1.0 - config.mix_greedy_prob, frozen, "self"),
-                (config.mix_greedy_prob, greedy, "greedy"),
+                (1.0 - config.mix_random_prob, frozen, "self"),
+                (config.mix_random_prob, scripted, "random"),
             ]
             opponents = _mixture_opponents(
                 config, rules, mix_members, episode_mixtures, seed

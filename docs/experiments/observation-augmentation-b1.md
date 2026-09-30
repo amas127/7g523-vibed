@@ -10,7 +10,8 @@
 > [−18.98,+20.43]**；3 个 h2h 只有 1 个达标，相对 B0 的增量 ≈0 且 CI 极宽 → **B1 未确认**，
 > 不能归因于「已出牌历史」带来的增量。单训练 seed、seed 间方差大；<10–15 Elo 效应需
 > 1500+ 副牌才能定性（见 §6）。B 线（B0 null、B1 未确认）就此收束，下一优先见
-> [`../plans.md`](../plans.md) §8（T5 C → T6 F）。**
+> [`../plans.md`](../plans.md) §8（T5 C → T6 F）。`obs_version` 2/3 兼容层后随
+> [ADR-0009](../adr/0009-single-observation-and-comparison.md) 退役（现行唯一布局 v5）。**
 >
 > 判定口径：[`README.md` §3](./README.md#3-常用命令与口径) / EPV §9；
 > 方向设计与验收：[`structural-directions.md` §3.2–§3.4](./structural-directions.md)（T3/B1）；
@@ -171,8 +172,9 @@ B0 为 v2）。数字来自 `runs/h2h_t3_b1_vs_base680k.json`、`runs/h2h_t3_b1_
   该配置也测不出来。要定性 B1 增量需 ≥1500 副牌或更多 seed。
 - **未测的组合**：B1 × hidden 256 / 更大容量（T8）与 A1+B1 组合臂按现有门控不排期；
   B1 对更强对手（C 的 ≥学习者成员）或人类的效果也未知。
-- **保留物**：v3 布局、`--obs-version {1,2,3}` 开关与版本化兼容层**保留**，作为 T4
-  观测 S1 迁移的基础；v4/v5 编号与段级列重映射热启动设计见
+- **保留物（当时）**：v3 布局、`--obs-version {1,2,3}` 开关与版本化兼容层**保留**，作为 T4
+  观测 S1 迁移的基础；后随 [ADR-0009](../adr/0009-single-observation-and-comparison.md) 退役
+  （现行唯一布局 v5）；v4/v5 编号与段级列重映射热启动设计见
   [`observation-slimming.md`](./observation-slimming.md)「实现分析（2026-09-25，obs_version v2 落地后）」。
 - **后续**：按 `plans.md` §8，先 T5 C（逐局对手 + PFSP + ≥学习者对手），其后 T6 F；
   B 线不重做，除非 C/F 或更强对手给出新证据。

@@ -1,5 +1,13 @@
 # 评分与阶梯接缝：`elo.py` 拥有结果评分，`ladder.py` 拥有对局编排
 
+> **Superseded by [ADR-0011](./0011-openskill-rating-core.md)（2026-09-25）与
+> [ADR-0012](./0012-single-gauge-and-greedy-removal.md)。**
+> 本 ADR 确立的接缝（`fit_ratings`/`select_rungs`/`expected_score`、纯函数、`priors`
+> 注入点、锚点钉死、编排与 manifest owner 的分工）仍然有效；文中 Bradley–Terry MAP、
+> 阻尼牛顿、窗口、分差似然与 Hessian SE 的实现细节已被标准 OpenSkill
+> Plackett–Luce 取代；`random=1000/greedy=1315` 两个锚点与 GreedyBot 已由 ADR-0012
+> 退役（现为 RandomBot=0 单一 gauge）。
+
 M2 需要给一组 ckpt 定级（4–6 级、相邻 100–150 Elo、Random/Greedy 锚点固定），
 D3 需要在同一评分口径上长出「窗口结果似然 + 轨迹先验」的混合估计器。测量流程由
 `tools/measure_trace_signal.py`（D1）离线验证轨迹信息量，但它只做特征→Elo 标定，

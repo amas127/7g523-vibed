@@ -7,6 +7,8 @@
 > `structural_analysis.py`（终局奖励/墩结构/观测缺口）、`value_accuracy.py`（价值网逐段精度）、
 > `last_trick.py`（撬底对胜负的影响），输出在 `runs/structural/out_*.txt`。
 >
+> **后续（2026-09-25/26）**：本文 A/B/C/F 四条优先线均已执行并收束——A1 未复现（[`reward-shaping-500k.md`](./reward-shaping-500k.md)）、B0 null/B1 未确认（[`observation-augmentation-b0.md`](./observation-augmentation-b0.md)、[`observation-augmentation-b1.md`](./observation-augmentation-b1.md)）、T5 三效应 null（[`opponent-distribution-500k.md`](./opponent-distribution-500k.md)）、T6 负/关闭（[`twin-towers-500k.md`](./twin-towers-500k.md)）；其后唯一过行动门的强度杠杆为推理期搜索（[`joint-search-training-wave1.md`](./joint-search-training-wave1.md)）。本文数字为当时口径。
+>
 > 一手背景：平台与已排除轴见 [`elo-breakthrough-report.md`](./elo-breakthrough-report.md)（§5 结论：平台是
 > 训练分布问题）、统一 500k 预算的 6 方案全不可分见 [`wave5-500k-report.md`](./wave5-500k-report.md)（§5
 > 未试方向）、PPO 移植无算法缺陷见 [`ppo-alignment-audit.md`](./ppo-alignment-audit.md)（§6.1）、
@@ -338,8 +340,9 @@ vs `w5_ctrl` +13.04 [+1.93,+24.15]、相对 B0 同牌直接对比 **+0.73 [−18
 
 **判定**：B0/B1 均**未确认**（主端点失败；相对 B0 的增量 ≈0 且 CI 极宽；单训练 seed、
 seed 间方差与效应同量级；<10–15 Elo 需 1500+ 副牌）。**B 线收束**：不再单独追增广布局，
-下一优先转向 C（逐局对手/PFSP），其后 F（双塔）；v3 布局与 `--obs-version` 兼容层作为
-T4 观测 S1 迁移的基础保留。细节见
+下一优先转向 C（逐局对手/PFSP），其后 F（双塔）；v3 布局与 `--obs-version` 兼容层当时作为
+T4 观测 S1 迁移的基础保留（后随 [ADR-0009](../adr/0009-single-observation-and-comparison.md)
+退役，现行唯一布局 v5）。细节见
 [`observation-augmentation-b0.md`](./observation-augmentation-b0.md)（B0）与
 [`observation-augmentation-b1.md`](./observation-augmentation-b1.md)（B1）。
 

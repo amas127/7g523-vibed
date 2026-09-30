@@ -43,7 +43,7 @@ def _game(
 
 
 def test_plan_duel_schedule_pairs_deals_and_swaps_seats():
-    left, right = Entrant("a", "greedy"), Entrant("b", "random")
+    left, right = Entrant("a", "random"), Entrant("b", "random")
     schedule = plan_duel_schedule(left, right, pairs=3, seed=11)
     assert len(schedule) == 6  # pairs is a deal count, not a game count
 
@@ -253,13 +253,17 @@ def test_binomial_two_sided_p_matches_legacy_formula_at_800_trials():
 
 
 def test_binomial_two_sided_p_does_not_overflow_trial_counts():
-    for trials in (1600, 3200):
-        for k in (0, 1, trials // 3, trials // 2, trials - 1, trials):
-            p = _binomial_two_sided_p(k, trials)
-            assert 0.0 <= p <= 1.0
-    assert _binomial_two_sided_p(800, 1600) == 1.0
-    for k in (0, 1, 400, 800, 1200, 1599, 1600):
-        assert _binomial_two_sided_p(k, 1600) == _binomial_two_sided_p(1600 - k, 1600)
+    # ``float(1 << 1024)`` already overflows, so 1600 trials exercise the guard
+    # that the old 3200-trial case reached twice as slowly.
+    trials = 1600
+    for k in (0, 1, trials // 3, trials // 2, trials):
+        p = _binomial_two_sided_p(k, trials)
+        assert 0.0 <= p <= 1.0
+    assert _binomial_two_sided_p(800, trials) == 1.0
+    for k in (0, 1, trials // 2, trials):
+        assert _binomial_two_sided_p(k, trials) == _binomial_two_sided_p(
+            trials - k, trials
+        )
 
 
 def test_binomial_two_sided_p_nonpositive_trials_is_one():
@@ -272,8 +276,8 @@ def test_cli_smoke_json_fields(capsys):
     tool = _load_tool("head_to_head")
     code = tool.main(
         [
-            "--left", "greedy",
-            "--right", "random",
+            "--left", "a=random",
+            "--right", "b=random",
             "--pairs", "4",
             "--seed", "0",
             "--bootstrap", "200",
@@ -288,8 +292,8 @@ def test_cli_smoke_json_fields(capsys):
         "mean_return", "elo_diff", "elo_diff_ci", "deal_sign", "bootstrap",
         "confidence",
     }
-    assert stats["left_id"] == "greedy"
-    assert stats["right_id"] == "random"
+    assert stats["left_id"] == "a"
+    assert stats["right_id"] == "b"
     assert stats["deals"] == 4
     assert stats["games"] == 8
     assert stats["wins"] + stats["draws"] + stats["losses"] == 8
@@ -302,9 +306,9 @@ def test_cli_smoke_json_fields(capsys):
 def test_cli_swapped_sides_mirror_exactly(capsys):
     tool = _load_tool("head_to_head")
     common = ["--pairs", "6", "--seed", "5", "--bootstrap", "300", "--json"]
-    assert tool.main(["--left", "greedy", "--right", "random", *common]) == 0
+    assert tool.main(["--left", "a=random", "--right", "b=random", *common]) == 0
     forward = json.loads(capsys.readouterr().out)
-    assert tool.main(["--left", "random", "--right", "greedy", *common]) == 0
+    assert tool.main(["--left", "b=random", "--right", "a=random", *common]) == 0
     backward = json.loads(capsys.readouterr().out)
     # The swapped schedule is the same physical deal set with the ids renamed,
     # so every left-view statistic mirrors exactly.
@@ -318,11 +322,11 @@ def test_cli_swapped_sides_mirror_exactly(capsys):
 def test_cli_rejects_bad_sides(capsys):
     tool = _load_tool("head_to_head")
     with pytest.raises(SystemExit):
-        tool.main(["--left", "greedy", "--right", "greedy", "--pairs", "1"])
+        tool.main(["--left", "a=random", "--right", "a=random", "--pairs", "1"])
     with pytest.raises(SystemExit):
-        tool.main(["--left", "nope", "--right", "random"])
+        tool.main(["--left", "nope", "--right", "b=random"])
     with pytest.raises(SystemExit):
-        tool.main(["--left", "greedy", "--right", "random", "--pairs", "0"])
+        tool.main(["--left", "a=random", "--right", "b=random", "--pairs", "0"])
 
 
 def _fake_stats(
@@ -437,8 +441,8 @@ def test_cli_multi_seed_json_merges(capsys):
     tool = _load_tool("head_to_head")
     code = tool.main(
         [
-            "--left", "greedy",
-            "--right", "random",
+            "--left", "a=random",
+            "--right", "b=random",
             "--pairs", "2",
             "--seeds", "0,1,2",
             "--bootstrap", "100",
@@ -478,7 +482,7 @@ def test_cli_multi_seed_json_merges(capsys):
 def test_cli_single_seed_via_seeds_matches_seed_flag(capsys):
     tool = _load_tool("head_to_head")
     common = [
-        "--left", "greedy", "--right", "random",
+        "--left", "a=random", "--right", "b=random",
         "--pairs", "3", "--bootstrap", "200", "--json",
     ]
     assert tool.main([*common, "--seed", "4"]) == 0
@@ -495,12 +499,12 @@ def test_cli_seed_flag_validation(capsys):
     tool = _load_tool("head_to_head")
     with pytest.raises(SystemExit):  # mutually exclusive
         tool.main(
-            ["--left", "greedy", "--right", "random", "--seed", "0", "--seeds", "0,1"]
+            ["--left", "a=random", "--right", "b=random", "--seed", "0", "--seeds", "0,1"]
         )
     with pytest.raises(SystemExit):
-        tool.main(["--left", "greedy", "--right", "random", "--seeds", "x"])
+        tool.main(["--left", "a=random", "--right", "b=random", "--seeds", "x"])
     with pytest.raises(SystemExit):
-        tool.main(["--left", "greedy", "--right", "random", "--seeds", ""])
+        tool.main(["--left", "a=random", "--right", "b=random", "--seeds", ""])
 
 
 def test_cli_multi_seed_games_out_splits_by_seed(tmp_path, capsys):
@@ -508,7 +512,7 @@ def test_cli_multi_seed_games_out_splits_by_seed(tmp_path, capsys):
     path = tmp_path / "games.jsonl"
     code = tool.main(
         [
-            "--left", "greedy", "--right", "random",
+            "--left", "a=random", "--right", "b=random",
             "--pairs", "2", "--seeds", "0,1", "--bootstrap", "100",
             "--json", "--games-out", str(path),
         ]
@@ -523,7 +527,7 @@ def test_cli_multi_seed_games_out_splits_by_seed(tmp_path, capsys):
         for line in lines:
             assert set(json.loads(line)) == {
                 "seed", "seats", "scores", "subject", "opponent",
-                "subject_seat", "kind",
+                "subject_seat", "kind", "rules_id",
             }
     assert not path.exists()  # multi-seed never writes the bare path
 
@@ -533,7 +537,7 @@ def test_cli_single_seed_games_out_writes_exact_path(tmp_path, capsys):
     path = tmp_path / "games.jsonl"
     assert tool.main(
         [
-            "--left", "greedy", "--right", "random",
+            "--left", "a=random", "--right", "b=random",
             "--pairs", "2", "--seed", "0", "--bootstrap", "100",
             "--json", "--games-out", str(path),
         ]
@@ -550,8 +554,8 @@ def test_h2h_screen_smoke(tmp_path, capsys):
     games_dir = tmp_path / "games"
     code = tool.main(
         [
-            "--pair", "greedy", "random",
-            "--pair", "random", "greedy",
+            "--pair", "a=random", "b=random",
+            "--pair", "b=random", "a=random",
             "--seeds", "0,1",
             "--pairs", "2",
             "--bootstrap", "100",

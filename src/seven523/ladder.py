@@ -1,6 +1,6 @@
 """M2 ladder construction: schedule paired 对局, play them, fit and select rungs.
 
-The plan (``docs/human-elo-plan.md`` §3.1) needs a set of bot levels whose Elo
+The plan (``docs/human-elo-plan.md`` §3.1) needs a set of bot levels whose rating
 is *measured*, not trained: every candidate plays each pinned anchor enough
 times for a usable rating, and the result is frozen into the study manifest so
 the D1 calibration reads the same ratings as labels.
@@ -21,21 +21,32 @@ files; ``workers=1`` is the original single-process loop.
 from __future__ import annotations
 
 import json
+import math
 import multiprocessing
 import pickle
 import random
 import sys
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Any
 
-from .elo import Fit, FitConfig, PlayedGame, Prior, RungSelection, fit_ratings, select_rungs
+from .elo import (
+    DEFAULT_SIGMA,
+    Fit,
+    FitConfig,
+    PlayedGame,
+    Prior,
+    RungSelection,
+    fit_ratings,
+    select_rungs,
+)
 from .policies import Policy, policy_from_spec
 from .record import play_recorded, policy_seed
-from .rules import DEFAULT_RULES, Rules
+from .rules import DEFAULT_RULES, Rules, rules_id
 from .trace import player_label
 
 __all__ = [
@@ -44,13 +55,14 @@ __all__ = [
     "ScheduledGame",
     "build_ladder",
     "make_factory",
+    "manifest_priors",
     "plan_games",
     "play_games",
     "split_schedule",
 ]
 
-#: The plan's anchor ratings (§3.1); the CLI defaults to these two 秤砣.
-DEFAULT_ANCHOR_ELO: dict[str, float] = {"random": 1000.0, "greedy": 1315.0}
+#: The pinned gauge: the RandomBot defines rating 0 (ADR-0012).
+DEFAULT_ANCHOR_RATING: dict[str, float] = {"random": 0.0}
 
 
 def _silent(*_args: object, **_kwargs: object) -> None:
@@ -87,6 +99,79 @@ class Entrant:
     @property
     def is_anchor(self) -> bool:
         return self.pinned is not None
+
+
+def _finite_float(value: Any) -> float | None:
+    """``value`` as a finite float, or ``None`` for anything else.
+
+    ``bool`` is rejected even though it is an ``int``: ``True`` in a manifest
+    is a schema error, not a rating of 1.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _manifest_prior(
+    id_: Any, mu: Any, sigma: Any, default_sigma: float
+) -> tuple[str, Prior] | None:
+    """One manifest entry as ``(id, Prior)``; invalid ids/mu are skipped.
+
+    A missing, non-finite or non-positive ``sigma`` falls back to
+    ``default_sigma`` so a manifest with a usable centre stays usable.
+    """
+    if not isinstance(id_, str) or not id_:
+        return None
+    centre = _finite_float(mu)
+    if centre is None:
+        return None
+    width = _finite_float(sigma)
+    if width is None or width <= 0.0:
+        width = default_sigma
+    return id_, Prior(centre, width)
+
+
+def manifest_priors(
+    document: Mapping[str, Any],
+    *,
+    default_sigma: float = DEFAULT_SIGMA,
+) -> dict[str, Prior]:
+    """Resolve warm-start priors from a study manifest (ADR-0013 §7).
+
+    ``subjects`` entries carry a per-id ``sigma`` and win over ``levels``; a
+    levels-only entry contributes its ``mu`` with ``default_sigma``.  Invalid
+    ids or a missing/non-finite ``mu`` are skipped, and a bad ``sigma`` is
+    replaced by ``default_sigma``, so a corrupt manifest can never inject NaN
+    into a fit.  The document is only read, never mutated; a caller that lets
+    an explicit prior win does ``{**manifest_priors(document), **explicit}``.
+    """
+    width = _finite_float(default_sigma)
+    if width is None or width <= 0.0:
+        raise ValueError(
+            f"default_sigma must be positive and finite, got {default_sigma!r}"
+        )
+    priors: dict[str, Prior] = {}
+    levels = document.get("levels")
+    if isinstance(levels, Mapping):
+        for id_, mu in levels.items():
+            entry = _manifest_prior(id_, mu, None, width)
+            if entry is not None:
+                priors[entry[0]] = entry[1]
+    subjects = document.get("subjects")
+    if isinstance(subjects, (list, tuple)):
+        for subject in subjects:
+            if not isinstance(subject, Mapping):
+                continue
+            entry = _manifest_prior(
+                subject.get("id"),
+                subject.get("mu"),
+                subject.get("sigma"),
+                width,
+            )
+            if entry is not None:
+                priors[entry[0]] = entry[1]
+    return priors
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,10 +211,10 @@ def plan_games(
     comparisons see the same deals; every deal is then scheduled **twice with
     the candidate on each seat**, so the per-deal hand/seat asymmetry cancels
     inside the twin pair and the candidate's list position no longer changes
-    which games it plays (the old index-parity seat rotation made Elo drift
+    which games it plays (the old index-parity seat rotation made the rating drift
     with candidate order — see docs/experiments/elo-reliability-audit.md).
-    ``cross`` adds candidate-vs-candidate games per pair (even; 0 by default:
-    two anchors already make every rating identifiable).  Pure and
+    ``cross`` adds candidate-vs-candidate games per pair (even); with a single
+    pinned gauge those games are what rank the candidates (ADR-0012).  Pure and
     deterministic — no policies are built here.
     """
     entrants = tuple(entrants)
@@ -154,7 +239,7 @@ def plan_games(
 
     master = random.Random(seed)
     schedule: list[ScheduledGame] = []
-    for index in range(games_per_anchor // 2):
+    for _ in range(games_per_anchor // 2):
         for anchor in anchors:
             deal_seed = master.randrange(1 << 32)
             for candidate in candidates:
@@ -164,7 +249,7 @@ def plan_games(
                     schedule.append(
                         ScheduledGame(deal_seed, tuple(seats), candidate.id)
                     )
-    for index in range(cross // 2):
+    for _ in range(cross // 2):
         deal_seed = master.randrange(1 << 32)
         for left in range(len(candidates)):
             for right in range(left + 1, len(candidates)):
@@ -299,6 +384,7 @@ def _play_games_range(
     ``g0012__...`` name the serial run would have written for that slot.
     """
     by_id = {entrant.id: entrant for entrant in entrants}
+    identity = rules_id(rules)
     results_handle = None
     if results_path is not None:
         results_path.parent.mkdir(parents=True, exist_ok=True)
@@ -348,6 +434,7 @@ def _play_games_range(
                     "opponent": opponent,
                     "subject_seat": human,
                     "kind": "anchor" if by_id[opponent].is_anchor else "cross",
+                    "rules_id": identity,
                 }
                 results_handle.write(
                     json.dumps(line, ensure_ascii=False, separators=(",", ":")) + "\n"
@@ -462,10 +549,12 @@ def play_games(
     ``results_out`` names a JSONL file that receives one line per game, appended
     as soon as the game finishes (audit §6.2 #2).  Each line is
     ``{"seed", "seats", "scores", "subject", "opponent", "subject_seat",
-    "kind"}`` with ``kind`` ``"anchor"`` when the subject's opponent is pinned
-    and ``"cross"`` otherwise — enough to re-pair twins, bootstrap by deal, or
-    join against the fitting schedule later.  ``None`` (the default) keeps the
-    old behaviour: nothing is written.
+    "kind", "rules_id"}`` with ``kind`` ``"anchor"`` when the subject's
+    opponent is pinned and ``"cross"`` otherwise, and ``rules_id`` the
+    identity of ``rules`` (ADR-0013: ratings from different rule versions are
+    never pooled) — enough to re-pair twins, bootstrap by deal, or join against
+    the fitting schedule later.  ``None`` (the default) keeps the old
+    behaviour: nothing is written.
 
     ``results_dir`` is the sharded alternative: each worker writes its own
     ``shard_NNNNN.jsonl`` directly into the directory (no temp file and no
@@ -531,7 +620,7 @@ def build_ladder(
     entrants: Sequence[Entrant],
     *,
     games_per_anchor: int = 100,
-    cross: int = 0,
+    cross: int | None = None,
     seed: int = 0,
     rules: Rules = DEFAULT_RULES,
     out: str | Path | None = None,
@@ -540,7 +629,6 @@ def build_ladder(
     count: int = 5,
     min_spacing: float = 100.0,
     max_spacing: float = 150.0,
-    window: int | None = None,
     config: FitConfig = FitConfig(),
     factory: Callable[[str, Rules, int], Policy] | None = None,
     device: str = "cpu",
@@ -548,7 +636,10 @@ def build_ladder(
 ) -> Ladder:
     """Plan, play, fit and select in one call — the default M2 path.
 
-    Requires at least two pinned anchors (the plan's 秤砣 requirement); a
+    Requires at least one pinned anchor (the RandomBot gauge, ``mu = 0``); with
+    a single gauge the candidates' own games are what rank them, so ``cross``
+    defaults to ``games_per_anchor`` (candidate-vs-candidate twins, ADR-0012)
+    and only an explicit ``cross=0`` leaves the ladder anchor-only.  A
     candidate's ``prior`` (e.g. its parent model's rating) warm-starts the fit
     as data.  Pass ``out`` to write the study traces, ``None`` to fit silently;
     pass ``games_out`` for the per-game JSONL (audit §6.2 #2) independently of
@@ -557,11 +648,13 @@ def build_ladder(
     """
     entrants = tuple(entrants)
     anchors = [entrant for entrant in entrants if entrant.is_anchor]
-    if len(anchors) < 2:
+    if not anchors:
         raise ValueError(
-            "the plan requires at least two anchors (Random/Greedy or rated "
-            "checkpoints); pass --anchor for a second one"
+            "a ladder needs at least one pinned anchor as the rating gauge "
+            "(the RandomBot, mu = 0)"
         )
+    if cross is None:
+        cross = games_per_anchor
     schedule = plan_games(
         entrants, games_per_anchor=games_per_anchor, cross=cross, seed=seed
     )
@@ -582,7 +675,7 @@ def build_ladder(
         for entrant in entrants
         if not entrant.is_anchor and entrant.prior is not None
     }
-    fit = fit_ratings(played, anchors=fixed, priors=priors, window=window, config=config)
+    fit = fit_ratings(played, anchors=fixed, priors=priors, config=config)
     candidates = {
         entrant.id: fit.ratings[entrant.id] for entrant in entrants if not entrant.is_anchor
     }

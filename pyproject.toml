@@ -6,6 +6,8 @@ authors = [{ name = "amas127", email = "amadeusxu127@gmail.com" }]
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "gymnasium>=1.3.0",
+    "openskill>=6.2",
+    "scipy>=1.18.1",
 ]
 
 [project.scripts]
@@ -14,13 +16,17 @@ dependencies = [
 7g523-train = "seven523.train:main"
 7g523-eval = "seven523.eval:main"
 7g523-elo = "seven523.placement:main"
+7g523-web = "seven523.web:main"
 
 [build-system]
 requires = ["uv_build>=0.12.19,<0.13.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
-dev = ["pytest>=9.1.1"]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-xdist>=3.8.0",
+]
 train = [
     "numpy>=1.26",
     "tensorboard>=2.18",

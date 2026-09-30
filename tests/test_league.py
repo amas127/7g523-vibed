@@ -12,6 +12,8 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+from support import FirstLegalBot  # noqa: E402
+
 from seven523.actions import nvec_for  # noqa: E402
 from seven523.env import observation_dim  # noqa: E402
 from seven523.league import (  # noqa: E402
@@ -24,7 +26,6 @@ from seven523.league import (  # noqa: E402
 from seven523.networks import Agent  # noqa: E402
 from seven523.policies import (  # noqa: E402
     EpisodeMixturePolicy,
-    GreedyBot,
     MixturePolicy,
     RandomBot,
 )
@@ -37,12 +38,12 @@ def _agent(rules=DEFAULT_RULES, hidden=16):
 
 
 def _config(opponent, **overrides):
-    fields = dict(
-        opponent=opponent,
-        num_envs=2,
-        num_players=DEFAULT_RULES.num_players,
-        seed=7,
-    )
+    fields = {
+        "opponent": opponent,
+        "num_envs": 2,
+        "num_players": DEFAULT_RULES.num_players,
+        "seed": 7,
+    }
     fields.update(overrides)
     return LeagueConfig(**fields)
 
@@ -61,7 +62,7 @@ def _build(config, agent=None):
 
 @pytest.mark.parametrize(
     ("opponent", "bot"),
-    [("greedy", GreedyBot), ("random", RandomBot)],
+    [("random", RandomBot)],
 )
 def test_build_league_scripted_rosters(opponent, bot):
     league = _build(_config(opponent))
@@ -101,18 +102,18 @@ def test_build_league_mix_defaults_to_per_decision_mixtures():
         for policy in roster:
             assert [weight for weight, _ in policy.members] == [0.5, 0.5]
             assert policy.members[0][1] is league.frozen
-            assert isinstance(policy.members[1][1], GreedyBot)
+            assert isinstance(policy.members[1][1], RandomBot)
 
 
 def test_build_league_mix_with_pool_episode_populates_seat_mixtures():
-    league = _build(_config("mix", pool_episode=True, mix_greedy_prob=0.25))
+    league = _build(_config("mix", pool_episode=True, mix_random_prob=0.25))
     assert league.frozen is not None
     for env_mixtures in league.episode_mixtures:
         assert len(env_mixtures) == DEFAULT_RULES.num_players - 1
         assert all(isinstance(policy, EpisodeMixturePolicy) for policy in env_mixtures)
         policy = env_mixtures[0]
         assert [weight for weight, _, _ in policy.members] == [0.75, 0.25]
-        assert [member_id for _, _, member_id in policy.members] == ["self", "greedy"]
+        assert [member_id for _, _, member_id in policy.members] == ["self", "random"]
     for roster in league.opponents:
         assert all(isinstance(policy, EpisodeMixturePolicy) for policy in roster)
 
@@ -121,24 +122,23 @@ def test_build_league_pool_member_ids_weights_and_frozen_self():
     league = _build(
         _config(
             "pool",
-            pool_member=("2@greedy", "1@random", "1@self"),
+            pool_member=("2@random", "1@self"),
             pool_episode=True,
         )
     )
-    assert league.member_ids == ["greedy", "random", "self"]
+    assert league.member_ids == ["random", "self"]
     assert league.frozen is not None
     for env_mixtures in league.episode_mixtures:
         policy = env_mixtures[0]
-        assert [weight for weight, _, _ in policy.members] == [2.0, 1.0, 1.0]
+        assert [weight for weight, _, _ in policy.members] == [2.0, 1.0]
         assert [member_id for _, _, member_id in policy.members] == league.member_ids
-        assert isinstance(policy.members[0][1], GreedyBot)
-        assert isinstance(policy.members[1][1], RandomBot)
-        assert policy.members[2][1] is league.frozen
+        assert isinstance(policy.members[0][1], RandomBot)
+        assert policy.members[1][1] is league.frozen
 
 
 def test_build_league_pool_without_pool_episode_stays_per_decision():
-    league = _build(_config("pool", pool_member=("greedy", "random")))
-    assert league.member_ids == ["greedy", "random"]
+    league = _build(_config("pool", pool_member=("random",)))
+    assert league.member_ids == ["random"]
     assert league.episode_mixtures == [[], []]
     for roster in league.opponents:
         assert all(isinstance(policy, MixturePolicy) for policy in roster)
@@ -154,14 +154,14 @@ def test_build_league_seed_rng_overrides_the_base_seed():
     explicit = _build(
         _config(
             "pool",
-            pool_member=("greedy", "random"),
+            pool_member=("random", "self"),
             pool_episode=True,
             seed=draw_seed,
         )
     )
     via_rng = build_league(
         _config(
-            "pool", pool_member=("greedy", "random"), pool_episode=True, seed=0
+            "pool", pool_member=("random", "self"), pool_episode=True, seed=0
         ),
         rules=DEFAULT_RULES,
         agent=_agent(),
@@ -174,11 +174,11 @@ def test_build_league_seed_rng_overrides_the_base_seed():
 
 
 def test_pool_member_ids_disambiguate_repeated_specs():
-    assert pool_member_ids(["greedy", "greedy", "random", "greedy"]) == [
-        "greedy#1",
-        "greedy#2",
-        "random",
-        "greedy#3",
+    assert pool_member_ids(["random", "random", "self", "random"]) == [
+        "random#1",
+        "random#2",
+        "self",
+        "random#3",
     ]
     assert parse_pool_member("2.5@ckpt:runs/x/agent.pt") == (
         2.5,
@@ -229,3 +229,41 @@ def test_pfsp_controller_win_rate_shrinks_toward_half_with_the_prior():
     pfsp.record("a", 1)
     assert pfsp.win_rate("a") == pytest.approx((0.5 * 10 + 1) / 11)
     assert pfsp.maybe_update() is not None
+
+
+def test_build_league_self_freezes_the_full_event_config():
+    """The frozen opponent must carry the learner's event layout (step 7).
+
+    A naive rebuild would drop the event encoder and the strict
+    ``load_state_dict`` refresh would raise; ``deepcopy`` also keeps the
+    relative-seat reconstruction keyed to the opponent's own view.
+    """
+    from seven523.env import Seven523Env
+    from seven523.networks import history_layout
+
+    torch.manual_seed(0)
+    agent = Agent(
+        observation_dim(DEFAULT_RULES.num_players),
+        nvec_for(DEFAULT_RULES),
+        hidden=16,
+        event_len=8,
+        event_hidden=4,
+        event_noisy=True,
+        event_seat="none",
+    )
+    league = _build(_config("self"), agent=agent)
+    assert league.frozen is not None
+    assert history_layout(league.frozen.agent) == history_layout(agent)
+    env = Seven523Env(seed=0, opponents=[FirstLegalBot(), FirstLegalBot()])
+    env.reset()
+    action, _suit = league.frozen.act(env.view())
+    assert env.action_mask[action]
+    # Refreshing in place publishes the learner's new weights.
+    with torch.no_grad():
+        agent.actor.weight[0, 0] += 1.0
+    league.frozen.agent.load_state_dict(agent.state_dict())
+    assert torch.equal(league.frozen.agent.actor.weight, agent.actor.weight)
+    assert torch.equal(
+        league.frozen.agent.event_encoder.mlp[0].weight,
+        agent.event_encoder.mlp[0].weight,
+    )

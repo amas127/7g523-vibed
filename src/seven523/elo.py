@@ -1,32 +1,47 @@
-"""Result-based Elo estimation: the pure rating core (ADR-0006).
+"""Result-based rating: the pure OpenSkill rating core (ADR-0011).
 
 One :class:`PlayedGame` is one 牌局 (发牌 → 撬底) and that is the only unit this
 module observes: 一墩 results and per-decision statistics never enter, so
 statistics cluster by game by construction.  The module is pure in-process
 math — no torch, no numpy, no paths, no RNG, no clock — which keeps it testable
 without the training stack and lets every caller cross the same seam: the M2
-ladder builder today, the D3 hybrid estimator (window + trace prior) later.
+ladder builder, the arena, and the D3 human-placement estimator.
 
-The estimator is a Bradley-Terry MAP.  A free entrant's rating solves
+The estimator is the standard OpenSkill Weng–Lin **Plackett–Luce** Gaussian
+model (:class:`openskill.models.PlackettLuce`): every entrant carries a Gaussian
+rating ``(mu, sigma)`` and :func:`fit_ratings` replays the games in
+chronological order, applying the model's online update once per 牌局.  A
+pinned anchor is a fixed ``mu`` with ``sigma = 0``; an id's :class:`Prior` is
+its initial Gaussian; ``tau`` (openskill's dynamics term) keeps ``sigma`` from
+collapsing, which replaces the old per-id result window.
 
-``p = 1 / (1 + 10 ** ((R_opponent - R) / 400))``
-
-with a Gaussian prior on ``R`` (``Prior``), damped-Newton coordinate sweeps (step
-cap ``FitConfig.step_cap``, rating clamped to ``[rating_min, rating_max]``), and
-an optional Gaussian 分差 term ``N(c * (R - R_opponent), sigma ** 2)``.  Anchors
-are pinned: their rating is a constant and their ``se`` is exactly 0.
+Ratings are reported on the project's 0-based scale — openskill's default
+``sigma = 25/3`` scaled by 24, ``beta = sigma / 2``, ``tau = sigma / 100``, with
+the pinned RandomBot at ``mu = 0`` (ADR-0012) — so anchors, rung spacing and the
+placement thresholds keep their numbers.  The probability model is the Gaussian
+one from openskill, not the old 400-point logistic: absolute values and CIs are
+not comparable to the retired Bradley–Terry MAP and must be re-measured
+(ADR-0011, T15).
 """
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Iterable, Mapping
+from typing import Protocol, runtime_checkable
+
+from openskill.models import PlackettLuce, PlackettLuceRating
 
 __all__ = [
+    "DEFAULT_BETA",
     "DEFAULT_ELO_SCALE",
+    "DEFAULT_MU",
     "DEFAULT_PRIOR",
+    "DEFAULT_SIGMA",
+    "DEFAULT_TAU",
     "Fit",
     "FitConfig",
+    "Gaussian",
     "PlayedGame",
     "Prior",
     "Rating",
@@ -37,25 +52,50 @@ __all__ = [
     "select_rungs",
 ]
 
+#: The project's rating scale: openskill's default model on the historical
+#: 1500/200 axis, shifted so the pinned RandomBot gauge is 0 (ADR-0012:
+#: the pre-2026-09-25 scale pinned random at 1000, hence the -1000 translation).
+DEFAULT_MU = 500.0
+DEFAULT_SIGMA = 200.0
+
+#: OpenSkill defaults, expressed on that scale (``beta = sigma / 2``,
+#: ``tau = sigma / 100``).
+DEFAULT_BETA = DEFAULT_SIGMA / 2.0
+DEFAULT_TAU = DEFAULT_SIGMA / 100.0
+
+#: The retired 400-point logistic scale, kept only for the reporting helpers
+#: that express a win probability as an Elo difference (``duel``) or as one
+#: Bernoulli observation's SE (``prior``); the estimator does not use it.
 DEFAULT_ELO_SCALE = 400.0
-BETA_SCALE = math.log(10.0)
 
 
 @dataclass(frozen=True, slots=True)
 class Prior:
-    """Gaussian prior on a free entrant's rating."""
+    """Gaussian prior on a free entrant's rating: ``(mu, sigma)``."""
 
-    mean: float = 1500.0
-    sd: float = 200.0
+    mu: float = DEFAULT_MU
+    sigma: float = DEFAULT_SIGMA
 
     def __post_init__(self) -> None:
-        if not (math.isfinite(self.mean) and math.isfinite(self.sd)):
-            raise ValueError("prior mean/sd must be finite")
-        if self.sd <= 0.0:
-            raise ValueError(f"prior sd must be positive, got {self.sd}")
+        if not (math.isfinite(self.mu) and math.isfinite(self.sigma)):
+            raise ValueError("prior mu/sigma must be finite")
+        if self.sigma <= 0.0:
+            raise ValueError(f"prior sigma must be positive, got {self.sigma}")
 
 
 DEFAULT_PRIOR = Prior()
+
+
+@runtime_checkable
+class Gaussian(Protocol):
+    """A Gaussian rating shape: anything carrying ``mu``/``sigma``.
+
+    :class:`Prior`, :class:`Rating` and the placement package's ``Opponent``
+    all satisfy it structurally, which is what :func:`expected_score` needs.
+    """
+
+    mu: float
+    sigma: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,9 +103,8 @@ class PlayedGame:
     """One 牌局 as the estimator sees it: who sat where and the final 分数.
 
     ``seats`` and ``scores`` are parallel; ids must be distinct.  A game may
-    hold any number of seats, but :func:`fit_ratings` currently supports exactly
-    two (pairwise Bradley-Terry); the shape is N-agnostic so multi-seat support
-    does not force an interface change later.
+    hold any number of seats; :func:`fit_ratings` rates all of them with the
+    multiplayer Plackett–Luce update, ties (equal 分数) included.
     """
 
     seed: int
@@ -87,42 +126,38 @@ class PlayedGame:
 
 @dataclass(frozen=True, slots=True)
 class FitConfig:
-    """Estimator constants and the optional 分差 (margin) channel."""
+    """The OpenSkill model constants used to replay a game record.
 
-    elo_scale: float = DEFAULT_ELO_SCALE
+    ``prior`` is the initial rating for ids with no explicit :class:`Prior`;
+    ``beta`` is the performance-noise sd and ``tau`` the additive dynamics
+    term that keeps ``sigma`` from collapsing (both default to openskill's
+    ``sigma / 2`` and ``sigma / 100``).  A positive ``tau`` is required: a
+    zero dynamics term makes the standard update degenerate after enough games.
+    """
+
     prior: Prior = DEFAULT_PRIOR
-    step_cap: float = 300.0
-    rating_min: float = 400.0
-    rating_max: float = 2600.0
-    max_iter: int = 200
-    tol: float = 1e-7
-    margin: tuple[float, float] | None = None  # (c, sigma)
+    beta: float = DEFAULT_BETA
+    tau: float = DEFAULT_TAU
 
     def __post_init__(self) -> None:
-        if not math.isfinite(self.elo_scale) or self.elo_scale <= 0.0:
-            raise ValueError("elo_scale must be positive and finite")
-        if not math.isfinite(self.step_cap) or self.step_cap <= 0.0:
-            raise ValueError("step_cap must be positive and finite")
-        if not self.rating_min < self.rating_max:
-            raise ValueError("rating_min must be below rating_max")
-        if self.max_iter < 1:
-            raise ValueError("max_iter must be at least 1")
-        if self.tol <= 0.0:
-            raise ValueError("tol must be positive")
-        if self.margin is not None:
-            c, sigma = self.margin
-            if not (math.isfinite(c) and c > 0.0):
-                raise ValueError("margin c must be positive and finite")
-            if not (math.isfinite(sigma) and sigma > 0.0):
-                raise ValueError("margin sigma must be positive and finite")
+        if not isinstance(self.prior, Prior):
+            raise ValueError(f"prior must be a Prior, got {self.prior!r}")
+        for name, value in (("beta", self.beta), ("tau", self.tau)):
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"{name} must be positive and finite, got {value!r}")
 
 
 @dataclass(frozen=True, slots=True)
 class Rating:
-    """A fitted rating: ``elo ± se`` over ``n`` 牌局 (anchors have ``se == 0``)."""
+    """A fitted Gaussian rating: ``mu ± sigma`` over ``n`` 牌局.
 
-    elo: float
-    se: float
+    Anchors are exact: they come back with ``mu`` as pinned and ``sigma == 0``.
+    ``sigma`` is the OpenSkill uncertainty (not the old Bradley–Terry Hessian
+    SE); lower means better determined.
+    """
+
+    mu: float
+    sigma: float
     n: int
 
 
@@ -131,94 +166,41 @@ class Fit:
     """The outcome of :func:`fit_ratings` (``ratings`` covers anchors too)."""
 
     ratings: dict[str, Rating]
-    iterations: int
-    converged: bool
+    games: int
+
+
+def _model(config: FitConfig) -> PlackettLuce:
+    """The openskill model for one fit (``mu``/``sigma`` seed the defaults)."""
+    return PlackettLuce(
+        mu=config.prior.mu,
+        sigma=config.prior.sigma,
+        beta=config.beta,
+        tau=config.tau,
+    )
 
 
 def expected_score(
-    rating_a: float, rating_b: float, *, scale: float = DEFAULT_ELO_SCALE
+    rating_a: Gaussian,
+    rating_b: Gaussian,
+    *,
+    config: FitConfig = FitConfig(),
 ) -> float:
-    """``P(a beats b)`` under the 400-point logistic scale."""
-    if not math.isfinite(scale) or scale <= 0.0:
-        raise ValueError("scale must be positive and finite")
-    return 1.0 / (1.0 + 10.0 ** ((rating_b - rating_a) / scale))
+    """``P(a beats b)`` under the Plackett–Luce Gaussian model.
 
-
-def _terms_for(
-    game: PlayedGame,
-) -> dict[str, tuple[str, float, float]]:
-    """Per-seat ``(opponent, score, own-minus-opponent 分差)`` of one 对局."""
-    own_scores = game.scores
-    terms: dict[str, tuple[str, float, float]] = {}
-    for seat, me in enumerate(game.seats):
-        other = game.seats[1 - seat]
-        mine, theirs = own_scores[seat], own_scores[1 - seat]
-        score = 1.0 if mine > theirs else (0.0 if mine < theirs else 0.5)
-        terms[me] = (other, score, float(mine - theirs))
-    return terms
-
-
-def _gradient_info(
-    rating: float,
-    terms: Iterable[tuple[str, float, float]],
-    current: Mapping[str, float],
-    anchors: Mapping[str, float],
-    prior: Prior,
-    beta: float,
-    margin: tuple[float, float] | None,
-    scale: float,
-) -> tuple[float, float]:
-    """Log-posterior gradient and Fisher information for one free rating."""
-    gradient = 0.0
-    info = 1.0 / (prior.sd * prior.sd)
-    for opponent, score, own_margin in terms:
-        opponent_rating = current[opponent] if opponent in current else anchors[opponent]
-        p = expected_score(rating, opponent_rating, scale=scale)
-        gradient += beta * (score - p)
-        info += beta * beta * p * (1.0 - p)
-        if margin is not None:
-            c, sigma = margin
-            residual = own_margin - c * (rating - opponent_rating)
-            gradient += c * residual / (sigma * sigma)
-            info += c * c / (sigma * sigma)
-    gradient -= (rating - prior.mean) / (prior.sd * prior.sd)
-    return gradient, info
-
-
-def _inverse_diagonal(matrix: list[list[float]]) -> list[float]:
-    """Diagonal of the inverse of a symmetric positive-definite matrix.
-
-    Pure-Python Cholesky + triangular inversion keeps the rating core
-    numpy-free.  The prior precision (``1 / sd**2``) adds to every diagonal
-    entry, so every pivot is strictly positive by construction.
+    Uses each side's ``(mu, sigma)``, so an opponent with a wide prior is
+    genuinely less predictable; a pinned anchor's ``sigma == 0`` makes it a
+    known quantity.  This is the model's own probability, which the D3
+    information-optimal pairing maximizes ``p * (1 - p)`` of.
     """
-    n = len(matrix)
-    lower = [[0.0] * n for _ in range(n)]
-    for i in range(n):
-        for j in range(i + 1):
-            total = matrix[i][j] - sum(
-                lower[i][k] * lower[j][k] for k in range(j)
-            )
-            if i == j:
-                if total <= 0.0:
-                    raise ValueError(
-                        "information matrix is not positive definite; "
-                        "check priors and ratings"
-                    )
-                lower[i][j] = math.sqrt(total)
-            else:
-                lower[i][j] = total / lower[j][j]
-    inverse_lower = [[0.0] * n for _ in range(n)]
-    for i in range(n):
-        inverse_lower[i][i] = 1.0 / lower[i][i]
-        for j in range(i):
-            inverse_lower[i][j] = -sum(
-                lower[i][k] * inverse_lower[k][j] for k in range(j, i)
-            ) / lower[i][i]
-    return [
-        sum(inverse_lower[k][i] * inverse_lower[k][i] for k in range(n))
-        for i in range(n)
-    ]
+    model = _model(config)
+    return float(
+        model.predict_win(
+            [
+                [model.rating(mu=rating_a.mu, sigma=rating_a.sigma)],
+                [model.rating(mu=rating_b.mu, sigma=rating_b.sigma)],
+            ]
+        )[0]
+    )
 
 
 def fit_ratings(
@@ -226,28 +208,20 @@ def fit_ratings(
     *,
     anchors: Mapping[str, float],
     priors: Mapping[str, Prior] | None = None,
-    window: int | None = None,
     config: FitConfig = FitConfig(),
 ) -> Fit:
-    """Joint Bradley-Terry MAP over every unpinned id seen in ``games``.
+    """Replay ``games`` (chronological) through the Plackett–Luce update.
 
-    ``games`` is chronological.  ``window=W`` keeps each free id's last ``W``
-    牌局 (``None`` = all history, ``W >= 1``); it is a precision floor, not a
-    convergence aid.  Ids in ``anchors`` are pinned: their rating is returned
-    exactly as given with ``se == 0`` and any prior for them is ignored.  Ids in
-    ``priors`` with no games still get their prior back (``n == 0``), which is
-    how D3's trace prior enters.  Errors: ``ValueError`` for seat counts other
-    than two, non-finite anchors, or invalid ``window``/``config``.
+    Every id seen in ``games`` is rated; ids in ``anchors`` are pinned (their
+    ``mu`` is returned exactly as given with ``sigma == 0`` and they never
+    update).  Ids in ``priors`` with no games still get their prior back
+    (``n == 0``), which is how D3's trace prior enters; any other free id
+    starts from ``config.prior``.  The update is order-dependent: ``games`` is
+    the history, and later 牌局 carry more weight through the dynamics term.
+    Errors: ``ValueError`` for a non-finite anchor, a prior for a pinned
+    anchor, or an invalid ``config``/``prior``.
     """
-    if window is not None and window < 1:
-        raise ValueError("window must be at least 1 (or None for all history)")
     games = tuple(games)
-    for game in games:
-        if len(game.seats) != 2:
-            raise ValueError(
-                "fit_ratings supports two-seat 对局; got "
-                f"{len(game.seats)} seats in {game!r}"
-            )
     anchors = dict(anchors)
     for id_, value in anchors.items():
         if not math.isfinite(value):
@@ -256,87 +230,45 @@ def fit_ratings(
     for id_, prior in priors.items():
         if not isinstance(prior, Prior):
             raise ValueError(f"prior for {id_!r} must be a Prior, got {prior!r}")
-    if any(id_ in anchors for id_ in priors):
-        # Anchors win; a prior there is a caller mistake worth surfacing early.
-        raise ValueError("priors must not target pinned anchors")
+        if id_ in anchors:
+            # Anchors win; a prior there is a caller mistake worth surfacing early.
+            raise ValueError("priors must not target pinned anchors")
+    if not isinstance(config, FitConfig):
+        raise ValueError(f"config must be a FitConfig, got {config!r}")
 
-    occurrences: dict[str, list[int]] = {}
-    for index, game in enumerate(games):
-        for id_ in game.seats:
-            occurrences.setdefault(id_, []).append(index)
-    free_ids = sorted((set(occurrences) | set(priors)) - set(anchors))
+    model = _model(config)
+    counts: dict[str, int] = {}
+    state: dict[str, PlackettLuceRating] = {}
 
-    retained: dict[str, set[int]] = {}
-    for id_ in free_ids:
-        indices = occurrences.get(id_, [])
-        retained[id_] = set(indices[-window:]) if window is not None else set(indices)
-
-    terms: dict[str, list[tuple[str, float, float]]] = {}
-    for id_ in free_ids:
-        rows: list[tuple[str, float, float]] = []
-        for index in sorted(retained[id_]):
-            rows.append(_terms_for(games[index])[id_])
-        terms[id_] = rows
-
-    beta = BETA_SCALE / config.elo_scale
-    rating = {id_: priors.get(id_, config.prior).mean for id_ in free_ids}
-    iterations = 0
-    converged = False
-    for iteration in range(1, config.max_iter + 1):
-        max_step = 0.0
-        for id_ in free_ids:
-            prior = priors.get(id_, config.prior)
-            gradient, info = _gradient_info(
-                rating[id_], terms[id_], rating, anchors, prior, beta,
-                config.margin, config.elo_scale,
-            )
-            step = max(-config.step_cap, min(config.step_cap, gradient / info))
-            updated = min(config.rating_max, max(config.rating_min, rating[id_] + step))
-            max_step = max(max_step, abs(updated - rating[id_]))
-            rating[id_] = updated
-        iterations = iteration
-        if max_step < config.tol:
-            converged = True
-            break
-
-    ratings: dict[str, Rating] = {}
-    index = {id_: position for position, id_ in enumerate(free_ids)}
-    information = [[0.0] * len(free_ids) for _ in free_ids]
-    for id_ in free_ids:
+    def initial(id_: str) -> PlackettLuceRating:
+        if id_ in anchors:
+            return model.rating(mu=anchors[id_], sigma=0.0, name=id_)
         prior = priors.get(id_, config.prior)
-        information[index[id_]][index[id_]] += 1.0 / (prior.sd * prior.sd)
-    for id_ in free_ids:
-        i = index[id_]
-        for opponent, _score, _margin in terms[id_]:
-            opponent_rating = (
-                rating[opponent] if opponent in rating else anchors[opponent]
-            )
-            p = expected_score(rating[id_], opponent_rating, scale=config.elo_scale)
-            info = beta * beta * p * (1.0 - p)
-            if config.margin is not None:
-                c, sigma = config.margin
-                info += c * c / (sigma * sigma)
-            information[i][i] += info
-            if opponent in index:
-                # Free-vs-free games couple both ratings; the joint Hessian
-                # (not the diagonal Fisher) is what gives the honest SE.  Each
-                # game already contributes ``info`` once to each player's own
-                # diagonal through that player's term, so only the pair term is
-                # added here -- and only once per unordered pair (the double
-                # count made every free-vs-free game contribute 2*w and read
-                # the SE up to ~19% too small in cross-heavy designs).
-                j = index[opponent]
-                if i < j:
-                    information[i][j] -= info
-                    information[j][i] -= info
-    inverse_diagonal = _inverse_diagonal(information)
-    for id_ in free_ids:
-        ratings[id_] = Rating(
-            rating[id_], math.sqrt(inverse_diagonal[index[id_]]), len(retained[id_])
+        return model.rating(mu=prior.mu, sigma=prior.sigma, name=id_)
+
+    for id_ in set(anchors) | set(priors):
+        state[id_] = initial(id_)
+
+    for game in games:
+        for id_ in game.seats:
+            if id_ not in state:
+                state[id_] = initial(id_)
+        teams = [[state[id_]] for id_ in game.seats]
+        updated = model.rate(teams, scores=[float(score) for score in game.scores])
+        for seat, id_ in enumerate(game.seats):
+            counts[id_] = counts.get(id_, 0) + 1
+            if id_ not in anchors:
+                state[id_] = updated[seat][0]
+
+    ratings = {
+        id_: Rating(
+            mu=rating.mu,
+            sigma=0.0 if id_ in anchors else rating.sigma,
+            n=counts.get(id_, 0),
         )
-    for id_, value in anchors.items():
-        ratings[id_] = Rating(value, 0.0, len(occurrences.get(id_, [])))
-    return Fit({id_: ratings[id_] for id_ in sorted(ratings)}, iterations, converged)
+        for id_, rating in state.items()
+    }
+    return Fit({id_: ratings[id_] for id_ in sorted(ratings)}, len(games))
 
 
 @dataclass(frozen=True, slots=True)
@@ -344,8 +276,8 @@ class Rung:
     """One chosen ladder level."""
 
     id: str
-    elo: float
-    se: float
+    mu: float
+    sigma: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -375,18 +307,18 @@ def select_rungs(
 ) -> RungSelection:
     """Pick up to ``count`` rungs from a pool of fitted ratings, lowest first.
 
-    Deterministic: sort by rating then id; start at the lowest; repeatedly take
-    the lowest id at least ``min_spacing`` above the current rung.  A shortfall
-    (fewer candidates than ``count``) and any spacing hole are reported, never
-    hidden.
+    Deterministic: sort by rating mean then id; start at the lowest; repeatedly
+    take the lowest id at least ``min_spacing`` above the current rung.  A
+    shortfall (fewer candidates than ``count``) and any spacing hole are
+    reported, never hidden.
     """
     if count < 1:
         raise ValueError("count must be at least 1")
     if not (0.0 < min_spacing <= max_spacing):
         raise ValueError("require 0 < min_spacing <= max_spacing")
     ordered = sorted(
-        (Rung(id_, float(rating.elo), float(rating.se)) for id_, rating in ratings.items()),
-        key=lambda rung: (rung.elo, rung.id),
+        (Rung(id_, float(rating.mu), float(rating.sigma)) for id_, rating in ratings.items()),
+        key=lambda rung: (rung.mu, rung.id),
     )
     if not ordered:
         return RungSelection((), count, min_spacing, max_spacing, (), 0.0, False)
@@ -394,14 +326,14 @@ def select_rungs(
     for rung in ordered[1:]:
         if len(selected) >= count:
             break
-        if rung.elo - selected[-1].elo >= min_spacing:
+        if rung.mu - selected[-1].mu >= min_spacing:
             selected.append(rung)
     wide_gaps = tuple(
-        (selected[i].id, selected[i + 1].id, selected[i + 1].elo - selected[i].elo)
+        (selected[i].id, selected[i + 1].id, selected[i + 1].mu - selected[i].mu)
         for i in range(len(selected) - 1)
-        if selected[i + 1].elo - selected[i].elo > max_spacing
+        if selected[i + 1].mu - selected[i].mu > max_spacing
     )
-    tail_gap = ordered[-1].elo - selected[-1].elo
+    tail_gap = ordered[-1].mu - selected[-1].mu
     ok = (
         len(selected) >= 2
         and len(selected) == count

@@ -19,7 +19,7 @@ never strand a game.
 from __future__ import annotations
 
 import random
-from typing import Callable, Sequence
+from collections.abc import Callable, Sequence
 
 from .actions import legal_ids, split_action
 from .game import Game, GameState, StepResult, View

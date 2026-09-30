@@ -1,0 +1,90 @@
+{
+ "missingOrUnsupported": [
+  {
+   "issue": "DROPPED FINDING: tie / N-seat support (math:ties-and-nseat; TOP-16, major, partially_confirmed). The report only notes the `List[Tuple[str,str,int]]` draw/int mismatch (§2.1.3) and says 'N座/平局用 scores' (§2.4.2). It never carries the actual verified content: openskill's tie-averaging branch is dead code, the dead branch breaks per-player symmetry (not the sum), asymmetric-sigma ties are untested, and any batch fit needs a specified tie-aware likelihood.",
+   "why": "This is a TOP-ISSUE major finding. Its correction changes what an implementer must add to any published estimator (tie-aware Weng-Lin rank likelihood) and which regression test is missing; omitting it leaves the design adjudication incomplete on a core capability of this card game (ties are frequent).",
+   "correction": "Add a short tie/N-seat subsection: keep `PlayedGame(seed,seats,scores)`, derive ranks from scores, state that the dead openskill tie branch affects per-player symmetry not ΣΔμ, add an asymmetric-sigma tie regression test, and require a rank-tie likelihood for any batch fit."
+  },
+  {
+   "issue": "DISTORTED/DROPPED FINDING: winner's curse / gate-survivor→anchor (redteam:A7 plus practice-chess:F4; TOP-13, major, confirmed). The report mentions only that gate outcome makes the anchor set a non-random subset (§2.1.4 iii) and that lineage priors correlate siblings (§6.3). It never states the core diagnosis: only passing checkpoints are rated/pinned at a winner's-curse-biased μ, rejected checkpoints are discarded and never rated (survivor-biased progress curve), and pinning makes the selection bias permanent.",
+   "why": "This is a TOP-ISSUE confirmed major aimed at both designs. Without it the report understates why both designs' 'progress curve' is monotone-by-construction and why the fix is independent re-measurement before pinning.",
+   "correction": "Add explicitly: rate every checkpoint on a common fixed schedule before/independently of the gate; keep rejected checkpoints as rated league opponents; only pin a checkpoint after an independent pre-registered re-measurement, not at its gate-inflated μ."
+  },
+  {
+   "issue": "DROPPED FINDING: Design B's σ<2.5 certification is practically unreachable (redteam:B3; fatal, partially_confirmed). The report covers MLE separation (§3.1.5) and τ=0 σ dynamics (§3.1.2) but never the mechanism that the Weng-Lin update term ∝ p(1−p) stalls σ against a distant pinned anchor, so the 'σ<2.5 and N*≥40' calibration gate certifies on near-zero-information games (first σ* crossing ≈128k all-win games vs N*=40).",
+   "why": "It is a verified fatal-level finding aimed at Design B's central lifecycle gate. Omitting it makes the report's Design-B adjudication incomplete and its §3.4 fix list miss the needed remedy.",
+   "correction": "Add: require at least one pre-registered opponent within ~2β of the candidate before publishing an absolute μ; gate on held-out calibration (log-loss/Brier vs anchors), not σ; report frontier strength via same-deal h2h with deal-clustered CIs."
+  },
+  {
+   "issue": "DROPPED FINDING: variance/σ thresholds (repo:both-sigma-thresholds; major, partially_confirmed). The report never addresses that Design A's σ_min duplicates the repo's τ>0 anti-collapse mechanism and cannot apply to σ=0 anchors, and that a global σ floor would silently change expected_score and placement's z·σ / stop_ci bands (rung selection is mu-only, so unharmed).",
+   "why": "It is a repo-integration major whose correction is directly actionable (drop σ_min, keep anchor σ exactly 0, don't paste native σ*=2.5). Its absence leaves a wrong fix ('set a σ floor') unchallenged.",
+   "correction": "Add: τ>0 is the only floor; never floor anchor σ (must stay exactly 0 per ADR-0011); express any calibration threshold in repo units derived from expected_score; do not copy openskill-native σ*=2.5 literally."
+  },
+  {
+   "issue": "DROPPED FINDING: real non-stationarity is opponent-pool/training coupling (practice-llm:B7; major, confirmed). The report keeps B7's PFSP/IPW sub-point (§3.2) but drops the central correction: most of Design B's drift apparatus (model-version aliasing, task packs, contamination/style bias) is LLM-snapshot-specific and not this repo's failure mode; the repo's real non-stationarity is training/eval pool coupling, which pinning published μ cannot fix.",
+   "why": "This is a high-value design correction that changes the recommended remedy (handle pool drift with fixed reference snapshots in the eval set; version rated records by rules/deal/seat), not just B's LLM framing.",
+   "correction": "Add: identify pool/training coupling as the real non-stationarity, and recommend fixed reference snapshots in the evaluation set plus versioned (rules, deal, seat) rated records; drop reliance on freezing published μ as the drift fix."
+  },
+  {
+   "issue": "DROPPED FINDING: actionable repo gap behind the status-map finding (code:repo-free-ids-drift-inflation; major, partially_confirmed). The report only lists 'per-id status map / rules hash' under over-engineering (§5). It drops the confirmed repo gap that `study.merge_manifest` freezes levels but never feeds them back as fit inputs/priors (so a re-fit recomputes every free id), and that a clean-sheet entrant vs the pinned gauge inflates μ without bound.",
+   "why": "The verified correction says the actionable gap is real and should target the missing orchestration-layer mechanism. Rejecting only the core-seam version leaves the repo gap unaddressed, which matters for the implementation decision.",
+   "correction": "Keep the rejection of a core `fit_ratings` status map, but state the orchestration-layer remedy: feed frozen manifest levels in as `Prior` centers for warm start, and flag/regularize perfect-record entrants ('≥ scale max')."
+  },
+  {
+   "issue": "DROPPED FINDING: winrate→mu gate thresholds are σ-dependent (simulate:r2-sprt-mapping-sigma-dependent; TOP-20, major, confirmed). The report only notes the +35 Elo detector and the retired 400-logistic scale. It never states that p=0.55 maps to ~17.8 mu at σ=0 up to ~39.7 mu at σ=200, so a winrate-defined gate cannot be pre-registered as a fixed effect without also fixing σ.",
+   "why": "It is a TOP-ISSUE confirmed major. Its correction changes the gate specification the repo should adopt (define the gate in Δμ / expected_score at a declared σ).",
+   "correction": "Add: define any promotion gate in Δμ (or expected_score at a declared reference σ) and pre-register it; report realized Δμ and both σ; never reuse the retired 400-logistic 35-Elo constant."
+  },
+  {
+   "issue": "DROPPED CORRECTION: gate→training feedback channel (fixes-new-failures:fix:sprt-independence-misses-training-feedback; partially_confirmed). The report doesn't carry the correction that PFSP weights are computed from observed session outcomes, not gate/published Elo, so a gate-inflated rating does not reweight opponents; the actual rating→training channel is pool.trim/fork-parent selection by μ, and training stops on a data-dependent plateau (random number of gated candidates).",
+   "why": "This prevents an implementer from 'fixing' the wrong channel and from assuming a fixed number of tests for alpha-spending. It is a correctness guard on the report's own gate recommendations.",
+   "correction": "Add: keep league/PFSP weights from session outcomes (the repo already does); name pool.trim/fork-parent μ as the real channel; use an anytime-valid bound or a pre-registered cap because the stopping time is random; report realized false accepts from the logged candidate list."
+  },
+  {
+   "issue": "INTERNAL INCONSISTENCY: the §0 severity de-duplication contradicts the body and the verified de-dup finding. §0 asserts 'A has 2 fatal (infinite loop, replay-not-MLE)' and 'B has 1 major integration blocker', but §2.1.4 labels the SPRT gate 'fatal-ish', and redteam:B3 (σ<2.5 unreachable) is a verified fatal. The steelman de-dup correction also says the honest result is ~2 tau failure modes (FitConfig guard vs the σ=0 ZeroDivisionError) and ~2 batch defects, not a clean 6→1 / 8→1 collapse.",
+   "why": "The summary's headline counts are the report's main quantitative claim; contradicting its own body and the verified finding undermines the 'many fatals are double-counted' thesis.",
+   "correction": "Reconcile §0 with §2.1.4/§3: either count the SPRT and B3 separately, or explicitly say the de-dup merges them; state that de-dup yields ~2 tau modes and ~2 batch defects."
+  },
+  {
+   "issue": "OVER-CLAIM: 'published values are already frozen' (steelman:meta:mvp-vs-do-nothing-and-cost; partially_confirmed). §0/§4 present `merge_manifest(refit=False)` freeze as if published-value stability is solved. The verified correction says the freeze only preserves levels within a lineage (setdefault) and does not stop cross-fit/order drift (~1.42× sd), so the MVP is more than 'documentation + version tag' and 'do nothing' is only defensible if absolute levels are never compared across independent fits.",
+   "why": "This is a high-value framing correction that directly affects the repo's implementation decision: the report should not imply the existing freeze is sufficient.",
+   "correction": "Qualify the freeze claim: state the residual cross-fit/order drift and the precondition (no absolute-level comparison across independent fits), and include the small manifest schema change + refusal-to-pool explicitly in the MVP."
+  },
+  {
+   "issue": "CONTESTED POINT PRESENTED AS SETTLED: τ=0 σ collapse. §3.1.2 states 'τ=0 makes σ decrease monotonically with no equilibrium' as fact. Several verified findings disagree about whether τ=0 collapses or plateaus/settles (math:tau-is-a-window reports 193→7.3 with no equilibrium; repo:grok-tau0-incompatible reports ~27 plateau; requirements:B-tau-zero reports ~69 settle). The report doesn't flag the disagreement.",
+   "why": "This is one of the report's arguments against Design B's τ=0. If the collapse is contested, presenting it as settled overstates that part of the case and hides a genuine uncertainty.",
+   "correction": "Flag the disagreement and rest the τ=0 rejection on the uncontested blockers (FitConfig requires τ>0; openskill raises ZeroDivisionError with any σ=0 participant at τ=0), treating the collapse as setup-dependent."
+  },
+  {
+   "issue": "MISATTRIBUTED NUMBERS: §6.1 says '20k 局/pair 时 C 从 -0.021 变到 +0.004'. In the verified finding the -0.021 is the 1k-games value; at 20k the movement is C -0.5202→-0.5167 (+0.0035). The point (sign flip and shrinkage) survives, but the number placement is wrong.",
+   "why": "Precision matters in a report whose thesis is that the migration is O(1/n) noise; mislabeling which sample gives which shift weakens that evidence.",
+   "correction": "Write: 'C's shift flips sign between 1k (−0.021) and 20k (+0.004) and shrinks toward 0'."
+  },
+  {
+   "issue": "UNSUPPORTED/OVERSTATED: §2.1.1 pairs 'history 5→200,005 rows' with '60 局重放使 history 翻倍'. The verified 60-game figure is the shuffle spread |Δμ|=3.87; the doubling is a general corollary ('each refit appends N'), not a measured 60-game doubling.",
+   "why": "Small but it attaches a specific unsupported number to the infinite-loop claim, which dilutes an otherwise well-evidenced section.",
+   "correction": "Cite the verified facts directly: 'each refit appends one row per replayed game (so the log grows by N per refit)' plus the 5→200,005 reproduction; drop the '60-game doubling' phrasing."
+  },
+  {
+   "issue": "CITATION ERROR: §4/§5 attribute the `PlayedGame (seed, seats, scores)` shape to 'ADR-0006/0011'. The verified correction (steelman:meta:status-map-and-rules-hash-touch-frozen-seam) notes the shape is defined by ADR-0011/elo.py and ADR-0006 is superseded; ADR-0006 line 29 is the no-new-seam commitment.",
+   "why": "The report's fix hinges on which ADR freezes the core, so an incorrect citation weakens the 'do not touch elo.py' argument.",
+   "correction": "Cite ADR-0011/elo.py (and note ADR-0006 is superseded) for the PlayedGame shape."
+  },
+  {
+   "issue": "DISTORTED FRAMING: §0/§2.1.3 describe the target game as 'N 座 + 整数分数 + 高分频' without the verified caveat (code:AB-wrong-units-display-1v1) that the base configuration and the ladder/duel/arena paths are 2-seat, with N-seat only a future capability. The real break for Design A is the missing seed/seat/scores deal structure, not seat count.",
+   "why": "Overstating the seat count props up the 'Design A cannot represent this repo' critique with a weaker sub-argument and misleads an implementer about the current pipeline.",
+   "correction": "State base = 2 seats (N-seat supported by the type/engine but not the current paths); center the critique on the missing seed/seat/scores and deal structure."
+  },
+  {
+   "issue": "DROPPED MATH CORRECTION: math:anchor-pins-location-beta-pins-scale (partially_confirmed). The report gestures at identifiability (§3.2, §6.1) but never records that a single anchor pins only the location gauge while β held fixed pins the scale, nor the correction that Grok's table claim pinning anchors yields 'Σμ 有约束' is false (one anchor constrains location only).",
+   "why": "It is a verified math correction about the design's own claim; leaving it out leaves a factual error in Design B unchallenged in the adjudication.",
+   "correction": "Add one line: one anchor fixes location only, fixed β fixes scale; correct Grok's 'pinning anchors constrains Σμ' table claim."
+  },
+  {
+   "issue": "CROSS-REFERENCE ERROR: §2.2 and §2.3 point the Nash-averaging support-instability claim to §6, but the report's Nash discussion is in §5; §6 is the disputed-points section and contains no Nash content.",
+   "why": "Minor, but it prevents the reader from finding the supporting discussion and suggests section drift in the synthesis.",
+   "correction": "Change the Nash cross-references from §6 to §5."
+  }
+ ],
+ "overallVerdict": "The adjudicated report is substantively faithful and unusually comprehensive: its central repo decision (do not add a second estimator, SPRT, or core fields; add a drift-taxonomy ADR, a rules/version tag, and use the existing duel/manifest machinery) is well-grounded in the verified findings, and its refutation/narrowing list (§7) correctly retracts the round-1 overstatements. However, as a completeness/fidelity audit it has real gaps and a few errors. Most important: three verified findings are effectively dropped — the tie/N-seat support finding (dead openskill tie branch, tie-aware likelihood, asymmetric-sigma tie test), the winner's-curse/gate-survivor→anchor finding (accepted checkpoints pinned at biased μ, rejected ones never rated), and Design B's σ<2.5-certification-is-unreachable finding — plus the σ-threshold side-effect finding and Design B's real non-stationarity (pool/training coupling). It also omits the winrate→μ σ-dependence caveat, the gate→training feedback correction, and the actionable repo gap that frozen manifest levels are never fed back as fit inputs. Its §0 severity de-duplication contradicts its own §2.1.4 and the verified de-dup; it over-claims that published values are 'already frozen' (the freeze is only within-lineage); and it presents the τ=0 σ-collapse as settled although the verified findings disagree. Smaller defects: a misattributed sign-flip number in §6.1, the unsupported '60-game history doubling' phrasing, the ADR-0006-vs-ADR-0011 citation error, overstating the repo as N-seat without the base-2 caveat, and a wrong Nash cross-reference. None of these overturn the report's bottom-line recommendation, but they leave the deliverable materially less complete than a faithful adjudication of the verified corpus should be."
+}

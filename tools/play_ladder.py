@@ -4,27 +4,37 @@
 The registry below is the single vetted list of models that can be played
 right now.  After the 2026-09 family-comparison rule change and the obs v5
 migration, the checkpoint rungs trained under the old rules/layout were
-retired, so the registry currently holds only the two scripted anchors
-(``random``, ``greedy``).  New checkpoint entries are re-added at the seam
-comment above ``OPPONENTS`` once they are trained, measured, and playable.
+retired; the T17 recalibration (2026-09-26, rules revision 3 / ADR-0014)
+re-trained ``lvl1``-``lvl4`` under the current rules, and the 2026-09-27
+w2m/T23 rerating re-measured the whole shared 10-level probit-MLE pool: the
+ladder rungs, the T23 champion ``ws_s2``, the second reference ``pself_s2``
+and the three w2m 2M-continuation arms are all registered below (the top
+cluster as platform entries).  New checkpoint entries are re-added at the
+seam comment above ``OPPONENTS`` once they are trained, measured, and playable.
 
     uv run python tools/play_ladder.py list
     uv run python tools/play_ladder.py list --json
-    uv run python tools/play_ladder.py play greedy -- --seat 1 --rounds 3
+    uv run python tools/play_ladder.py play random -- --seat 1 --rounds 3
 
 ``play <id>`` resolves the id to the argv ``7g523-play`` already accepts
-(``--opponent random|greedy`` or ``--checkpoint <path>``) and forwards every
+(``--opponent random`` or ``--checkpoint <path>``) and forwards every
 remaining argument unchanged.  Checkpoint play needs the ``train`` dependency
-group (torch); the scripted anchors run with the base environment.  Registry
+group (torch); the scripted gauge runs with the base environment.  Registry
 paths are relative to the repository root and are resolved to absolute paths
 before launch, so ``play`` also works from another working directory.
 
-The table columns are placeholders for the re-added rungs: ``strength`` is
-the contract label of a fresh measurement, ``arena`` a new joint
-Bradley-Terry fit (mean Elo ``±`` cross-seed sd).  Every checkpoint is v5 by
-construction: :func:`seven523.networks.load_agent` rejects anything else.
-Values measured under the retired rules must not be mixed in, so the columns
-stay ``-`` until then.
+``strength`` is the contract label of the fresh w2m/T23 rerating (the study
+manifest's probit-MLE ``mu``, rounded) as re-measured by the 2026-09-29
+``search_leafq`` joint republish (one 26,000-game fit, ADR-0013; the raw
+levels moved, so the T17 values and the pre-search table are superseded);
+``arena`` a new joint league fit (mean rating ``±`` cross-seed sd), ``-`` until
+one exists.  Every checkpoint is v5 by construction:
+:func:`seven523.networks.load_agent` rejects anything else.  Values measured
+under the retired rules, or under a different fit, must not be mixed in.
+The measured search rung ``search_leafq`` (μ≈260, spec
+``rolloutt:runs/ei2_value_t5/t_leafq/critic.pt``) is deliberately **not** in
+this registry: ``7g523-play`` cannot build the search wrapper, so playing its
+``critic.pt`` as a raw checkpoint would be a different opponent identity.
 """
 from __future__ import annotations
 
@@ -32,9 +42,9 @@ import argparse
 import json
 import sys
 import unicodedata
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
 
 __all__ = [
     "KIND_LABELS",
@@ -67,7 +77,7 @@ class Opponent:
     ``id`` doubles as the ``--opponent`` value for scripted entries (whose
     ``ckpt`` is ``None``).  ``strength`` is the measured strength label of a
     rung (step count for practice/lab entries); ``arena`` is an optional joint
-    Bradley-Terry measurement (mean ± cross-seed sd), a different fit from
+    league measurement (mean ± cross-seed sd), a different fit from
     ``strength``.
     """
 
@@ -79,7 +89,8 @@ class Opponent:
     note: str
 
 
-#: Display order: the scripted anchors first, then any checkpoint rungs.
+#: Display order: the scripted anchors first, then the ladder rungs, then the
+#: top platform cluster (manifest pool order by strength).
 #:
 #: 接缝（新模型接回）：新规则 / v5 观测下训练并测完强度的模型，按下面的模式在锚点
 #: 之后追加 ``Opponent`` 条目，并把 id 加进 tests/test_play_ladder.py 的
@@ -94,23 +105,90 @@ class Opponent:
 #:         note="<一句话说明>",
 #:     ),
 #:
-#: 旧规则 / 旧观测（obs v1-v3）的 ``runs/*.pt`` 已全部退役，不要接回。
+#: 旧规则 / 旧观测（obs v1-v4）的 ``runs/*.pt`` 已全部退役（ADR-0009），不要接回。
 OPPONENTS: tuple[Opponent, ...] = (
     Opponent(
         id="random",
         kind="script",
-        strength="锚 1000（固定）",
-        arena="1000（锚定）",
+        strength="锚 0（固定）",
+        arena="0（锚定）",
         ckpt=None,
-        note="均匀随机出合法牌；熟悉规则和界面用。",
+        note="均匀随机出合法牌；唯一的脚本对手与评分基准。",
     ),
     Opponent(
-        id="greedy",
-        kind="script",
-        strength="锚 1315（固定）",
-        arena="1315（锚定）",
-        ckpt=None,
-        note="贪心一手；所有比较的固定参照，也是默认对手。",
+        id="lvl1",
+        kind="rung",
+        strength="85（w2m）",
+        arena=None,
+        ckpt="runs/t17early2k__1__1790439615/agent.pt",
+        note="T17 revision-3 梯级（w2m 重标定）：入门档（manifest μ≈84.60）。",
+    ),
+    Opponent(
+        id="lvl2",
+        kind="rung",
+        strength="110（w2m）",
+        arena=None,
+        ckpt="runs/t17early8k__1__1790439629/agent.pt",
+        note="T17 revision-3 梯级（w2m 重标定；manifest μ≈109.79）。",
+    ),
+    Opponent(
+        id="lvl3",
+        kind="rung",
+        strength="126（w2m）",
+        arena=None,
+        ckpt=(
+            "runs/t17pool__1__1790439615/snapshots/"
+            "checkpoint_step65536.pt"
+        ),
+        note="T17 revision-3 梯级（w2m 重标定；manifest μ≈126.24）。",
+    ),
+    Opponent(
+        id="lvl4",
+        kind="rung",
+        strength="181（w2m）",
+        arena=None,
+        ckpt="runs/t17long__1__1790439615/snapshots/checkpoint_step1024000.pt",
+        note="T17 revision-3 梯级：顶档（w2m 重标定；manifest μ≈181.19，池内冠军簇 183–187）。",
+    ),
+    Opponent(
+        id="ws_s2",
+        kind="platform",
+        strength="183（w2m）",
+        arena=None,
+        ckpt="runs/t23wswd__2__1790510181/agent.pt",
+        note="T23 warm-start 续训冠军（w2m 重标定；manifest μ≈182.91，冠军簇下沿）。",
+    ),
+    Opponent(
+        id="pself_s2",
+        kind="platform",
+        strength="183（w2m）",
+        arena=None,
+        ckpt="runs/t18poolself__2__1790499154/agent.pt",
+        note="self-play 池化臂第二参照（w2m 重标定；manifest μ≈183.24）。",
+    ),
+    Opponent(
+        id="w2m_low",
+        kind="platform",
+        strength="186（w2m）",
+        arena=None,
+        ckpt="runs/w2m_low__11__1790516900/agent.pt",
+        note="w2m 2M 续训臂：LR 减半（manifest μ≈186.00）。",
+    ),
+    Opponent(
+        id="w2m_plain",
+        kind="platform",
+        strength="186（w2m）",
+        arena=None,
+        ckpt="runs/w2m_plain__11__1790516900/agent.pt",
+        note="w2m 2M 续训臂：Adam+linear+random（manifest μ≈186.25）。",
+    ),
+    Opponent(
+        id="w2m_ctl",
+        kind="platform",
+        strength="187（w2m）",
+        arena=None,
+        ckpt="runs/w2m_ctl__11__1790516900/agent.pt",
+        note="w2m 2M 续训臂：AdamW+cosine+pool；池内点估计最高（manifest μ≈187.46）。",
     ),
 )
 
@@ -158,7 +236,7 @@ def _pad(text: str, width: int) -> str:
 def format_list(opponents: Sequence[Opponent] = OPPONENTS) -> str:
     """The human-readable table plus one launch command per opponent."""
     headers = (
-        "id", "类型", "强度 / 步数", "arena Elo（3seed）", "ckpt", "说明"
+        "id", "类型", "强度 / 步数", "arena 评分（3seed）", "ckpt", "说明"
     )
     rows: list[tuple[str, ...]] = []
     missing: list[Opponent] = []
@@ -210,10 +288,10 @@ def format_list(opponents: Sequence[Opponent] = OPPONENTS) -> str:
         )
     lines += [
         "",
-        "`--group train` 只在 ckpt 条目需要（torch）；脚本锚点用 "
-        "`uv run 7g523-play --opponent random|greedy` 即可。",
+        "`--group train` 只在 ckpt 条目需要（torch）；脚本基准用 "
+        "`uv run 7g523-play --opponent random` 即可。",
         "透传示例：`uv run python tools/play_ladder.py "
-        "play greedy -- --seat 1 --rounds 3`",
+        "play random -- --seat 1 --rounds 3`",
     ]
     if not any(opponent.ckpt is not None for opponent in opponents):
         lines += [

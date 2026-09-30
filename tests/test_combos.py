@@ -1,3 +1,5 @@
+import itertools
+
 import pytest
 
 from seven523.cards import NATURAL_ORDER, Card, Rank, Suit
@@ -321,7 +323,7 @@ def test_family_chains_are_monotone_over_representatives():
     small = run(*[(Rank.R3, suit) for suit in (Suit.SPADE, Suit.HEART, Suit.CLUB)])
     big = run(*[(Rank.R4, suit) for suit in Suit])
     for chain in ([single, straight, small, big], [pair, pairs, small, big]):
-        for lower, higher in zip(chain, chain[1:]):
+        for lower, higher in itertools.pairwise(chain):
             assert beats(higher, lower)
             assert not beats(lower, higher)
 

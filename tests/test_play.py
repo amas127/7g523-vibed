@@ -1,15 +1,19 @@
 """Human-vs-bot terminal play: pure helpers + scripted-input game loop."""
 import random
+from typing import Any
 
 import pytest
+from support import FirstLegalBot
 
-from seven523.actions import PASS_ID, legal_ids, resolve, suit_options
-from seven523.cards import CARD_ORDER, Card, Rank, Suit
+import seven523.play as play_module
+from seven523.actions import PASS_ID, catalog_for, legal_ids, resolve, suit_options
+from seven523.cards import Card, Rank, Suit, card_key
 from seven523.combos import ComboKind
-from seven523.game import Game, GameState, Phase
-from seven523.policies import GreedyBot, RandomBot
+from seven523.game import Deal, Game, GameState, Phase, StepResult
 from seven523.play import (
+    ChooserPolicy,
     QuitGame,
+    _trick_text,
     action_text,
     combo_text,
     interactive_chooser,
@@ -21,16 +25,13 @@ from seven523.play import (
     state_panel,
     suit_hint,
 )
+from seven523.policies import RandomBot
+from seven523.rules import DEFAULT_RULES
 from seven523.trace import (
     build_trace,
-    card_from_json,
-    card_json,
-    initial_snapshot,
     load_trace,
     save_trace,
-    state_from_snapshot,
 )
-from seven523.rules import DEFAULT_RULES
 
 
 def make_state(seed=0):
@@ -76,7 +77,7 @@ def test_state_panel_shows_hand_and_scores():
 @pytest.mark.parametrize("human_seat", [0, 1])
 def test_play_game_with_scripted_chooser_always_terminates(human_seat):
     rules = DEFAULT_RULES
-    opponents = [GreedyBot(rules), GreedyBot(rules)]
+    opponents = [FirstLegalBot(rules), FirstLegalBot(rules)]
     calls = []
 
     def chooser(game, state, view):
@@ -133,23 +134,8 @@ def test_play_game_propagates_quit():
 SILENT = lambda *args, **kwargs: None  # noqa: E731
 
 
-def test_card_json_round_trip():
-    for card in (CARD_ORDER[0], CARD_ORDER[13], CARD_ORDER[-1]):
-        assert card_from_json(card_json(card)) == card
-
-
-def test_state_from_snapshot_rebuilds_the_deal():
-    game, state = make_state(seed=9)
-    rebuilt = state_from_snapshot(initial_snapshot(state), DEFAULT_RULES)
-    assert rebuilt.hands == state.hands
-    assert rebuilt.draw_pile == state.draw_pile
-    assert rebuilt.revealed == state.revealed
-    assert rebuilt.current == state.current
-    assert rebuilt.played == ()
-
-
 def _played_trace(chooser=None, *, rules=DEFAULT_RULES):
-    opponents = [GreedyBot(rules), GreedyBot(rules)]
+    opponents = [FirstLegalBot(rules), FirstLegalBot(rules)]
     record = {}
     scores = play_game(
         opponents,
@@ -282,14 +268,15 @@ def test_old_traces_without_suit_still_replay():
 
 
 def test_opponent_identity_labels_rungs_and_anchors():
-    # Scripted bots are the study's pinned anchors.
-    assert opponent_identity(None, "greedy") == ("anchor", "greedy")
+    # The scripted bot is the study's pinned gauge.
     assert opponent_identity(None, "random") == ("anchor", "random")
     # A checkpoint carries its rung id, taken from the run directory.
-    assert opponent_identity("runs/lvl3/agent.pt", "greedy") == ("opponent", "lvl3")
-    assert opponent_identity("agent.pt", "greedy") == ("opponent", "agent")
+    assert opponent_identity("runs/lvl3/agent.pt", "random") == ("opponent", "lvl3")
+    assert opponent_identity("agent.pt", "random") == ("opponent", "agent")
     with pytest.raises(ValueError):
         opponent_identity(None, "mystery")
+    with pytest.raises(ValueError):
+        opponent_identity(None, "greedy")  # retired scripted bot
 
 
 def test_play_main_writes_rung_labelled_trace(tmp_path, monkeypatch):
@@ -300,10 +287,10 @@ def test_play_main_writes_rung_labelled_trace(tmp_path, monkeypatch):
         return chooser
 
     monkeypatch.setattr("seven523.play.interactive_chooser", stub_chooser)
-    path = tmp_path / "greedy.json"
-    play_main(["--opponent", "greedy", "--seed", "5", "--save-trace", str(path)])
+    path = tmp_path / "random.json"
+    play_main(["--opponent", "random", "--seed", "5", "--save-trace", str(path)])
     trace = load_trace(path)
-    assert trace["players"] == ["human@seat0", "anchor:greedy@seat1"]
+    assert trace["players"] == ["human@seat0", "anchor:random@seat1"]
     assert replay_trace(trace, print_fn=SILENT) is True
 
 
@@ -311,3 +298,387 @@ def test_interactive_chooser_is_exported_for_placement():
     # The placement CLI reuses this chooser; only its construction is checked
     # here (actually playing needs input()).
     assert callable(interactive_chooser(0, print_fn=SILENT))
+
+
+# -- 撬底 message and bot-dig regression --------------------------------------
+
+
+def _single_action_id(rank: Rank) -> int:
+    return next(
+        index
+        for index, action in enumerate(catalog_for(DEFAULT_RULES))
+        if action.kind is ComboKind.SINGLE and action.ranks == (rank,)
+    )
+
+
+class ScriptedSingles:
+    """A ``Policy`` that leads a fixed sequence of single-card templates."""
+
+    def __init__(self, ranks: list[Rank]) -> None:
+        self._actions = [_single_action_id(rank) for rank in ranks]
+
+    def act(self, view):
+        return self._actions.pop(0), None
+
+
+class AlwaysPass:
+    def act(self, view):
+        return PASS_ID
+
+
+def _pass_chooser(game, state, view):
+    return PASS_ID
+
+
+def _bot_dig_deal(human_seat: int) -> Deal:
+    """2-seat deal: the bot digs with its last card, sweeping the human hand.
+
+    The human holds ♠K ♠10 ♠5 (25 points) and only ever passes; the bot holds
+    the other three suits of 5/10/K (75 points), leads one card per trick and
+    banks 65 before the last K triggers 撬底:
+    65 (banked) + 10 (final trick) + 25 (swept hand) = 100.
+    """
+    human = frozenset(
+        {
+            Card(Rank.RK, Suit.SPADE),
+            Card(Rank.R10, Suit.SPADE),
+            Card(Rank.R5, Suit.SPADE),
+        }
+    )
+    bot = frozenset(
+        Card(rank, suit)
+        for rank in (Rank.R5, Rank.R10, Rank.RK)
+        for suit in (Suit.CLUB, Suit.DIAMOND, Suit.HEART)
+    )
+    hands = (human, bot) if human_seat == 0 else (bot, human)
+    return Deal(
+        hands=hands,
+        draw_pile=(),
+        revealed=tuple(min(hand, key=card_key) for hand in hands),
+        starter=1 - human_seat,
+    )
+
+
+def _bot_dig_deal_with_human_hand(human_hand: frozenset[Card]):
+    """Factory: the bot digs after leading every point card; human never plays.
+
+    The bot holds all twelve 5/10/K cards (100 points) and empties its hand on
+    the last one, so the human's hand is swept.  Vary ``human_hand`` to drive
+    what the 撬底 message is allowed to claim about it.
+    """
+
+    def factory(human_seat: int) -> Deal:
+        bot = frozenset(
+            Card(rank, suit)
+            for rank in (Rank.R5, Rank.R10, Rank.RK)
+            for suit in (Suit.CLUB, Suit.DIAMOND, Suit.HEART, Suit.SPADE)
+        )
+        hands = (human_hand, bot) if human_seat == 0 else (bot, human_hand)
+        return Deal(
+            hands=hands,
+            draw_pile=(),
+            revealed=tuple(
+                min(hand, key=card_key) if hand else Card(Rank.R3, Suit.CLUB)
+                for hand in hands
+            ),
+            starter=1 - human_seat,
+        )
+
+    return factory
+
+
+_BOT_DIG_ALL_POINTS = [Rank.R5] * 4 + [Rank.R10] * 4 + [Rank.RK] * 4
+
+
+def _human_dig_deal(human_seat: int) -> Deal:
+    """2-seat deal: the human plays its last card and digs the bot's hand."""
+    human = frozenset({Card(Rank.R5, Suit.DIAMOND)})
+    bot = frozenset(
+        {
+            Card(Rank.RK, Suit.HEART),
+            Card(Rank.R10, Suit.HEART),
+            Card(Rank.R5, Suit.HEART),
+        }
+    )
+    hands = (human, bot) if human_seat == 0 else (bot, human)
+    return Deal(
+        hands=hands,
+        draw_pile=(),
+        revealed=tuple(min(hand, key=card_key) for hand in hands),
+        starter=human_seat,
+    )
+
+
+def _play_on_crafted_deal(
+    monkeypatch,
+    deal_factory,
+    human_seat: int,
+    bot_policy,
+    chooser,
+    *,
+    seed: int = 12345,
+):
+    """Drive ``play_game`` on a crafted deal instead of a random one.
+
+    ``play_game`` builds its deal through ``Match``; the wrapper injects the
+    crafted opening state for whichever seat is wrapped in the human's
+    ``ChooserPolicy``, so the same deal works with the human at either seat.
+    """
+    real_match = play_module.Match
+
+    class CraftedMatch(real_match):
+        def __init__(self, rules, policies, *, state=None, rng=None):
+            if state is None:
+                seat = next(
+                    index
+                    for index, policy in enumerate(policies)
+                    if isinstance(policy, ChooserPolicy)
+                )
+                state = Game(rules).restore(deal_factory(seat))
+            super().__init__(rules, policies, state=state, rng=rng)
+
+    monkeypatch.setattr(play_module, "Match", CraftedMatch)
+    lines: list[str] = []
+    record: dict[str, Any] = {}
+    scores = play_game(
+        [bot_policy, bot_policy],
+        chooser=chooser,
+        rules=DEFAULT_RULES,
+        human_seat=human_seat,
+        seed=seed,
+        print_fn=lines.append,
+        record=record,
+    )
+    return scores, record, lines
+
+
+def test_trick_text_dug_message_names_the_swept_human_hand():
+    dug_by_bot = StepResult(
+        trick_over=True, winner=1, points_taken=35, dug=True, done=True
+    )
+    assert _trick_text(
+        dug_by_bot, ["你", "对手"], human_seat=0, human_hand_points=True
+    ) == ("墩结束：对手 收下 35 分，撬底！收走全场剩余分（含你手上的点牌）")
+    dug_by_human = StepResult(
+        trick_over=True, winner=0, points_taken=30, dug=True, done=True
+    )
+    assert _trick_text(
+        dug_by_human, ["你", "对手"], human_seat=0, human_hand_points=False
+    ) == ("墩结束：你 收下 30 分，撬底！收走全场剩余分")
+
+
+def test_trick_text_dug_message_omits_sweep_clause_without_human_hand_points():
+    # The bot triggers 撬底 but the human's pre-dig hand held no point cards:
+    # the parenthetical must not claim a sweep of the human's hand (F1).
+    dug_by_bot = StepResult(
+        trick_over=True, winner=1, points_taken=10, dug=True, done=True
+    )
+    assert _trick_text(
+        dug_by_bot, ["你", "对手"], human_seat=0, human_hand_points=False
+    ) == ("墩结束：对手 收下 10 分，撬底！收走全场剩余分")
+
+
+@pytest.mark.parametrize("human_seat", [0, 1])
+def test_play_game_bot_dig_sweeps_human_hand_points_and_replays(
+    monkeypatch, human_seat
+):
+    # Hand-computed predictions, independent of any engine-side sum.
+    human_hand_points = 10 + 10 + 5  # ♠K + ♠10 + ♠5, still in hand at the dig
+    bot_banked_before_dug = 3 * 5 + 3 * 10 + 2 * 10  # three 5s, three 10s, two Ks
+    final_trick_points = 10  # the bot's last card is a K
+    assert (human_hand_points, bot_banked_before_dug, final_trick_points) == (
+        25,
+        65,
+        10,
+    )
+
+    ranks = [Rank.R5] * 3 + [Rank.R10] * 3 + [Rank.RK] * 3
+    scores, record, lines = _play_on_crafted_deal(
+        monkeypatch,
+        _bot_dig_deal,
+        human_seat,
+        ScriptedSingles(ranks),
+        _pass_chooser,
+    )
+    human, bot = human_seat, 1 - human_seat
+    expected = (0, 100) if human_seat == 0 else (100, 0)
+    assert scores == expected
+    assert sum(scores) == 100  # all four suits of 5/10/K are in this deal
+
+    dug_steps = [index for index, step in enumerate(record["steps"]) if step["dug"]]
+    assert len(dug_steps) == 1
+    dug_index = dug_steps[0]
+    dug = record["steps"][dug_index]
+    assert dug["points"] == final_trick_points + human_hand_points == 35
+    assert dug["hand_sizes"] == [0, 0]  # the sweep empties the human's hand
+
+    # The human only ever passed, so its bank must not move when the (empty)
+    # hand points are swept; the bot's final score is bank + trick + hand.
+    before = record["steps"][dug_index - 1]["scores"]
+    expected_before = (
+        [0, bot_banked_before_dug]
+        if human_seat == 0
+        else [bot_banked_before_dug, 0]
+    )
+    assert before == expected_before
+    assert scores[human] == before[human] == 0
+    assert scores[bot] == before[bot] + final_trick_points + human_hand_points
+    assert scores[bot] == bot_banked_before_dug + final_trick_points + human_hand_points
+
+    dug_lines = [line for line in lines if "撬底" in line]
+    assert len(dug_lines) == 1
+    assert "收走全场剩余分" in dug_lines[0]
+    assert "含你手上的点牌" in dug_lines[0]
+
+    trace = build_trace(
+        DEFAULT_RULES,
+        seed=12345,
+        human_seat=human_seat,
+        players=[
+            f"human@seat{seat}" if seat == human_seat else f"anchor:random@seat{seat}"
+            for seat in range(2)
+        ],
+        created_at="2026-01-01T00:00:00",
+        **record,
+    )
+    replay_lines: list[str] = []
+    assert replay_trace(trace, print_fn=replay_lines.append) is True
+    replay_dug = [line for line in replay_lines if "撬底" in line]
+    assert len(replay_dug) == 1 and "含你手上的点牌" in replay_dug[0]
+
+
+@pytest.mark.parametrize("human_seat", [0, 1])
+def test_play_game_bot_dig_omits_sweep_clause_for_point_free_human_hand(
+    monkeypatch, human_seat
+):
+    # Human holds ♠9 only (0 points).  The bot still digs, but nothing in the
+    # human's hand is swept, so the message must not claim there was (F1).
+    human_hand = frozenset({Card(Rank.R9, Suit.SPADE)})
+    scores, record, lines = _play_on_crafted_deal(
+        monkeypatch,
+        _bot_dig_deal_with_human_hand(human_hand),
+        human_seat,
+        ScriptedSingles(_BOT_DIG_ALL_POINTS),
+        _pass_chooser,
+    )
+    expected = (0, 100) if human_seat == 0 else (100, 0)
+    assert scores == expected
+
+    dug = [step for step in record["steps"] if step["dug"]]
+    assert len(dug) == 1
+    assert dug[0]["points"] == 10  # the final trick only; the hand adds 0
+    # The point-free card survives the sweep, so the hand was not emptied.
+    assert dug[0]["hand_sizes"][human_seat] == len(human_hand) == 1
+
+    dug_lines = [line for line in lines if "撬底" in line]
+    assert len(dug_lines) == 1
+    assert "收走全场剩余分" in dug_lines[0]
+    assert "含你手上的点牌" not in dug_lines[0]
+
+    trace = build_trace(
+        DEFAULT_RULES,
+        seed=12345,
+        human_seat=human_seat,
+        players=[
+            f"human@seat{seat}" if seat == human_seat else f"anchor:random@seat{seat}"
+            for seat in range(2)
+        ],
+        created_at="2026-01-01T00:00:00",
+        **record,
+    )
+    replay_lines: list[str] = []
+    assert replay_trace(trace, print_fn=replay_lines.append) is True
+    replay_dug = [line for line in replay_lines if "撬底" in line]
+    assert len(replay_dug) == 1
+    assert "含你手上的点牌" not in replay_dug[0]
+
+
+@pytest.mark.parametrize("human_seat", [0, 1])
+def test_play_game_bot_dig_omits_sweep_clause_for_empty_human_hand(
+    monkeypatch, human_seat
+):
+    # The human has no cards at all when the bot digs, so there is nothing to
+    # claim about its hand (F1; mirrors the recorded hand_sizes [0, 0] trace).
+    scores, record, lines = _play_on_crafted_deal(
+        monkeypatch,
+        _bot_dig_deal_with_human_hand(frozenset()),
+        human_seat,
+        ScriptedSingles(_BOT_DIG_ALL_POINTS),
+        _pass_chooser,
+    )
+    expected = (0, 100) if human_seat == 0 else (100, 0)
+    assert scores == expected
+
+    dug = [step for step in record["steps"] if step["dug"]]
+    assert len(dug) == 1
+    assert dug[0]["points"] == 10  # the final trick only; the hand adds 0
+    assert dug[0]["hand_sizes"] == [0, 0]
+
+    dug_lines = [line for line in lines if "撬底" in line]
+    assert len(dug_lines) == 1
+    assert "收走全场剩余分" in dug_lines[0]
+    assert "含你手上的点牌" not in dug_lines[0]
+
+    trace = build_trace(
+        DEFAULT_RULES,
+        seed=12345,
+        human_seat=human_seat,
+        players=[
+            f"human@seat{seat}" if seat == human_seat else f"anchor:random@seat{seat}"
+            for seat in range(2)
+        ],
+        created_at="2026-01-01T00:00:00",
+        **record,
+    )
+    replay_lines: list[str] = []
+    assert replay_trace(trace, print_fn=replay_lines.append) is True
+    replay_dug = [line for line in replay_lines if "撬底" in line]
+    assert len(replay_dug) == 1
+    assert "含你手上的点牌" not in replay_dug[0]
+
+
+@pytest.mark.parametrize("human_seat", [0, 1])
+def test_play_game_human_dig_message_omits_the_sweep_clause(monkeypatch, human_seat):
+    # The human's 5 (5 points) plus the swept bot hand ♥K ♥10 ♥5 (25) = 30.
+    chooser_calls: list[int] = []
+
+    def play_the_last_card(game, state, view):
+        chooser_calls.append(1)
+        return _single_action_id(Rank.R5)
+
+    scores, record, lines = _play_on_crafted_deal(
+        monkeypatch,
+        _human_dig_deal,
+        human_seat,
+        AlwaysPass(),
+        play_the_last_card,
+    )
+    human, bot = human_seat, 1 - human_seat
+    assert chooser_calls == [1]
+    assert scores == ((30, 0) if human_seat == 0 else (0, 30))
+    assert scores[human] == 5 + 25
+    assert scores[bot] == 0
+
+    dug = [step for step in record["steps"] if step["dug"]]
+    assert len(dug) == 1 and dug[0]["points"] == 30
+    dug_lines = [line for line in lines if "撬底" in line]
+    assert len(dug_lines) == 1
+    assert "收走全场剩余分" in dug_lines[0]
+    assert "含你手上的点牌" not in dug_lines[0]  # the winner is the human
+
+    trace = build_trace(
+        DEFAULT_RULES,
+        seed=12345,
+        human_seat=human_seat,
+        players=[
+            f"human@seat{seat}" if seat == human_seat else f"anchor:random@seat{seat}"
+            for seat in range(2)
+        ],
+        created_at="2026-01-01T00:00:00",
+        **record,
+    )
+    replay_lines: list[str] = []
+    assert replay_trace(trace, print_fn=replay_lines.append) is True
+    replay_dug = [line for line in replay_lines if "撬底" in line]
+    assert len(replay_dug) == 1 and "含你手上的点牌" not in replay_dug[0]
+

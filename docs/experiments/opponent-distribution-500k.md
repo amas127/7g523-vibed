@@ -10,6 +10,8 @@
 > **+2.90 [−17.32,+23.12]**；Greedy 1500 四臂 62.5–63.4% 均在平台带内。→ **逐局冻结、PFSP、
 > 强成员三个效应在本预算/单 seed 下均 null，不采用**。**
 >
+> **后续（2026-09-27）**：T5 null 的四个竞争解释已在 [`../selfplay-pool-plan.md`](../selfplay-pool-plan.md) §2.3 显式化为 AH1–AH6 并执行；结果（弱成员池、三臂全止损）见 [`selfplay-pool-diagnostics.md`](./selfplay-pool-diagnostics.md) 与 [`selfplay-pool-wave1.md`](./selfplay-pool-wave1.md)。
+>
 > 判定口径：[`README.md` §3](./README.md#3-常用命令与口径)；方向设计与验收：
 > [`structural-directions.md` §4](./structural-directions.md)（T5/C）；路线图：
 > [`../plans.md`](../plans.md) §3 T5。

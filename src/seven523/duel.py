@@ -20,7 +20,7 @@ from __future__ import annotations
 import math
 import random
 import statistics
-from typing import Mapping, Sequence
+from collections.abc import Mapping, Sequence
 
 from .elo import DEFAULT_ELO_SCALE, PlayedGame
 from .ladder import Entrant, ScheduledGame
@@ -81,7 +81,7 @@ def _quantile(values: Sequence[float], q: float) -> float:
     if len(values) == 1:
         return values[0]
     position = q * (len(values) - 1)
-    lower = int(math.floor(position))
+    lower = math.floor(position)
     upper = min(lower + 1, len(values) - 1)
     weight = position - lower
     return values[lower] * (1.0 - weight) + values[upper] * weight

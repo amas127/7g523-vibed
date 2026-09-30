@@ -17,12 +17,13 @@ interactive ``--save-trace`` writes a user-named file and stays out of scope.
 """
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any
 
-from .policies import Policy
 from .play import play_game
+from .policies import Policy
 from .rules import DEFAULT_RULES, Rules
 from .trace import build_trace, save_trace, trace_filename
 

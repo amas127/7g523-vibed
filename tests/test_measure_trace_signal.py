@@ -13,6 +13,11 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
+
+from seven523.placement.opponents import load_opponents
+from seven523.rules import DEFAULT_RULES, Rules, rules_id, rules_identity
+from seven523.study import save_manifest
 
 TOOL_PATH = Path(__file__).resolve().parents[1] / "tools" / "measure_trace_signal.py"
 _spec = importlib.util.spec_from_file_location("measure_trace_signal", TOOL_PATH)
@@ -22,7 +27,9 @@ sys.modules[_spec.name] = measure
 _spec.loader.exec_module(measure)
 
 
-def _generate(study: Path, subjects: list[str], games: int) -> None:
+def _generate(
+    study: Path, subjects: list[str], games: int, levels: list[str] | None = None
+) -> None:
     args = argparse.Namespace(
         out=str(study),
         games=games,
@@ -30,7 +37,7 @@ def _generate(study: Path, subjects: list[str], games: int) -> None:
         num_players=2,
         subject=subjects,
         anchor=None,
-        level=[],
+        level=levels or [],
     )
     assert measure.cmd_generate(args) == 0
 
@@ -46,13 +53,13 @@ def _features(study: Path, csv_path: Path) -> list[dict[str, str]]:
 
 def test_generate_and_extract_s1_features(tmp_path):
     study, csv_path = tmp_path / "study", tmp_path / "features.csv"
-    _generate(study, ["random"], games=4)
+    _generate(study, ["random"], games=2)
     rows = _features(study, csv_path)
 
-    assert len(rows) == 4
+    assert len(rows) == 2
     assert list(rows[0]) == list(measure.FEATURE_COLUMNS)
     assert {row["level_id"] for row in rows} == {"random"}
-    assert {float(row["level_elo_ref"]) for row in rows} == {1000.0}
+    assert {float(row["level_elo_ref"]) for row in rows} == {0.0}
     assert {int(row["seat"]) for row in rows} == {0, 1}  # seats rotate
     for row in rows:
         assert row["result"] in {"win", "draw", "loss"}
@@ -62,11 +69,11 @@ def test_generate_and_extract_s1_features(tmp_path):
         for rate in ("trick_win_rate", "pass_rate", "bomb_rate", "lead_rate"):
             assert 0.0 <= float(row[rate]) <= 1.0
     # the paired design uses the same deal seed across subjects
-    _generate(study, ["greedy"], games=4)
+    _generate(study, ["lvl1=random"], games=2)
     all_rows = _features(study, tmp_path / "features_all.csv")
     random_seeds = sorted(row["seed"] for row in all_rows if row["level_id"] == "random")
-    greedy_seeds = sorted(row["seed"] for row in all_rows if row["level_id"] == "greedy")
-    assert random_seeds == greedy_seeds
+    lvl1_seeds = sorted(row["seed"] for row in all_rows if row["level_id"] == "lvl1")
+    assert random_seeds == lvl1_seeds
 
 
 def test_generate_manifest_keys_and_frozen_levels(tmp_path):
@@ -82,14 +89,18 @@ def test_generate_manifest_keys_and_frozen_levels(tmp_path):
         "levels",
         "subjects",
         "anchors",
+        "rules_id",
+        "rules",
     }
-    assert manifest["levels"] == {"random": 1000.0, "greedy": 1315.0}
+    assert manifest["rules_id"] == rules_id(Rules(num_players=2))
+    assert manifest["rules_id"] == rules_id(DEFAULT_RULES)
+    assert manifest["rules"] == rules_identity(DEFAULT_RULES)
+    assert manifest["levels"] == {"random": 0.0}
     assert manifest["subjects"] == [
-        {"id": "random", "spec": "random", "elo": 1000.0}
+        {"id": "random", "spec": "random", "mu": 0.0}
     ]
     assert manifest["anchors"] == [
-        {"id": "random", "elo": 1000.0},
-        {"id": "greedy", "elo": 1315.0},
+        {"id": "random", "mu": 0.0},
     ]
     # A re-run with an explicit new level does not thaw the frozen label;
     # the D1 metadata (seed) still refreshes.
@@ -104,13 +115,55 @@ def test_generate_manifest_keys_and_frozen_levels(tmp_path):
     )
     assert measure.cmd_generate(args) == 0
     frozen = json.loads((study / "manifest.json").read_text(encoding="utf-8"))
-    assert frozen["levels"]["random"] == 1000.0
+    assert frozen["levels"]["random"] == 0.0
     assert frozen["seed"] == 1
+
+
+def test_generate_manifest_carries_the_identity_load_opponents_requires(tmp_path):
+    """A generated manifest must pass the placement rules_id gate (ADR-0013)."""
+    study = tmp_path / "study"
+    _generate(study, ["random"], games=2)
+    manifest = json.loads((study / "manifest.json").read_text(encoding="utf-8"))
+    opponents, anchors = load_opponents(manifest)
+    assert anchors == {"random": 0.0}
+    assert [(o.id, o.mu, o.anchor) for o in opponents] == [("random", 0.0, True)]
+
+
+def test_generate_refuses_a_manifest_measured_under_other_rules(tmp_path):
+    """Scripted levels must not be mixed into a foreign-rules manifest."""
+    study = tmp_path / "study"
+    save_manifest(
+        study / "manifest.json",
+        {
+            "version": 1,
+            "rules_id": rules_id(Rules(straight_max=6)),
+            "levels": {"random": 0.0},
+            "subjects": [{"id": "random", "spec": "random", "mu": 0.0}],
+            "anchors": [{"id": "random", "mu": 0.0}],
+        },
+    )
+    with pytest.raises(ValueError, match="rules_id"):
+        _generate(study, ["random"], games=2)
+
+
+def test_generate_refuses_to_stamp_a_legacy_manifest(tmp_path):
+    """A legacy manifest with measured levels must not be silently re-stamped."""
+    study = tmp_path / "study"
+    save_manifest(
+        study / "manifest.json",
+        {
+            "version": 1,
+            "levels": {"random": 0.0},
+            "subjects": [{"id": "random", "spec": "random", "mu": 0.0}],
+        },
+    )
+    with pytest.raises(ValueError, match="rules_id"):
+        _generate(study, ["random"], games=2)
 
 
 def test_calibrate_reports_m_eff_but_flags_two_levels(tmp_path, capsys):
     study, artifacts = tmp_path / "study", tmp_path / "artifacts"
-    _generate(study, ["random", "greedy"], games=6)
+    _generate(study, ["random", "lvl1=random"], games=6, levels=["lvl1=300"])
     rows = _features(study, artifacts / "features.csv")
     assert len(rows) == 12
 
@@ -124,7 +177,7 @@ def test_calibrate_reports_m_eff_but_flags_two_levels(tmp_path, capsys):
     )
     assert measure.cmd_calibrate(args) == 0
     summary = json.loads((artifacts / "summary.json").read_text(encoding="utf-8"))
-    assert summary["levels"] == {"random": 1000.0, "greedy": 1315.0}
+    assert summary["levels"] == {"random": 0.0, "lvl1": 300.0}
     assert isinstance(summary["m_eff"], float) and summary["m_eff"] > 0
     assert summary["conclusive"] is False
     assert "pipeline check only" in capsys.readouterr().out

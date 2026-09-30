@@ -4,17 +4,16 @@ from __future__ import annotations
 import argparse
 import random
 import sys
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Callable, Sequence
 
-from ..policies import policy_from_spec
 from ..play import interactive_chooser
+from ..policies import Policy, buildable_by_grammar, policy_from_spec
 from ..prior import TracePrior
 from ..study import load_manifest
 from .estimator import SessionConfig
-from .opponents import load_opponents
+from .opponents import Opponent, load_opponents
 from .session import PlacementSession, new_session_id
-
 
 # -- CLI ---------------------------------------------------------------------
 
@@ -23,8 +22,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="7g523-elo",
         description=(
-            "10 局定级会话：轨迹先验 + 胜负/分差的 BT-MAP，输出点估计、诚实 CI、"
-            "最近档与 provisional 标记（docs/human-elo-plan.md M2/M3）"
+            "10 局定级会话：轨迹先验 + OpenSkill（Plackett–Luce）结果似然，输出点估计、"
+            "诚实 CI、最近档与 provisional 标记（docs/human-elo-plan.md M2/M3）"
         ),
     )
     parser.add_argument(
@@ -32,8 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="traces/pool10/manifest.json",
         help=(
             "研究 manifest（levels/anchors/subjects；默认 traces/pool10/manifest.json，"
-            "2026-09-25 牌型族规则后新训 500k 池；旧 traces/study/manifest.json "
-            "仅存历史标签）"
+            "w2m/T23 revision-3 重标定后的 10 级当前池，与 traces/study/manifest.json 同源）"
         ),
     )
     parser.add_argument(
@@ -74,7 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--simulate",
         default=None,
         metavar="SPEC",
-        help="非交互：用 random / greedy / ckpt:<path> 当“真人”跑完整会话",
+        help="非交互：用 random / ckpt:<path> 当“真人”跑完整会话",
     )
     parser.add_argument("--device", default="cpu", help="ckpt 对手的设备（默认 cpu）")
     parser.add_argument(
@@ -86,11 +84,36 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    policy_factory: Callable[[Opponent, int], Policy] | None = None,
+) -> int:
+    """Run ``7g523-elo``; ``policy_factory`` is the optional injection seam.
+
+    Without a factory the pool is gated by the stock ``random``/``ckpt:``
+    grammar: a manifest ``rolloutt:`` search rung (or any other spec the
+    grammar cannot build) is skipped by :func:`load_opponents` with a warning
+    instead of crashing at the first game.  A caller that passes a factory
+    (whose ``(Opponent, seed)`` contract matches
+    :class:`~seven523.placement.PlacementSession`) opts the whole pool in —
+    anchors, raw rungs and search rungs in one joint-fit pool.  The trace
+    prior stays on for every raw game; a played search rung's row is excluded
+    from the trace channel with per-game provenance because its μ lies beyond
+    the raw prior's fitting domain (ADR-0013).
+    """
     args = build_parser().parse_args(list(argv) if argv is not None else None)
     print_fn: Callable[..., None] = (lambda *a, **k: None) if args.quiet else print
+
+    def can_build(spec: str | None) -> bool:
+        if policy_factory is not None and spec is not None:
+            return True
+        return buildable_by_grammar(spec)
+
     try:
-        opponents, anchors = load_opponents(load_manifest(args.manifest))
+        opponents, anchors = load_opponents(
+            load_manifest(args.manifest), can_build=can_build
+        )
         trace_prior = None if args.no_trace_prior else TracePrior.load(args.prior)
         session_id = args.session_id or new_session_id(args.sessions_dir)
         directory = Path(args.sessions_dir) / session_id
@@ -108,6 +131,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
             rng=random.Random(args.seed),
             trace_prior=trace_prior,
+            policy_factory=policy_factory,
             feature_verify=args.verify_traces,
             device=args.device,
         )
@@ -133,8 +157,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     nearest = report["nearest_level"] or {}
     flag = "临时 provisional" if report["provisional"] else "已定级"
     print(
-        f"定级：{human['elo']:.0f} ± {human['ci_half_width']:.0f}（95% CI），"
-        f"最近档 {nearest.get('id', '?')}（{nearest.get('elo', float('nan')):.0f}），"
+        f"定级：{human['mu']:.0f} ± {human['ci_half_width']:.0f}（95% CI），"
+        f"最近档 {nearest.get('id', '?')}（{nearest.get('mu', float('nan')):.0f}），"
         f"{flag}"
     )
     print(f"报告：{report['session']['report']}")

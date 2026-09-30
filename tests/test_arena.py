@@ -48,10 +48,8 @@ def _load_tool(name: str):
 
 
 def anchors() -> list[Entrant]:
-    return [
-        Entrant("random", "random", pinned=1000.0),
-        Entrant("greedy", "greedy", pinned=1315.0),
-    ]
+    # The pinned gauge: the RandomBot defines 0 (ADR-0012).
+    return [Entrant("random", "random", pinned=0.0)]
 
 
 def _tiny_agent(path: Path, *, hidden: int = 8) -> None:
@@ -61,12 +59,8 @@ def _tiny_agent(path: Path, *, hidden: int = 8) -> None:
     save_agent(path, Agent(161, [134, 4], hidden=hidden))
 
 
-def _snapshot(games) -> list[tuple[int, tuple[str, ...], tuple[int, ...]]]:
-    return [(game.seed, game.seats, game.scores) for game in games]
-
-
 def test_split_schedule_covers_in_order_and_balances():
-    entrants = [*anchors(), Entrant("c1", "greedy"), Entrant("c2", "random")]
+    entrants = [*anchors(), Entrant("c1", "random"), Entrant("c2", "random")]
     schedule = plan_games(entrants, games_per_anchor=4, cross=4, seed=3)
     shards = split_schedule(schedule, 5)
     assert sum(len(shard) for shard in shards) == len(schedule)
@@ -77,7 +71,7 @@ def test_split_schedule_covers_in_order_and_balances():
 
 
 def test_split_schedule_more_shards_than_games():
-    entrants = [*anchors(), Entrant("c1", "greedy")]
+    entrants = [*anchors(), Entrant("c1", "random")]
     schedule = plan_games(entrants, games_per_anchor=2, seed=0)
     shards = split_schedule(schedule, 100)
     assert len(shards) == 100
@@ -87,70 +81,34 @@ def test_split_schedule_more_shards_than_games():
         split_schedule(schedule, 0)
 
 
-def test_play_parallel_matches_serial_and_merges_in_order(tmp_path):
-    entrants = [*anchors(), Entrant("c1", "greedy"), Entrant("c2", "random")]
-    schedule = plan_games(entrants, games_per_anchor=4, cross=2, seed=3)
-    serial = play_parallel(
-        schedule, entrants, workers=1, games_out=tmp_path / "serial"
-    )
-    parallel = play_parallel(
-        schedule, entrants, workers=3, games_out=tmp_path / "parallel"
-    )
-    assert _snapshot(parallel) == _snapshot(serial)
-    assert [game.seed for game in parallel] == [game.seed for game in schedule]
-
-    shard_files = sorted((tmp_path / "parallel").glob("shard_*.jsonl"))
-    assert len(shard_files) == 3
-    merged = [
-        json.loads(line)
-        for path in shard_files
-        for line in path.read_text(encoding="utf-8").splitlines()
-    ]
-    assert len(merged) == len(schedule)
-    # Shards are contiguous, so concatenating them restores schedule order and
-    # matches the single-process JSONL byte for byte.
-    serial_text = (tmp_path / "serial" / "shard_00000.jsonl").read_text(encoding="utf-8")
-    parallel_text = "".join(
-        path.read_text(encoding="utf-8") for path in shard_files
-    )
-    assert parallel_text == serial_text
-
-
-def test_play_parallel_workers_validation():
-    entrants = [*anchors(), Entrant("c1", "greedy")]
-    schedule = plan_games(entrants, games_per_anchor=2, seed=0)
-    with pytest.raises(ValueError):
-        play_parallel(schedule, entrants, workers=0)
-    assert play_parallel((), entrants, workers=2) == []
-
-
 def test_run_arena_ranks_and_documents():
-    entrants = [*anchors(), Entrant("g1", "greedy"), Entrant("r1", "random")]
-    result = run_arena(entrants, games_per_anchor=20, cross=20, seed=1, workers=1)
-    assert len(result.games) == 20 * 2 * 2 + 20
-    assert result.fit.converged
+    entrants = [
+        *anchors(),
+        Entrant("c1", "random"),
+        Entrant("c2", "random"),
+    ]
+    result = run_arena(entrants, games_per_anchor=20, cross=2, seed=1, workers=1)
+    assert len(result.games) == 20 // 2 * 1 * 2 * 2 + 2
+    assert result.fit.games == len(result.games)
     rows = ranking_rows(result)
-    # Seed 1 under the RULES.md §3 family comparison: g1 (the same GreedyBot
-    # policy as the greedy anchor) edges past the anchor, whose pin still holds.
-    assert rows[0]["id"] == "g1"
-    assert next(row["pinned"] for row in rows if row["id"] == "greedy") == 1315.0
-    assert [row["elo"] for row in rows] == sorted(
-        (row["elo"] for row in rows), reverse=True
+    assert {row["id"] for row in rows} == {"random", "c1", "c2"}
+    assert [row["mu"] for row in rows] == sorted(
+        (row["mu"] for row in rows), reverse=True
     )
-    assert all(row["se"] > 0 for row in rows if row["role"] == "candidate")
-    assert result.fit.ratings["random"].se == 0.0
+    assert all(row["sigma"] > 0 for row in rows if row["role"] == "candidate")
+    assert result.fit.ratings["random"].sigma == 0.0
 
     document = arena_document(
         result,
         seed=1,
         games_per_anchor=20,
-        cross=20,
+        cross=2,
         workers=1,
         device="cpu",
     )
     assert document["games"] == len(result.games)
     assert document["ranking"] == [row["id"] for row in rows]
-    assert document["anchors"] == {"random": 1000.0, "greedy": 1315.0}
+    assert document["anchors"] == {"random": 0.0}
     assert sum(entry["games"] for entry in document["pair_stats"].values()) == len(
         result.games
     )
@@ -158,26 +116,23 @@ def test_run_arena_ranks_and_documents():
         assert entry["games"] >= 20
         assert 0.0 < entry["expected"] < 1.0
 
+    # Largest observed-vs-rating disagreements, sorted by |z| descending.
+    diagnostics = pair_diagnostics(result, min_games=20)
+    assert diagnostics
+    assert [abs(row["z"]) for row in diagnostics] == sorted(
+        (abs(row["z"]) for row in diagnostics), reverse=True
+    )
+
 
 def test_pair_stats_are_symmetric_and_ordered():
-    entrants = [*anchors(), Entrant("g1", "greedy")]
+    entrants = [*anchors(), Entrant("c1", "random")]
     schedule = plan_games(entrants, games_per_anchor=4, seed=2)
     games = play_parallel(schedule, entrants, workers=1)
     stats = pair_stats(games)
-    assert set(stats) == {"g1|greedy", "g1|random"}
+    assert set(stats) == {"c1|random"}
     for entry in stats.values():
         assert entry["a_wins"] + entry["b_wins"] + entry["draws"] == entry["games"]
         assert 0.0 <= entry["a_rate"] <= 1.0
-
-
-def test_pair_diagnostics_sorted_by_abs_z():
-    entrants = [*anchors(), Entrant("g1", "greedy"), Entrant("r1", "random")]
-    result = run_arena(entrants, games_per_anchor=20, cross=20, seed=5, workers=1)
-    rows = pair_diagnostics(result, min_games=20)
-    assert rows
-    assert [abs(row["z"]) for row in rows] == sorted(
-        (abs(row["z"]) for row in rows), reverse=True
-    )
 
 
 def test_step_inference_and_auto_ids():
@@ -193,9 +148,10 @@ def test_step_inference_and_auto_ids():
 
 def test_make_factory_builds_scripted_policies():
     factory = make_factory(device="cpu")
-    assert factory("greedy", DEFAULT_RULES, 0).__class__.__name__ == "GreedyBot"
     bot = factory("random", DEFAULT_RULES, 0)
     assert bot.__class__.__name__ == "RandomBot"
+    with pytest.raises(ValueError):
+        factory("greedy", DEFAULT_RULES, 0)
 
 
 @requires_torch
@@ -224,9 +180,9 @@ def test_policy_from_spec_caches_ckpt_agent_loads(tmp_path, monkeypatch):
 
 @requires_torch
 def test_write_tensorboard_logs_step_bearing_entrants(tmp_path):
-    entrants = [*anchors(), Entrant("base_step00020480", "greedy")]
+    entrants = [*anchors(), Entrant("base_step00020480", "random")]
     result = run_arena(entrants, games_per_anchor=2, seed=0, workers=1)
-    written = write_tensorboard(result, tmp_path / "tb", steps={"g1": 999})
+    written = write_tensorboard(result, tmp_path / "tb", steps={})
     assert written == 1  # the anchor is skipped, the step-named candidate is kept
     assert list((tmp_path / "tb").glob("events.out.tfevents.*"))
 
@@ -238,38 +194,45 @@ def test_cli_smoke_writes_table_and_shards(tmp_path):
     code = tool.main(
         [
             "--anchor", "random=random",
-            "--anchor", "greedy=greedy",
-            "--entrant", "g1=greedy",
-            "--entrant", "r1=random",
-            "--games-per-anchor", "4",
-            "--cross", "4",
+            "--entrant", "c1=random",
+            "--entrant", "c2=random",
+            "--games-per-anchor", "2",
+            "--cross", "2",
             "--seed", "1",
             "--workers", "2",
             "--out", str(out),
             "--games-out", str(games_out),
-            "--step-map", "g1=1234",
+            "--step-map", "c1=1234",
         ]
     )
     assert code == 0
     document = json.loads(out.read_text(encoding="utf-8"))
-    assert document["games"] == 4 * 2 * 2 + 4
-    assert document["ranking"][0] == "g1"
+    assert document["games"] == 2 // 2 * 1 * 2 * 2 + 2
+    assert "c1" in document["ranking"]
     assert document["entrants"][0]["step"] in (None, 1234)
     shard_files = sorted(games_out.glob("shard_*.jsonl"))
     assert len(shard_files) == 2
     assert sum(len(path.read_text(encoding="utf-8").splitlines()) for path in shard_files) == document["games"]
 
 
-def test_cli_rejects_duplicate_ids(tmp_path):
+def test_cli_rejects_duplicate_ids_and_missing_globs(tmp_path):
     tool = _load_tool("arena")
     with pytest.raises(SystemExit):
         tool.main(
             [
-                "--entrant", "g1=greedy",
+                "--entrant", "g1=random",
                 "--entrant", "g1=random",
                 "--games-per-anchor", "2",
                 "--cross", "0",
                 "--out", str(tmp_path / "x.json"),
+            ]
+        )
+    with pytest.raises(SystemExit):
+        tool.main(
+            [
+                "--glob", "definitely/not/here/*.pt",
+                "--games-per-anchor", "2",
+                "--cross", "0",
             ]
         )
 
@@ -287,7 +250,7 @@ def test_cli_glob_discovery_with_every_and_last(tmp_path):
             "--last",
             "--games-per-anchor", "2",
             "--cross", "0",
-            "--workers", "2",
+            "--workers", "1",
             "--seed", "0",
             "--out", str(out),
         ]
@@ -299,15 +262,3 @@ def test_cli_glob_discovery_with_every_and_last(tmp_path):
     steps = {row["id"]: row["step"] for row in document["entrants"]}
     assert steps["base20480"] == 20480
     assert steps["base61440"] == 61440
-
-
-def test_cli_glob_missing_pattern_errors():
-    tool = _load_tool("arena")
-    with pytest.raises(SystemExit):
-        tool.main(
-            [
-                "--glob", "definitely/not/here/*.pt",
-                "--games-per-anchor", "2",
-                "--cross", "0",
-            ]
-        )

@@ -9,9 +9,9 @@ Straight adjacency uses a *different* order, the 13-rank natural cycle
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Iterable
 
 
 class Suit(IntEnum):
@@ -122,7 +122,8 @@ def sorted_cards(cards: Iterable[Card]) -> tuple[Card, ...]:
 
 def make_deck() -> tuple[Card, ...]:
     """The standard 54-card deck in a deterministic order (13×4 + 大王 + 小王)."""
-    return tuple(Card(rank, suit) for rank in STANDARD_RANKS for suit in Suit) + (
+    return (
+        *tuple(Card(rank, suit) for rank in STANDARD_RANKS for suit in Suit),
         Card(Rank.SMALL_JOKER),
         Card(Rank.BIG_JOKER),
     )

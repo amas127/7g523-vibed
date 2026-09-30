@@ -2,6 +2,8 @@
 
 > 资产状态（2026-09-25）：本报告引用的模型 checkpoint 已删除，旧路径不再可用；数值为牌型族规则变更前口径。
 
+> **现行口径（2026-09-29）**：本文件记载 M1 的 v1（4k 语料、17 列线性）产物；发布的 `artifacts/human-elo/prior.json` 已由 **v2/R1** 取代（study10、152 列二次展开 + cell 惩罚 λ=3，sha256 `15fddff1…`），见 [`prior-opponent-correction.md`](./prior-opponent-correction.md) 与 [`prior-v2-confirmation.md`](./prior-v2-confirmation.md)；本文 sha256 与数字为**当时**口径。
+
 > **状态：M1 已完成（2026-09-25）。一句话结论：`tools/fit_trace_prior.py` 已交付，
 > 默认产物 `artifacts/human-elo/prior.json` 以 **T2** 为标签（C-6：默认基准 = T2/去收缩标定，
 > 不是 manifest T1）给出岭回归 + 仿射去收缩 + `σ_traj(n)` 表；对照产物
@@ -43,8 +45,8 @@
 
 ## 3. 管线
 
-按 HR §5.2：`traces/study` → 每局 1 行**轨迹 S1** 特征（复用
-`tools/measure_trace_signal.extract_features`，不在本工具重实现）→ 标准化岭回归
+按 HR §5.2：`traces/study` → 每局 1 行**轨迹 S1** 特征（当时复用
+`tools/measure_trace_signal.extract_features`；实现现已收进 `src/seven523/prior.py`，`measure_trace_signal` 仅再导出）→ 标准化岭回归
 `g(φ) → Elo` → 等级均值上的仿射**去收缩** `f'(φ) = a + b·g(φ)` → 会话级 `σ_traj(n)` 表。
 
 - 特征：**CLEAN + PACE 15 维**（`trick_win_rate`、`trick_point_share`、`lead_rate`、
@@ -108,7 +110,7 @@ sha256sum artifacts/human-elo/prior.json artifacts/human-elo/prior_manifest_labe
 
 ## 7. 后续
 
-- **M2** `src/seven523/placement.py`：会话状态 + `select_opponent`（info/Thompson）+ 10 副
+- **M2** `src/seven523/placement.py`（当时写法；现为 `src/seven523/placement/` 包）：会话状态 + `select_opponent`（info/Thompson）+ 10 副
   不同牌 + 5/5 座位轮换（owner D-6=(b)）+ 停止规则 + 报告；消费
   `prior_for_session(doc, μ_traj, n)`。
 - **M3** `7g523-elo` CLI + `play.py` 写对手 rung 标签（离线可做）。

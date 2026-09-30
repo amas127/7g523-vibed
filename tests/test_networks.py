@@ -11,17 +11,22 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+from support import FirstLegalBot  # noqa: E402
+
 from seven523.actions import joint_mask_bits  # noqa: E402
 from seven523.env import Seven523Env, encode_observation  # noqa: E402
+from seven523.history import EVENT_DIM  # noqa: E402
 from seven523.networks import (  # noqa: E402
     Agent,
+    EventSequenceEncoder,
     NeuralPolicy,
+    WarmStartLayoutError,
+    history_layout,
     load_agent,
     save_agent,
     warm_start_from,
     warm_start_into,
 )
-from seven523.policies import GreedyBot  # noqa: E402
 from seven523.rules import DEFAULT_RULES  # noqa: E402
 
 OBS_V5 = 161
@@ -227,7 +232,9 @@ def test_arch_parameter_counts_match_the_design():
     torch.manual_seed(0)
     shared = Agent(OBS_V5, NVEC, hidden=128)
     towers = Agent(OBS_V5, NVEC, hidden=128, arch="towers")
-    count = lambda agent: sum(p.numel() for p in agent.parameters())
+
+    def count(agent):
+        return sum(p.numel() for p in agent.parameters())
     assert count(shared) == 55_179
     assert count(towers) == 92_427
     one_trunk = sum(p.numel() for p in shared.network.parameters())
@@ -239,7 +246,7 @@ def test_neural_policy_towers_acts_legally_and_matches_masked_argmax():
     torch.manual_seed(0)
     agent = Agent(OBS_V5, NVEC, hidden=16, arch="towers")
     policy = NeuralPolicy(agent, DEFAULT_RULES)
-    env = Seven523Env(seed=0, opponents=[GreedyBot(), GreedyBot()])
+    env = Seven523Env(seed=0, opponents=[FirstLegalBot(), FirstLegalBot()])
     env.reset()
     decisions = 0
     for _ in range(20):
@@ -272,3 +279,130 @@ def test_neural_policy_towers_acts_legally_and_matches_masked_argmax():
         if env.state.done:
             env.reset()
     assert decisions == 20
+
+
+# -- event (EVH) layout identity ---------------------------------------------
+
+
+def test_event_parameter_count_and_default_path_are_pinned():
+    torch.manual_seed(0)
+    events = Agent(OBS_V5, NVEC, hidden=128, event_len=108)
+    default = Agent(OBS_V5, NVEC, hidden=128)
+
+    def count(agent):
+        return sum(p.numel() for p in agent.parameters())
+    assert count(default) == 55_179
+    # Encoder 11056 + widened first trunk layer 32*128.
+    assert count(events) == 55_179 + 11_056 + 32 * 128
+    assert events.event_encoder is not None
+    assert default.event_encoder is None
+    assert not any(name.startswith("event_encoder") for name in default.state_dict())
+    obs = torch.rand(4, OBS_V5)
+    assert torch.equal(default.policy_logits(obs), default.policy_logits(obs, None))
+    with pytest.raises(ValueError, match="no event encoder"):
+        default.policy_logits(obs, None, torch.zeros(4, 4, EVENT_DIM))
+    with pytest.raises(ValueError, match="no events were passed"):
+        events.policy_logits(obs)
+
+
+def test_event_encoder_zeroes_the_seat_segment_in_none_mode():
+    torch.manual_seed(0)
+    concat = Agent(OBS_V5, NVEC, hidden=16, event_len=8, seat_emb=4)
+    seated = Agent(
+        OBS_V5, NVEC, hidden=16, event_len=8, seat_emb=4, event_seat="none"
+    )
+    torch.manual_seed(0)
+    events = torch.rand(2, 8, EVENT_DIM)
+    seats = torch.randint(0, 3, (2, 8))
+    mask = torch.ones(2, 8, dtype=torch.bool)
+    # A zeroed seat segment can never change the output, so two seat patterns
+    # with the same events decode identically.
+    seats_b = torch.full_like(seats, 2)
+    with torch.no_grad():
+        out_a = seated.event_encoder(events, seats, mask)
+        out_b = seated.event_encoder(events, seats_b, mask)
+        out_c = concat.event_encoder(events, seats, mask)
+    assert torch.allclose(out_a, out_b)
+    assert out_a.shape == out_c.shape == (2, 32)
+    assert seated.event_encoder.rnn.input_size == 32 + 4  # seat width preserved
+
+
+def test_event_noisy_and_blind_are_mutually_exclusive():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        Agent(OBS_V5, NVEC, hidden=16, event_len=8, event_blind=True, event_noisy=True)
+
+
+def test_history_layout_marks_mlp_seq_and_event():
+    torch.manual_seed(0)
+    assert history_layout(Agent(OBS_V5, NVEC, hidden=16)) == "mlp"
+    assert history_layout(Agent(OBS_V5, NVEC, hidden=16, seq_len=12)).startswith("seq:")
+    layout = history_layout(Agent(OBS_V5, NVEC, hidden=16, event_len=8))
+    assert layout.startswith("event:8:")
+    both = Agent(OBS_V5, NVEC, hidden=16, seq_len=12, event_len=8)
+    assert "+" in history_layout(both)
+
+
+def test_warm_start_rejects_a_different_history_layout(tmp_path):
+    torch.manual_seed(0)
+    mlp = Agent(OBS_V5, NVEC, hidden=16)
+    event = Agent(OBS_V5, NVEC, hidden=16, event_len=8)
+    path = tmp_path / "event.pt"
+    save_agent(path, event)
+    target = Agent(OBS_V5, NVEC, hidden=16)
+    with pytest.raises(WarmStartLayoutError, match="history layout"):
+        warm_start_from(path, target)
+    with pytest.raises(WarmStartLayoutError, match="history layout"):
+        warm_start_into(target, event)
+    # Same event layout round-trips exactly.
+    twin = Agent(OBS_V5, NVEC, hidden=16, event_len=8)
+    outcome = warm_start_from(path, twin)
+    assert outcome.exact is True
+    assert all(
+        torch.equal(value, event.state_dict()[key])
+        for key, value in twin.state_dict().items()
+    )
+    assert mlp.seq_encoder is None
+
+
+def test_event_checkpoint_records_layout_and_event_fields(tmp_path):
+    torch.manual_seed(0)
+    agent = Agent(
+        OBS_V5,
+        NVEC,
+        hidden=16,
+        event_len=8,
+        event_emb=4,
+        event_hidden=6,
+        seat_emb=4,
+        event_noisy=True,
+    )
+    path = tmp_path / "event.pt"
+    save_agent(path, agent)
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    assert payload["obs_version"] == 5
+    assert payload["history_layout"] == history_layout(agent)
+    assert payload["event_len"] == 8
+    assert payload["event_noisy"] is True
+    loaded, _ = load_agent(path)
+    assert history_layout(loaded) == history_layout(agent)
+
+
+def test_event_encoder_ignores_trailing_pads_beyond_each_rows_last_event():
+    torch.manual_seed(0)
+    encoder = EventSequenceEncoder()
+    events = torch.rand(2, 12, EVENT_DIM)
+    seats = torch.randint(0, 3, (2, 12))
+    mask = torch.zeros(2, 12, dtype=torch.bool)
+    mask[0, :7] = True
+    mask[1, :3] = True
+    clean = encoder(events, seats, mask)
+    tampered = events.clone()
+    tampered[0, 7:] = 999.0
+    tampered[1, 3:] = -999.0
+    assert torch.allclose(clean, encoder(tampered, seats, mask))
+    # A batch element with no real event receives the padded all-zero input and
+    # reads the initial hidden (zeros).
+    empty = torch.zeros(1, 12, dtype=torch.bool)
+    padded_events = torch.zeros(1, 12, EVENT_DIM)
+    padded_seats = torch.full((1, 12), 2, dtype=torch.long)
+    assert encoder(padded_events, padded_seats, empty).abs().max() == 0.0

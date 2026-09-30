@@ -3,7 +3,9 @@
 > 资产状态（2026-09-25）：本报告引用的模型 checkpoint 已删除，旧路径不再可用；数值为牌型族规则变更前口径。
 
 > **状态：研究完成（2026-09-25）。本文只做研究与验证：未改 `src/`、未 commit、未动任何已有报告与
-> `runs/` 里的既有产物。** 临时脚本与原始输出复制在 `runs/obs-slim/`（gitignore）：
+> `runs/` 里的既有产物。** 观测 S1 后续随 [ADR-0008](../adr/0008-observation-layout-v5.md)/
+> [ADR-0009](../adr/0009-single-observation-and-comparison.md) 进入现行 v5 默认布局（v5 = 观测 S1+B0+B1）；观测 S2 已否决。
+> 临时脚本与原始输出复制在 `runs/obs-slim/`（gitignore）：
 > `obs_audit_static.py`（45,752 个 acting-view 的稀疏度与推导关系）、`obs_ablation.py`（ckpt 逐段
 > 置零/打乱）、`obs_winrate.py`（800 副牌配对胜率消融）、`obs_slim_encoder.py` + `obs_pilot_train.py`
 > （精简布局的从零训练，monkeypatch 不改 `src/`）、`slim_h2h.py`（允许两侧不同布局的候选对候选）。

@@ -9,7 +9,7 @@ a flat-observation MLP, and this project's environment.  See
 Typical runs::
 
     uv sync --group train
-    uv run --group train 7g523-train --total-timesteps 1000000          # vs GreedyBot
+    uv run --group train 7g523-train --total-timesteps 1000000          # vs RandomBot
     uv run --group train 7g523-train --opponent self --load-checkpoint runs/<new-run>/agent.pt
     uv run --group train 7g523-eval --checkpoint runs/<new-run>/agent.pt --episodes 500
     uv run --group train tensorboard --logdir runs --port 6006          # 看曲线
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import time
 from pathlib import Path
@@ -28,14 +29,24 @@ import torch
 import torch.optim as optim
 
 from .actions import nvec_for
-from .env import Seven523Env, observation_dim
+from .env import Seven523Env, observation_dim, validate_reward_cap
 from .eval import evaluate
+from .history import (
+    EVENT_DIM,
+    EVENT_ORDERINGS,
+    ORDERINGS,
+    PASS_MODES,
+    WENT_OUT_MODES,
+    EventHistoryWrapper,
+    HistorySequenceWrapper,
+)
 from .league import LeagueConfig, PfspController, build_league, parse_pool_member
 from .metrics import MetricsLogger, TensorboardLogger
 from .networks import (
     Agent,
     NeuralPolicy,
     WarmStartLayoutError,
+    history_layout,
     save_agent,
     warm_start_from,
 )
@@ -46,12 +57,27 @@ from .rules import Rules
 __all__ = [
     "MetricsLogger",
     "TensorboardLogger",
+    "lr_scale",
     "main",
     "make_env",
     "parse_args",
     "parse_pool_member",
     "train",
 ]
+
+
+def lr_scale(schedule: str, update: int, num_updates: int) -> float:
+    """Learning-rate fraction at 1-based ``update`` (ADR-0003 schedule).
+
+    ``linear`` reproduces the historical ``1 - (update - 1) / num_updates``
+    exactly; ``cosine`` is the standard half-cosine from 1 to 0, so both
+    schedules start at 1 and end at 0 and only the shape differs.
+    """
+    if schedule == "cosine":
+        return 0.5 * (1.0 + math.cos(math.pi * (update - 1.0) / num_updates))
+    if schedule == "linear":
+        return 1.0 - (update - 1.0) / num_updates
+    raise ValueError(f"unknown lr schedule {schedule!r}")
 
 
 def _bool(value: str) -> bool:
@@ -87,6 +113,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--anneal-lr", type=_bool, default=True, nargs="?", const=True
     )
+    parser.add_argument(
+        "--lr-schedule",
+        choices=["linear", "cosine"],
+        default="linear",
+        help="LR decay shape under --anneal-lr (default linear)",
+    )
+    parser.add_argument(
+        "--optimizer",
+        choices=["adam", "adamw"],
+        default="adam",
+        help="optimizer; adamw enables decoupled --weight-decay",
+    )
+    parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=0.0,
+        help="decoupled weight decay; only valid with --optimizer adamw",
+    )
     parser.add_argument("--gae", type=_bool, default=True, nargs="?", const=True)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
@@ -108,12 +152,41 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--num-players", type=int, default=2)
     parser.add_argument(
         "--reward-shaping",
-        choices=["terminal", "trick_diff", "win", "trick_diff_win"],
+        choices=[
+            "terminal",
+            "trick_diff",
+            "win",
+            "trick_diff_win",
+            "terminal_win",
+            "saturate",
+        ],
         default="terminal",
         help=(
             "terminal: legacy sparse terminal return; trick_diff: per-step "
             "potential difference (telescopes to the terminal return); win: "
-            "terminal sign(own - best other); trick_diff_win: both"
+            "terminal sign(own - best other); trick_diff_win: both; "
+            "terminal_win: terminal return + win_jump * sign(own - best other); "
+            "saturate: terminal return, but wins are capped at --reward-cap tau"
+        ),
+    )
+    parser.add_argument(
+        "--win-jump",
+        type=float,
+        default=1.0,
+        help=(
+            "terminal_win only: the win/loss boundary jump λ in "
+            "r = terminal margin + λ * seat_outcome (finite, 0 <= λ <= 10); "
+            "ignored by every other mode"
+        ),
+    )
+    parser.add_argument(
+        "--reward-cap",
+        type=float,
+        default=None,
+        help=(
+            "saturate only: the return-unit cap τ on wins (required, finite, "
+            "0 <= τ <= 1; τ=0.2 is a 20-point margin); giving it to any other "
+            "mode is an error"
         ),
     )
     parser.add_argument("--hidden-size", type=int, default=128)
@@ -134,12 +207,137 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--opponent",
-        choices=["greedy", "random", "self", "mix", "pool"],
-        default="greedy",
+        "--seq-len",
+        type=int,
+        default=0,
+        metavar="L",
         help=(
-            "stage 1: scripted bot; stage 2: frozen self-play snapshot; "
-            "mix: frozen self + greedy pool (see --mix-greedy-prob); "
+            "D1-lite sequence memory: public card-history token length fed to "
+            "a GRU encoder (0 = off, historical MLP; 54 covers the whole deck)"
+        ),
+    )
+    parser.add_argument(
+        "--seq-emb", type=int, default=16, help="card embedding width (--seq-len > 0)"
+    )
+    parser.add_argument(
+        "--seq-hidden",
+        type=int,
+        default=32,
+        help="GRU hidden width concatenated to the observation (--seq-len > 0)",
+    )
+    parser.add_argument(
+        "--seq-blind",
+        type=_bool,
+        default=False,
+        nargs="?",
+        const=True,
+        help=(
+            "capacity control: keep the encoder/trunk but feed an all-pad "
+            "history, separating encoder capacity from sequence information"
+        ),
+    )
+    parser.add_argument(
+        "--seq-order",
+        choices=list(ORDERINGS),
+        default="chrono",
+        help=(
+            "history token layout: chrono = public play order (default); "
+            "sorted = same card multiset sorted by card id (order ablation, "
+            "isolates the GRU/order contribution)"
+        ),
+    )
+    parser.add_argument(
+        "--event-len",
+        type=int,
+        default=0,
+        metavar="L",
+        help=(
+            "EVH event-level history: max public events fed to the event "
+            "encoder (0 = off; 108 covers the 2-player upper bound)"
+        ),
+    )
+    parser.add_argument(
+        "--event-emb", type=int, default=32, help="event MLP width (--event-len > 0)"
+    )
+    parser.add_argument(
+        "--event-hidden",
+        type=int,
+        default=32,
+        help="event GRU hidden width concatenated to the observation",
+    )
+    parser.add_argument(
+        "--seat-emb",
+        type=int,
+        default=16,
+        help="relative-seat embedding width (--event-len > 0)",
+    )
+    parser.add_argument(
+        "--event-blind",
+        type=_bool,
+        default=False,
+        nargs="?",
+        const=True,
+        help=(
+            "zero the event vectors and the seat segment (channel alive, "
+            "information zero -- seed-matched MLP-like control)"
+        ),
+    )
+    parser.add_argument(
+        "--event-noisy",
+        type=_bool,
+        default=False,
+        nargs="?",
+        const=True,
+        help=(
+            "replace the event vectors with fixed-seed i.i.d. noise and pad "
+            "the seats: information-zero but non-degenerate (Q-A control)"
+        ),
+    )
+    parser.add_argument(
+        "--event-seat",
+        choices=["concat", "sum", "none"],
+        default="concat",
+        help=(
+            "relative-seat usage: concat (default), sum (needs seat-emb == "
+            "event-emb), none = zeroed seat segment (event_seatblind arm)"
+        ),
+    )
+    parser.add_argument(
+        "--event-order",
+        choices=list(EVENT_ORDERINGS),
+        default="chrono",
+        help=(
+            "event order: chrono (default) or shuffled = fixed permutation "
+            "inside each trick block (order/recency ablation)"
+        ),
+    )
+    parser.add_argument(
+        "--event-pass",
+        choices=list(PASS_MODES),
+        default="keep",
+        help="keep (default) or drop pass events (rhythm ablation)",
+    )
+    parser.add_argument(
+        "--event-boundary-blind",
+        type=_bool,
+        default=False,
+        nargs="?",
+        const=True,
+        help="zero the opens_trick flag (trick-boundary ablation)",
+    )
+    parser.add_argument(
+        "--event-wentout",
+        choices=list(WENT_OUT_MODES),
+        default="keep",
+        help="keep (default) or drop the went_out flag (ablation)",
+    )
+    parser.add_argument(
+        "--opponent",
+        choices=["random", "self", "mix", "pool"],
+        default="random",
+        help=(
+            "stage 1: scripted random bot; stage 2: frozen self-play snapshot; "
+            "mix: frozen self + random pool (see --mix-random-prob); "
             "pool: N-member league (see --pool-member)"
         ),
     )
@@ -150,7 +348,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="[WEIGHT@]SPEC",
         help=(
             "with --opponent pool: repeat per league member; SPEC is "
-            "greedy / random / self (refreshable) / ckpt:<agent.pt>; "
+            "random / self (refreshable) / ckpt:<agent.pt>; "
             "weight defaults to 1"
         ),
     )
@@ -212,10 +410,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--mix-greedy-prob",
+        "--mix-random-prob",
         type=float,
         default=0.5,
-        help="with --opponent mix, per-decision probability of facing GreedyBot",
+        help="with --opponent mix, per-decision probability of facing RandomBot",
     )
     parser.add_argument(
         "--self-play-refresh",
@@ -242,9 +440,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="updates between checkpoint.pt saves (0 = final agent.pt only)",
     )
     parser.add_argument(
+        "--snapshot-interval",
+        type=int,
+        default=0,
+        help=(
+            "updates between snapshot checkpoints under <run_dir>/snapshots "
+            "(0 = off)"
+        ),
+    )
+    parser.add_argument(
         "--eval-interval", type=int, default=0, help="updates between evals (0 = off)"
     )
-    parser.add_argument("--eval-opponent", choices=["greedy", "random"], default="greedy")
+    parser.add_argument("--eval-opponent", choices=["random"], default="random")
     parser.add_argument("--eval-episodes", type=int, default=100)
     parser.add_argument("--log-interval", type=int, default=1)
     parser.add_argument(
@@ -258,6 +465,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     args = parser.parse_args(argv)
     args.batch_size = int(args.num_envs * args.num_steps)
+    if not math.isfinite(args.weight_decay) or args.weight_decay < 0.0:
+        raise SystemExit(
+            f"--weight-decay must be finite and >= 0, got {args.weight_decay!r}"
+        )
+    if args.weight_decay > 0.0 and args.optimizer != "adamw":
+        raise SystemExit(
+            "--weight-decay requires --optimizer adamw; the default adam path "
+            "has no decoupled weight decay"
+        )
     return args
 
 
@@ -268,6 +484,17 @@ def make_env(
     seed: int,
     idx: int,
     reward_shaping: str = "terminal",
+    win_jump: float = 1.0,
+    reward_cap: float | None = None,
+    seq_len: int = 0,
+    seq_order: str = "chrono",
+    event_len: int = 0,
+    event_order: str = "chrono",
+    event_pass: str = "keep",
+    event_boundary_blind: bool = False,
+    event_went_out: str = "keep",
+    event_blind: bool = False,
+    event_noisy: bool = False,
 ):
     """CleanRL-style thunk: one sub-env + episode statistics for the vector env."""
 
@@ -278,7 +505,23 @@ def make_env(
             seed=seed + idx,
             learner=learner,
             reward_shaping=reward_shaping,
+            win_jump=win_jump,
+            reward_cap=reward_cap,
         )
+        if seq_len > 0:
+            env = HistorySequenceWrapper(env, seq_len, seq_order)
+        if event_len > 0:
+            env = EventHistoryWrapper(
+                env,
+                rules,
+                length=event_len,
+                order=event_order,
+                pass_mode=event_pass,
+                boundary_blind=event_boundary_blind,
+                went_out=event_went_out,
+                blind=event_blind,
+                noisy=event_noisy,
+            )
         return gym.wrappers.RecordEpisodeStatistics(env)
 
     return thunk
@@ -312,10 +555,18 @@ def _final_outcome(infos: dict, index: int) -> int | None:
     return int(outcomes[index])
 
 
+#: Reward modes whose episode return always has the sign of the seat outcome,
+#: so the PFSP fallback may infer the outcome from the reward.  ``saturate``
+#: (and especially K0, where a win scores 0) is deliberately not here: reading
+#: the outcome off the reward sign would score wins as ties.
+_SIGN_LIKE_REWARDS = frozenset({"win"})
+
+
 def train(args: argparse.Namespace) -> Path:
     """Run PPO and return the run directory (checkpoints + ``metrics.csv``)."""
     if args.pool_episode and args.opponent not in {"pool", "mix"}:
         raise SystemExit("--pool-episode needs --opponent pool or mix")
+    validate_reward_cap(args.reward_shaping, args.reward_cap)
     if args.pfsp and not (args.opponent == "pool" and args.pool_episode):
         raise SystemExit("--pfsp needs --opponent pool --pool-episode")
     if args.pfsp:
@@ -356,15 +607,39 @@ def train(args: argparse.Namespace) -> Path:
         hidden=args.hidden_size,
         activation=args.activation,
         arch=args.arch,
+        seq_len=args.seq_len,
+        seq_emb=args.seq_emb,
+        seq_hidden=args.seq_hidden,
+        seq_blind=args.seq_blind,
+        seq_order=args.seq_order,
+        event_len=args.event_len,
+        event_dim=EVENT_DIM,
+        event_emb=args.event_emb,
+        event_hidden=args.event_hidden,
+        seat_emb=args.seat_emb,
+        event_blind=args.event_blind,
+        event_seat=args.event_seat,
+        event_order=args.event_order,
+        event_pass=args.event_pass,
+        event_boundary_blind=args.event_boundary_blind,
+        event_noisy=args.event_noisy,
+        event_went_out=args.event_wentout,
+        num_players=rules.num_players,
     ).to(device)
     if args.load_checkpoint:
         try:
             warm = warm_start_from(args.load_checkpoint, agent, device=str(device))
         except WarmStartLayoutError as error:
             raise SystemExit(
-                f"--load-checkpoint {args.load_checkpoint}: cannot "
-                f"warm-start a {error.loaded_obs_dim}-wide checkpoint into the v5 "
-                f"{obs_dim}-wide layout for {rules.num_players} players"
+                f"--load-checkpoint {args.load_checkpoint}: cannot warm-start "
+                f"layout {error.loaded_layout!r} into {error.agent_layout!r} "
+                f"(obs_dim {error.loaded_obs_dim}->{error.agent_obs_dim}); the "
+                f"event arm needs a from-scratch run or a same-layout checkpoint"
+            ) from error
+        except RuntimeError as error:
+            raise SystemExit(
+                f"--load-checkpoint {args.load_checkpoint}: architecture does "
+                f"not match the requested agent ({error})"
             ) from error
         if not warm.exact:
             print(
@@ -372,7 +647,13 @@ def train(args: argparse.Namespace) -> Path:
                 f"{args.load_checkpoint} (arch {warm.arch}->{args.arch}, "
                 f"nvec {warm.nvec} -> {nvec.tolist()})"
             )
-    optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+    optimizer_cls = optim.AdamW if args.optimizer == "adamw" else optim.Adam
+    optimizer = optimizer_cls(
+        agent.parameters(),
+        lr=args.learning_rate,
+        eps=1e-5,
+        weight_decay=args.weight_decay,
+    )
     config = PPOConfig.from_args(args)
 
     league = build_league(
@@ -382,7 +663,7 @@ def train(args: argparse.Namespace) -> Path:
             num_players=args.num_players,
             seed=args.seed,
             pool_member=tuple(args.pool_member or ()),
-            mix_greedy_prob=args.mix_greedy_prob,
+            mix_random_prob=args.mix_random_prob,
             pool_episode=args.pool_episode,
             self_play_sample=args.self_play_sample,
         ),
@@ -422,6 +703,17 @@ def train(args: argparse.Namespace) -> Path:
                 args.seed,
                 idx,
                 args.reward_shaping,
+                win_jump=args.win_jump,
+                reward_cap=args.reward_cap,
+                seq_len=args.seq_len,
+                seq_order=args.seq_order,
+                event_len=args.event_len,
+                event_order=args.event_order,
+                event_pass=args.event_pass,
+                event_boundary_blind=args.event_boundary_blind,
+                event_went_out=args.event_wentout,
+                event_blind=args.event_blind,
+                event_noisy=args.event_noisy,
             )
             for idx in range(args.num_envs)
         ],
@@ -449,6 +741,39 @@ def train(args: argparse.Namespace) -> Path:
     action_masks = torch.zeros(
         (args.num_steps, args.num_envs, int(nvec.sum())), device=device
     )
+    seqs = (
+        torch.zeros(
+            (args.num_steps, args.num_envs, int(args.seq_len)), device=device
+        )
+        if args.seq_len > 0
+        else None
+    )
+    events = (
+        torch.zeros(
+            (args.num_steps, args.num_envs, int(args.event_len), EVENT_DIM),
+            device=device,
+        )
+        if args.event_len > 0
+        else None
+    )
+    event_seats = (
+        torch.zeros(
+            (args.num_steps, args.num_envs, int(args.event_len)),
+            dtype=torch.long,
+            device=device,
+        )
+        if args.event_len > 0
+        else None
+    )
+    event_masks = (
+        torch.zeros(
+            (args.num_steps, args.num_envs, int(args.event_len)),
+            dtype=torch.bool,
+            device=device,
+        )
+        if args.event_len > 0
+        else None
+    )
 
     num_updates = args.total_timesteps // args.batch_size
     if num_updates < 1:
@@ -471,11 +796,18 @@ def train(args: argparse.Namespace) -> Path:
                 and args.self_play_refresh
                 and update % args.self_play_refresh == 0
             ):
+                assert history_layout(frozen.agent) == history_layout(agent), (
+                    "self-play frozen opponent history layout diverged from the "
+                    f"learner: {history_layout(frozen.agent)!r} vs "
+                    f"{history_layout(agent)!r}"
+                )
                 frozen.agent.load_state_dict(agent.state_dict())
 
             if args.anneal_lr:
-                frac = 1.0 - (update - 1.0) / num_updates
-                optimizer.param_groups[0]["lr"] = frac * args.learning_rate
+                optimizer.param_groups[0]["lr"] = (
+                    lr_scale(args.lr_schedule, update, num_updates)
+                    * args.learning_rate
+                )
 
             ep_returns: list[float] = []
             ep_lengths: list[int] = []
@@ -495,9 +827,68 @@ def train(args: argparse.Namespace) -> Path:
                 )
 
                 # ALGO LOGIC: action logic
+                seq_tokens: torch.Tensor | None = None
+                if seqs is not None:
+                    seq_tokens = torch.as_tensor(
+                        np.asarray(
+                            [
+                                env.get_wrapper_attr("last_seq")
+                                for env in envs.envs
+                            ],
+                            dtype=np.int64,
+                        ),
+                        dtype=torch.int64,
+                        device=device,
+                    )
+                    if args.seq_blind:
+                        seq_tokens = torch.zeros_like(seq_tokens)
+                    seqs[step] = seq_tokens
+                event_tensors: torch.Tensor | None = None
+                seat_tensors: torch.Tensor | None = None
+                mask_tensors: torch.Tensor | None = None
+                if events is not None:
+                    event_tensors = torch.as_tensor(
+                        np.asarray(
+                            [
+                                env.get_wrapper_attr("last_events")
+                                for env in envs.envs
+                            ]
+                        ),
+                        dtype=torch.float32,
+                        device=device,
+                    )
+                    seat_tensors = torch.as_tensor(
+                        np.asarray(
+                            [
+                                env.get_wrapper_attr("last_event_seats")
+                                for env in envs.envs
+                            ]
+                        ),
+                        dtype=torch.int64,
+                        device=device,
+                    )
+                    mask_tensors = torch.as_tensor(
+                        np.asarray(
+                            [
+                                env.get_wrapper_attr("last_event_mask")
+                                for env in envs.envs
+                            ]
+                        ),
+                        dtype=torch.bool,
+                        device=device,
+                    )
+                    events[step] = event_tensors
+                    assert event_seats is not None and event_masks is not None
+                    event_seats[step] = seat_tensors
+                    event_masks[step] = mask_tensors
                 with torch.no_grad():
                     action, logprob, _, value = agent.get_action_and_value(
-                        next_obs, action_masks[step]
+                        next_obs,
+                        action_masks[step],
+                        seqs=seq_tokens,
+                        events=event_tensors,
+                        event_seats=seat_tensors,
+                        event_mask=mask_tensors,
                     )
                     values[step] = value.flatten()
                 actions[step] = action
@@ -531,6 +922,15 @@ def train(args: argparse.Namespace) -> Path:
                             # reward sign is only a fallback for exotic wrappers.
                             outcome = _final_outcome(infos, int(idx))
                             if outcome is None:
+                                if args.reward_shaping not in _SIGN_LIKE_REWARDS:
+                                    raise RuntimeError(
+                                        "finished episode without "
+                                        "info['outcome'] under "
+                                        f"--reward-shaping "
+                                        f"{args.reward_shaping}; refusing to "
+                                        "infer the outcome from the reward "
+                                        "sign"
+                                    )
                                 outcome = int(episode_return > 0.0) - int(
                                     episode_return < 0.0
                                 )
@@ -580,8 +980,57 @@ def train(args: argparse.Namespace) -> Path:
             episodes_done += len(ep_returns)
 
             # bootstrap value if not done
+            next_seqs: torch.Tensor | None = None
+            if seqs is not None:
+                next_seqs = torch.as_tensor(
+                    np.asarray(
+                        [env.get_wrapper_attr("last_seq") for env in envs.envs],
+                        dtype=np.int64,
+                    ),
+                    dtype=torch.int64,
+                    device=device,
+                )
+                if args.seq_blind:
+                    next_seqs = torch.zeros_like(next_seqs)
+            next_events: torch.Tensor | None = None
+            next_event_seats: torch.Tensor | None = None
+            next_event_mask: torch.Tensor | None = None
+            if events is not None:
+                next_events = torch.as_tensor(
+                    np.asarray(
+                        [env.get_wrapper_attr("last_events") for env in envs.envs]
+                    ),
+                    dtype=torch.float32,
+                    device=device,
+                )
+                next_event_seats = torch.as_tensor(
+                    np.asarray(
+                        [
+                            env.get_wrapper_attr("last_event_seats")
+                            for env in envs.envs
+                        ]
+                    ),
+                    dtype=torch.int64,
+                    device=device,
+                )
+                next_event_mask = torch.as_tensor(
+                    np.asarray(
+                        [
+                            env.get_wrapper_attr("last_event_mask")
+                            for env in envs.envs
+                        ]
+                    ),
+                    dtype=torch.bool,
+                    device=device,
+                )
             with torch.no_grad():
-                next_value = agent.get_value(next_obs).reshape(1, -1)
+                next_value = agent.get_value(
+                    next_obs,
+                    next_seqs,
+                    next_events,
+                    next_event_seats,
+                    next_event_mask,
+                ).reshape(1, -1)
                 advantages, returns = compute_gae(
                     rewards,
                     values,
@@ -594,7 +1043,17 @@ def train(args: argparse.Namespace) -> Path:
                 )
 
             batch = RolloutBatch.flatten(
-                obs, actions, logprobs, advantages, returns, values, action_masks
+                obs,
+                actions,
+                logprobs,
+                advantages,
+                returns,
+                values,
+                action_masks,
+                seqs,
+                events,
+                event_seats,
+                event_masks,
             )
             losses = ppo_update(agent, optimizer, batch, config)
 
@@ -640,6 +1099,15 @@ def train(args: argparse.Namespace) -> Path:
             if args.checkpoint_interval and update % args.checkpoint_interval == 0:
                 save_agent(
                     run_dir / "checkpoint.pt",
+                    agent,
+                    extra={"global_step": global_step, "args": vars(args)},
+                )
+
+            if args.snapshot_interval and update % args.snapshot_interval == 0:
+                snapshot_dir = run_dir / "snapshots"
+                snapshot_dir.mkdir(parents=True, exist_ok=True)
+                save_agent(
+                    snapshot_dir / f"checkpoint_step{global_step:07d}.pt",
                     agent,
                     extra={"global_step": global_step, "args": vars(args)},
                 )

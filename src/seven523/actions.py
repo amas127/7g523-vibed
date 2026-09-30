@@ -8,11 +8,19 @@ is the single legality authority shared by the environment and every bot.
 """
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from functools import lru_cache
-from typing import Iterable, Sequence
+from functools import cache, lru_cache
 
-from .cards import NATURAL_ORDER, RANK_LABELS, STANDARD_RANKS, Card, Rank, Suit, card_key
+from .cards import (
+    NATURAL_ORDER,
+    RANK_LABELS,
+    STANDARD_RANKS,
+    Card,
+    Rank,
+    Suit,
+    card_key,
+)
 from .combos import Combo, ComboKind, beats, classify
 from .rules import DEFAULT_RULES, Rules
 
@@ -85,7 +93,7 @@ def build_catalog(rules: Rules = DEFAULT_RULES) -> tuple[Action, ...]:
     return tuple(catalog)
 
 
-@lru_cache(maxsize=None)
+@cache
 def catalog_for(rules: Rules) -> tuple[Action, ...]:
     return build_catalog(rules)
 
