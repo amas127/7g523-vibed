@@ -46,12 +46,28 @@ _REWARD_SHAPING_MODES = (
     "trick_diff_win",
     "terminal_win",
     "saturate",
+    "arcsin",
 )
 
 #: Largest accepted ``win_jump``.  Terminal margins live in ``[−1, 1]``, so any
 #: ``λ > 2`` already makes the outcome jump dominate every margin difference;
 #: the cap only keeps the reward scale bounded (λ→∞ is the ``win`` limit).
 _MAX_WIN_JUMP = 10.0
+
+#: Reward modes whose terminal reward is ``base + scale · seat_outcome`` (the
+#: value-decomposition contract behind ``--vf-outcome``).  ``terminal_win`` and
+#: ``arcsin`` scale the outcome by ``win_jump`` (read per instance);
+#: ``trick_diff_win`` and ``win`` add it with coefficient 1.  Every other mode
+#: has ``reward_jump_scale == 0``.
+_OUTCOME_JUMP_SCALES = {
+    "trick_diff_win": 1.0,
+    "win": 1.0,
+}
+
+#: Margin-shaping constant for the ``arcsin`` mode: ``(2/π)·arcsin`` maps the
+#: terminal margin (``[−1, 1]``) back onto the same range, steep near ±1 (0/100
+#: points) and flat at the 50-point boundary.
+_TWO_OVER_PI = 2.0 / math.pi
 
 #: ``obs``/``offset`` writer for one segment of the observation vector.
 _Writer = Callable[[View, Rules, list[float], int], None]
@@ -314,10 +330,33 @@ class Seven523Env(gym.Env):
         is ``d = 20``.  Only this mode reads :attr:`reward_cap`, and it must be
         given explicitly (``None`` is an error, never ``terminal``); ``τ`` is
         a return-unit cap in ``[0, 1]``.
+    ``arcsin``
+        ``0.0`` on every non-terminal step; on the terminal step the legacy
+        margin is first shaped by a blend of the identity and
+        ``(2/π)·arcsin(margin)`` (an odd, bounded transform that is steepest
+        near ``margin = ±1``, i.e. the 0/100-point terminal scores, and flat at
+        the 50-point boundary), then the same discrete jump as ``terminal_win``
+        is added **at the 50-point win/loss boundary**: ``(1 − α)·margin +
+        α·(2/π)·arcsin(clip(margin, −1, 1)) + win_jump·seat_outcome``.  A tie
+        stays at the smooth midpoint ``0`` (``seat_outcome == 0``, no jump);
+        the jump separates the limits just below/above 50 points.  ``α ∈
+        [0, 1]`` is :attr:`arcsin_mix`: ``α = 0`` is exactly ``terminal_win``
+        (linear margin + jump) and ``α = 1`` is the full arcsin curve (the
+        default ``α = 0.5`` is the half-strength version; the endpoint
+        derivative diverges only at ``α = 1``).  Two players reduce to
+        ``(1−α)(own/50 − 1) + α·(2/π)·arcsin(own/50 − 1) + λ·sign(own − 50)``.
+        Only this mode reads :attr:`arcsin_mix`; this mode and
+        ``terminal_win`` read :attr:`win_jump`.
 
     An unknown mode raises :class:`ValueError`; ``win_jump`` must be finite
     and in ``[0, 10]``; ``reward_cap`` must be finite and in ``[0, 1]``, is
     required by ``saturate``, and is rejected by every other mode.
+
+    On the terminal step :meth:`step` publishes ``info["scores"]``,
+    ``info["outcome"]`` and ``info["reward_jump"]``: the last is the discrete
+    win/loss addend already contained in the step reward
+    (``reward_jump_scale * outcome``, zero in modes without one).  It lets the
+    trainer recover ``reward = base + jump`` without owning the mode formulas.
     """
 
     metadata = {"render_modes": []}
@@ -328,8 +367,9 @@ class Seven523Env(gym.Env):
         opponents: list[Policy] | None = None,
         seed: int | None = None,
         learner: int = 0,
-        reward_shaping: str = "terminal",
+        reward_shaping: str = "arcsin",
         win_jump: float = 1.0,
+        arcsin_mix: float = 0.5,
         reward_cap: float | None = None,
     ) -> None:
         if reward_shaping not in _REWARD_SHAPING_MODES:
@@ -343,6 +383,12 @@ class Seven523Env(gym.Env):
             raise ValueError(
                 f"win_jump must be in [0, {_MAX_WIN_JUMP}], got {win_jump!r}"
             )
+        if not math.isfinite(arcsin_mix):
+            raise ValueError(f"arcsin_mix must be finite, got {arcsin_mix!r}")
+        if not 0.0 <= arcsin_mix <= 1.0:
+            raise ValueError(
+                f"arcsin_mix must be in [0, 1], got {arcsin_mix!r}"
+            )
         validate_reward_cap(reward_shaping, reward_cap)
         self.rules = rules
         self.game = Game(rules)
@@ -350,6 +396,7 @@ class Seven523Env(gym.Env):
         self.learner = learner
         self.reward_shaping = reward_shaping
         self.win_jump = win_jump
+        self.arcsin_mix = arcsin_mix
         self.reward_cap = reward_cap
         self.obs_dim = observation_dim(self.num_players)
         self.nvec = nvec_for(rules)
@@ -399,9 +446,26 @@ class Seven523Env(gym.Env):
         reward = self._reward(match.state, before, after)
         info: dict = {}
         if match.done:
+            outcome = seat_outcome(match.state.scores, self.learner)
             info["scores"] = list(match.state.scores)
-            info["outcome"] = seat_outcome(match.state.scores, self.learner)
+            info["outcome"] = outcome
+            # The discrete win/loss addend inside ``reward``; publishing it
+            # here keeps train.py from re-deriving the per-mode formula.
+            info["reward_jump"] = self.reward_jump_scale * outcome
         return self._publish(), reward, match.done, False, info
+
+    @property
+    def reward_jump_scale(self) -> float:
+        """Coefficient of the terminal ``seat_outcome`` term (0 = no jump).
+
+        ``terminal_win``/``arcsin`` use :attr:`win_jump`; ``trick_diff_win``
+        and ``win`` add the outcome with coefficient 1; every other mode has no
+        discrete outcome term.  The training-side value decomposition
+        (``--vf-outcome``) reads this instead of switching on the mode itself.
+        """
+        if self.reward_shaping in ("terminal_win", "arcsin"):
+            return self.win_jump
+        return _OUTCOME_JUMP_SCALES.get(self.reward_shaping, 0.0)
 
     def _potential(self) -> float:
         """Φ(state) for the learner: ``own/total − mean(others)/total``.
@@ -447,6 +511,15 @@ class Seven523Env(gym.Env):
                 assert cap is not None  # __init__ rejects saturate without a cap
                 return min(margin, cap)
             return 0.0 if outcome == 0 else margin
+        if self.reward_shaping == "arcsin":
+            if not state.done:
+                return 0.0
+            margin = self.game.returns(state)[self.learner]
+            margin = min(1.0, max(-1.0, margin))
+            shaped = (1.0 - self.arcsin_mix) * margin + (
+                self.arcsin_mix * _TWO_OVER_PI * math.asin(margin)
+            )
+            return shaped + self.win_jump * self._win_bonus(state)
         # trick_diff_win: local credit plus the terminal outcome term.
         reward = after - before
         if state.done:

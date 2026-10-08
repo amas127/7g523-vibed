@@ -23,7 +23,7 @@ from seven523.league import (  # noqa: E402
     parse_pool_member,
     pool_member_ids,
 )
-from seven523.networks import Agent  # noqa: E402
+from seven523.networks import Agent, save_agent  # noqa: E402
 from seven523.policies import (  # noqa: E402
     EpisodeMixturePolicy,
     MixturePolicy,
@@ -134,6 +134,42 @@ def test_build_league_pool_member_ids_weights_and_frozen_self():
         assert [member_id for _, _, member_id in policy.members] == league.member_ids
         assert isinstance(policy.members[0][1], RandomBot)
         assert policy.members[1][1] is league.frozen
+
+
+def test_build_league_pool_members_sample_by_default(tmp_path):
+    path = tmp_path / "member.pt"
+    save_agent(path, _agent())
+    spec = f"1@ckpt:{path}"
+    default = _build(_config("pool", pool_member=(spec,), pool_episode=True))
+    member = default.episode_mixtures[0][0].members[0][1]
+    assert member.sample is True
+    greedy = _build(
+        _config(
+            "pool",
+            pool_member=(spec,),
+            pool_episode=True,
+            pool_sample=False,
+        )
+    )
+    member = greedy.episode_mixtures[0][0].members[0][1]
+    assert member.sample is False
+
+
+def test_build_league_pool_self_member_follows_pool_sample():
+    sampling = _build(_config("pool", pool_member=("1@self",), pool_episode=True))
+    assert sampling.frozen is not None and sampling.frozen.sample is True
+    greedy = _build(
+        _config(
+            "pool",
+            pool_member=("1@self",),
+            pool_episode=True,
+            pool_sample=False,
+        )
+    )
+    assert greedy.frozen is not None and greedy.frozen.sample is False
+    # ``self`` mode keeps its own flag (default argmax).
+    own = _build(_config("self"))
+    assert own.frozen is not None and own.frozen.sample is False
 
 
 def test_build_league_pool_without_pool_episode_stays_per_decision():

@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import math
 import random
 from dataclasses import replace
 from pathlib import Path
@@ -491,7 +492,7 @@ def run_env_episode(env, seed=0):
             assert info == {}
         steps += 1
         assert steps < 50_000
-    assert -1.0 <= reward <= 1.0
+    assert -2.0 <= reward <= 2.0  # ADR-0016 default arcsin + λ=1 range
     return reward
 
 
@@ -626,10 +627,13 @@ def _win_bonus(state, learner):
     return float(seat_outcome(state.scores, learner))
 
 
-def test_reward_shaping_defaults_to_terminal_and_rejects_unknown_modes():
-    assert Seven523Env(seed=0).reward_shaping == "terminal"
-    assert Seven523Env(seed=0).reward_cap is None
-    for mode in ("terminal", "trick_diff", "win", "trick_diff_win", "terminal_win"):
+def test_reward_shaping_defaults_to_arcsin_and_rejects_unknown_modes():
+    default = Seven523Env(seed=0)
+    assert default.reward_shaping == "arcsin"  # ADR-0016 default recipe
+    assert default.arcsin_mix == 0.5
+    assert default.win_jump == 1.0
+    assert default.reward_cap is None
+    for mode in ("terminal", "trick_diff", "win", "trick_diff_win", "terminal_win", "arcsin"):
         assert Seven523Env(seed=0, reward_shaping=mode).reward_shaping == mode
     saturated = Seven523Env(seed=0, reward_shaping="saturate", reward_cap=0.2)
     assert saturated.reward_shaping == "saturate"
@@ -642,7 +646,10 @@ def test_reward_shaping_defaults_to_terminal_and_rejects_unknown_modes():
 def test_terminal_mode_rewards_are_zero_until_the_terminal_return():
     rules = Rules()
     env = Seven523Env(
-        rules=rules, seed=0, opponents=_random_opponents(rules, 0)
+        rules=rules,
+        seed=0,
+        opponents=_random_opponents(rules, 0),
+        reward_shaping="terminal",
     )
     rewards = _play_episode(env, action_seed=0)
     assert len(rewards) > 1
@@ -821,7 +828,10 @@ def test_terminal_win_equals_terminal_plus_lambda_times_win(win_jump):
     """Step-by-step identity: r_jump = r_terminal + λ·r_win for every step."""
     rules = Rules()
     terminal = Seven523Env(
-        rules=rules, seed=6, opponents=_random_opponents(rules, 6)
+        rules=rules,
+        seed=6,
+        opponents=_random_opponents(rules, 6),
+        reward_shaping="terminal",
     )
     win = Seven523Env(
         rules=rules,
@@ -876,6 +886,124 @@ def test_win_jump_validation():
         Seven523Env(seed=0, win_jump=float("nan"))
 
 
+# -- arcsin margin shaping + 50-point boundary jump ---------------------------
+
+
+@pytest.mark.parametrize(
+    ("scores", "outcome"),
+    [((60, 40), 1), ((50, 50), 0), ((40, 60), -1)],
+)
+def test_arcsin_is_the_shaped_margin_plus_lambda_times_the_outcome(scores, outcome):
+    rules = Rules()
+    env = Seven523Env(
+        rules=rules, seed=0, reward_shaping="arcsin", win_jump=0.25, arcsin_mix=1.0
+    )
+    state = _terminal_state(rules, scores)
+    margin = env.game.returns(state)[env.learner]
+    shaped = (2.0 / math.pi) * math.asin(margin)
+    assert seat_outcome(state.scores, env.learner) == outcome
+    assert env._reward(state, 0.0, 0.0) == pytest.approx(
+        shaped + 0.25 * outcome, abs=1e-12
+    )
+
+
+def test_arcsin_amplifies_extreme_margins_and_is_flat_at_the_50_point_boundary():
+    rules = Rules()
+    env = Seven523Env(
+        rules=rules, seed=0, reward_shaping="arcsin", win_jump=0.0, arcsin_mix=1.0
+    )
+
+    def shaped(scores):
+        return env._reward(_terminal_state(rules, scores), 0.0, 0.0)
+
+    assert shaped((0, 100)) == pytest.approx(-1.0, abs=1e-12)
+    assert shaped((100, 0)) == pytest.approx(1.0, abs=1e-12)
+    assert shaped((50, 50)) == pytest.approx(0.0, abs=1e-12)
+    # Near 0/100 the transform is much steeper than at the 50-point boundary:
+    # the 0 -> 1 point step is ~0.128 while 49 -> 50 is ~0.013.
+    assert abs(shaped((1, 99)) - shaped((0, 100))) > 0.1
+    assert abs(shaped((50, 50)) - shaped((49, 51))) < 0.02
+    values = [shaped((own, 100 - own)) for own in range(101)]
+    assert all(b >= a for a, b in zip(values, values[1:]))
+
+
+def test_arcsin_mix_blends_the_curve_and_zero_reduces_to_terminal_win():
+    rules = Rules()
+    scores = (40, 60)
+    margin = (40 - 60) / rules.total_points
+    outcome = seat_outcome(scores, 0)
+
+    def reward(mix):
+        env = Seven523Env(
+            rules=rules,
+            seed=0,
+            reward_shaping="arcsin",
+            win_jump=0.25,
+            arcsin_mix=mix,
+        )
+        return env._reward(_terminal_state(rules, scores), 0.0, 0.0)
+
+    assert reward(0.0) == pytest.approx(margin + 0.25 * outcome, abs=1e-12)
+    assert reward(0.5) == pytest.approx(
+        0.5 * margin + 0.5 * (2.0 / math.pi) * math.asin(margin) + 0.25 * outcome,
+        abs=1e-12,
+    )
+    assert reward(1.0) == pytest.approx(
+        (2.0 / math.pi) * math.asin(margin) + 0.25 * outcome, abs=1e-12
+    )
+    # α=0 is exactly terminal_win (same linear margin, same boundary jump).
+    jump = Seven523Env(
+        rules=rules, seed=0, reward_shaping="terminal_win", win_jump=0.25
+    )
+    state = _terminal_state(rules, scores)
+    assert reward(0.0) == pytest.approx(jump._reward(state, 0.0, 0.0), abs=1e-12)
+    # The default is the half-strength curve.
+    assert Seven523Env(seed=0, reward_shaping="arcsin").arcsin_mix == 0.5
+    for bad in (-0.25, 1.25, float("nan")):
+        with pytest.raises(ValueError, match="arcsin_mix"):
+            Seven523Env(seed=0, reward_shaping="arcsin", arcsin_mix=bad)
+    with pytest.raises(ValueError, match="arcsin_mix"):
+        Seven523Env(seed=0, arcsin_mix=1.5)
+
+
+def test_arcsin_jump_at_50_keeps_the_tie_neutral_and_separates_win_loss():
+    rules = Rules()
+    env = Seven523Env(
+        rules=rules, seed=0, reward_shaping="arcsin", win_jump=0.5, arcsin_mix=1.0
+    )
+
+    def r(scores):
+        return env._reward(_terminal_state(rules, scores), 0.0, 0.0)
+
+    assert r((50, 50)) == pytest.approx(0.0, abs=1e-12)  # a draw stays neutral
+    assert r((51, 49)) == pytest.approx(
+        0.5 + (2.0 / math.pi) * math.asin(0.02), abs=1e-12
+    )
+    assert r((49, 51)) == pytest.approx(
+        -0.5 + (2.0 / math.pi) * math.asin(-0.02), abs=1e-12
+    )
+    # The jump separates the limits just below/above 50 points.
+    assert r((49, 51)) < r((50, 50)) < r((51, 49))
+
+
+def test_arcsin_rewards_are_zero_until_the_terminal_step():
+    rules = Rules()
+    env = Seven523Env(
+        rules=rules,
+        seed=8,
+        opponents=_random_opponents(rules, 8),
+        reward_shaping="arcsin",
+        win_jump=1.0,
+        arcsin_mix=1.0,
+    )
+    rewards = _play_episode(env, action_seed=0)
+    assert len(rewards) > 1
+    assert all(reward == 0.0 for reward in rewards[:-1])
+    margin = env.game.returns(env.state)[env.learner]
+    expected = (2.0 / math.pi) * math.asin(margin) + env._win_bonus(env.state)
+    assert rewards[-1] == pytest.approx(expected, abs=1e-12)
+
+
 @pytest.mark.parametrize(
     "mode", ["terminal", "trick_diff", "win", "trick_diff_win"]
 )
@@ -898,6 +1026,87 @@ def test_win_jump_is_ignored_by_legacy_modes(mode):
         assert _play_episode(first, action_seed=episode) == _play_episode(
             second, action_seed=episode
         )
+
+
+# -- reward decomposition (`reward_jump_scale` / info["reward_jump"]) ---------
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        ("terminal", 0.0),
+        ("trick_diff", 0.0),
+        ("win", 1.0),
+        ("trick_diff_win", 1.0),
+        ("terminal_win", 0.25),
+        ("arcsin", 0.25),
+        ("saturate", 0.0),
+    ],
+)
+def test_reward_jump_scale_matches_the_mode(mode, expected):
+    kwargs = {"reward_cap": 0.2} if mode == "saturate" else {}
+    env = Seven523Env(
+        seed=0, reward_shaping=mode, win_jump=0.25, **kwargs
+    )
+    assert env.reward_jump_scale == pytest.approx(expected)
+
+
+def _play_episode_with_info(env, action_seed=0):
+    """Like :func:`_play_episode` but also return the terminal info dict."""
+    env.reset()
+    rng = random.Random(action_seed)
+    rewards: list[float] = []
+    done = False
+    info: dict = {}
+    while not done:
+        legal = [i for i in range(env.action_space_n) if env.action_mask[i]]
+        assert legal
+        _obs, reward, done, truncated, info = env.step(
+            (rng.choice(legal), rng.randrange(SUIT_N))
+        )
+        rewards.append(reward)
+        assert not truncated
+    return rewards, info
+
+
+def test_reward_jump_separates_the_terminal_win_terms():
+    rules = Rules()
+    # arcsin: terminal reward = shaped margin + jump.
+    env = Seven523Env(
+        rules=rules,
+        seed=3,
+        opponents=_random_opponents(rules, 3),
+        reward_shaping="arcsin",
+        win_jump=0.25,
+        arcsin_mix=0.5,
+    )
+    rewards, info = _play_episode_with_info(env, action_seed=0)
+    margin = env.game.returns(env.state)[env.learner]
+    shaped = 0.5 * margin + 0.5 * (2.0 / math.pi) * math.asin(margin)
+    assert info["reward_jump"] == pytest.approx(0.25 * info["outcome"])
+    assert rewards[-1] - info["reward_jump"] == pytest.approx(shaped, abs=1e-12)
+    # win: the whole terminal reward is the outcome jump.
+    win_env = Seven523Env(
+        rules=rules,
+        seed=3,
+        opponents=_random_opponents(rules, 3),
+        reward_shaping="win",
+    )
+    win_rewards, win_info = _play_episode_with_info(win_env, action_seed=0)
+    assert win_rewards[-1] == pytest.approx(win_info["reward_jump"], abs=1e-12)
+    assert win_info["reward_jump"] == pytest.approx(win_info["outcome"], abs=1e-12)
+
+
+def test_modes_without_a_jump_publish_a_zero_reward_jump():
+    rules = Rules()
+    env = Seven523Env(
+        rules=rules,
+        seed=3,
+        opponents=_random_opponents(rules, 3),
+        reward_shaping="terminal",
+    )
+    _rewards, info = _play_episode_with_info(env, action_seed=0)
+    assert info["reward_jump"] == 0.0
 
 
 # -- saturate / reward_cap (Tier 1 margin clamp) -------------------------------
@@ -982,7 +1191,12 @@ def test_saturate_rewards_are_zero_until_the_terminal_step():
 def test_saturate_episode_matches_the_formula_and_differs_from_terminal():
     """Same seed / same actions: saturate is not a renamed terminal arm."""
     rules = Rules()
-    terminal = Seven523Env(rules=rules, seed=9, opponents=_random_opponents(rules, 9))
+    terminal = Seven523Env(
+        rules=rules,
+        seed=9,
+        opponents=_random_opponents(rules, 9),
+        reward_shaping="terminal",
+    )
     k2 = Seven523Env(
         rules=rules,
         seed=9,
@@ -1109,4 +1323,4 @@ def test_env_episode_is_finite_and_legal():
         steps += 1
         assert steps < 20_000, "env episode did not terminate"
 
-    assert -1.0 <= reward <= 1.0
+    assert -2.0 <= reward <= 2.0  # ADR-0016 default arcsin + λ=1 range

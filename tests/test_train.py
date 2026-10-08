@@ -21,6 +21,8 @@ from seven523.networks import (  # noqa: E402
 )
 from seven523.rules import DEFAULT_RULES  # noqa: E402
 from seven523.train import (  # noqa: E402
+    _episode_outcome_labels,
+    annealed_lr,
     lr_scale,
     make_env,
     parse_args,
@@ -247,7 +249,9 @@ def test_train_uses_same_step_autoreset(tmp_path, monkeypatch):
 
 
 def test_parse_reward_shaping_choices_and_default():
-    assert parse_args([]).reward_shaping == "terminal"
+    # Operator decision 2026-10-07 (ADR-0016): arcsin + 50-point jump is the
+    # CLI default; historical runs reproduce with --reward-shaping terminal.
+    assert parse_args([]).reward_shaping == "arcsin"
     assert parse_args([]).win_jump == 1.0
     assert parse_args([]).reward_cap is None
     for mode in (
@@ -257,10 +261,16 @@ def test_parse_reward_shaping_choices_and_default():
         "trick_diff_win",
         "terminal_win",
         "saturate",
+        "arcsin",
     ):
         assert parse_args(["--reward-shaping", mode]).reward_shaping == mode
     assert parse_args(["--win-jump", "0.25"]).win_jump == 0.25
+    assert parse_args([]).arcsin_mix == 0.5
+    assert parse_args(["--arcsin-mix", "0.25"]).arcsin_mix == 0.25
+    assert parse_args([]).actor_out_std == 0.01
+    assert parse_args(["--actor-out-std", "0.1"]).actor_out_std == 0.1
     assert parse_args(["--reward-cap", "0.2"]).reward_cap == 0.2
+    assert parse_args([]).lr_floor == pytest.approx(1e-5)
     with pytest.raises(SystemExit):
         parse_args(["--reward-shaping", "shaped"])
 
@@ -286,22 +296,60 @@ def test_lr_scale_cosine_endpoints_and_monotone_decrease():
         lr_scale("unknown", 1, 10)
 
 
+def test_annealed_lr_floor_clamps_the_tail_and_zero_restores_history():
+    lr = 2.5e-4
+    assert annealed_lr("linear", 1, 100, lr) == pytest.approx(lr)
+    assert annealed_lr("linear", 100, 100, lr) == pytest.approx(1e-5)
+    historical = lr * (1.0 - 99 / 100)
+    assert annealed_lr("linear", 100, 100, lr, floor=0.0) == pytest.approx(historical)
+    # The floor never raises the LR above the requested peak.
+    assert annealed_lr("linear", 100, 100, 0.0) == 0.0
+    assert annealed_lr("linear", 1, 100, 1e-6) == pytest.approx(1e-6)
+    assert annealed_lr("cosine", 100, 100, lr, floor=0.0) > 0.0
+    values = [annealed_lr("linear", update, 100, lr) for update in range(1, 101)]
+    assert all(b <= a + 1e-12 for a, b in itertools.pairwise(values))
+    assert min(values) >= 1e-5
+
+
+def test_train_snapshot_steps_writes_step_boundaries(tmp_path):
+    run_dir = train(
+        _tiny_args(
+            tmp_path,
+            "--total-timesteps", "512",
+            "--num-envs", "2",
+            "--num-steps", "64",
+            "--snapshot-steps", "256",
+            "--checkpoint-interval", "0",
+        )
+    )
+    snaps = sorted(
+        p.name for p in (run_dir / "snapshots").glob("checkpoint_step*.pt")
+    )
+    assert snaps == [
+        "checkpoint_step0000256.pt",
+        "checkpoint_step0000512.pt",
+    ]
+
+
 def test_optimizer_schedule_and_snapshot_flags():
     defaults = parse_args([])
     assert defaults.optimizer == "adam"
     assert defaults.weight_decay == 0.0
     assert defaults.lr_schedule == "linear"
     assert defaults.snapshot_interval == 0
+    assert defaults.snapshot_steps == 0
     args = parse_args([
         "--optimizer", "adamw",
         "--weight-decay", "0.01",
         "--lr-schedule", "cosine",
         "--snapshot-interval", "50",
+        "--snapshot-steps", "1000000",
     ])
     assert args.optimizer == "adamw"
     assert args.weight_decay == 0.01
     assert args.lr_schedule == "cosine"
     assert args.snapshot_interval == 50
+    assert args.snapshot_steps == 1000000
     with pytest.raises(SystemExit):
         parse_args(["--weight-decay", "0.01"])
     with pytest.raises(SystemExit):
@@ -315,7 +363,8 @@ def test_make_env_passes_reward_shaping_through():
 
     opponents = make_scripted_policies("random", DEFAULT_RULES, seed=0)
     default_env = make_env(DEFAULT_RULES, 0, opponents, 0, 0)()
-    assert default_env.unwrapped.reward_shaping == "terminal"
+    assert default_env.unwrapped.reward_shaping == "arcsin"
+    assert default_env.unwrapped.arcsin_mix == 0.5
     shaped_env = make_env(
         DEFAULT_RULES, 0, opponents, 0, 0, reward_shaping="trick_diff_win"
     )()
@@ -331,6 +380,18 @@ def test_make_env_passes_reward_shaping_through():
     )()
     assert jumped_env.unwrapped.reward_shaping == "terminal_win"
     assert jumped_env.unwrapped.win_jump == 0.25
+    arcsin_env = make_env(
+        DEFAULT_RULES,
+        0,
+        opponents,
+        0,
+        0,
+        reward_shaping="arcsin",
+        win_jump=0.5,
+        arcsin_mix=0.25,
+    )()
+    assert arcsin_env.unwrapped.reward_shaping == "arcsin"
+    assert arcsin_env.unwrapped.arcsin_mix == 0.25
     saturated_env = make_env(
         DEFAULT_RULES,
         0,
@@ -367,6 +428,148 @@ def test_train_terminal_win_smoke(tmp_path):
     saved = json.loads((run_dir / "args.json").read_text())
     assert saved["reward_shaping"] == "terminal_win"
     assert saved["win_jump"] == 0.25
+
+
+def test_parse_vf_outcome_flags():
+    defaults = parse_args([])
+    assert defaults.vf_outcome is False
+    assert defaults.outcome_coef == 1.0
+    args = parse_args(["--vf-outcome", "true", "--outcome-coef", "0.25"])
+    assert args.vf_outcome is True
+    assert args.outcome_coef == 0.25
+
+
+def test_episode_outcome_labels_discount_back_to_the_episode_start():
+    labels = _episode_outcome_labels(1, step=4, start=2, gamma=0.5)
+    assert torch.equal(labels, torch.tensor([0.25, 0.5, 1.0]))
+    losses = _episode_outcome_labels(-1, step=2, start=0, gamma=0.9)
+    assert torch.allclose(
+        losses, -torch.tensor([0.9**2, 0.9, 1.0])
+    )
+    # A tie is a zero target everywhere.
+    tie = _episode_outcome_labels(0, step=3, start=0, gamma=0.99)
+    assert torch.equal(tie, torch.zeros(4))
+
+
+def test_train_vf_outcome_smoke(tmp_path):
+    args = parse_args(
+        [
+            "--cuda", "False",
+            "--seed", "0",
+            "--exp-name", "vf_outcome",
+            "--run-dir", str(tmp_path),
+            "--total-timesteps", "256",
+            "--num-envs", "2",
+            "--num-steps", "64",
+            "--num-minibatches", "2",
+            "--update-epochs", "1",
+            "--vf-outcome", "true",
+            "--checkpoint-interval", "0",
+            "--log-interval", "0",
+        ]
+    )
+    run_dir = train(args)
+    saved = json.loads((run_dir / "args.json").read_text())
+    assert saved["vf_outcome"] is True and saved["outcome_coef"] == 1.0
+    loaded, _ = load_agent(run_dir / "agent.pt")
+    assert loaded.vf_outcome is True
+    rows = (run_dir / "metrics.csv").read_text().strip().splitlines()
+    header = rows[0].split(",")
+    assert "outcome_loss" in header and "outcome_accuracy" in header
+    assert all(
+        dict(zip(header, row.split(",")))["outcome_loss"] != ""
+        for row in rows[1:]
+    )
+    accuracies = [
+        float(dict(zip(header, row.split(",")))["outcome_accuracy"])
+        for row in rows[1:]
+    ]
+    finite = [value for value in accuracies if math.isfinite(value)]
+    assert finite and all(0.0 <= value <= 1.0 for value in finite)
+
+
+def test_train_vf_outcome_buffers_are_fresh_per_rollout(tmp_path, monkeypatch):
+    """Regression: a reused jump/target buffer leaked stale values.
+
+    Under ``arcsin`` both decomposed reward streams are terminal-only, so a
+    nonzero reward at a non-terminal step can only come from a cell that was
+    left over from a previous rollout.
+    """
+    from seven523 import train as train_module
+
+    calls: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+    real_gae = train_module.compute_gae
+
+    def recording_gae(rewards, values, dones, next_value, next_done, **kwargs):
+        calls.append(
+            (
+                rewards.detach().clone(),
+                dones.detach().clone(),
+                next_done.detach().clone(),
+            )
+        )
+        return real_gae(
+            rewards, values, dones, next_value, next_done, **kwargs
+        )
+
+    monkeypatch.setattr(train_module, "compute_gae", recording_gae)
+    args = parse_args(
+        [
+            "--cuda", "False",
+            "--seed", "0",
+            "--exp-name", "vf_fresh",
+            "--run-dir", str(tmp_path),
+            "--total-timesteps", "2048",
+            "--num-envs", "2",
+            "--num-steps", "128",
+            "--num-minibatches", "2",
+            "--update-epochs", "1",
+            "--vf-outcome", "true",
+            "--checkpoint-interval", "0",
+            "--log-interval", "0",
+        ]
+    )
+    train(args)
+    # base + jump stream per update
+    assert len(calls) == 2 * (args.total_timesteps // args.batch_size)
+    for rewards, dones, next_done in calls:
+        # ``dones[t]`` marks the state entering step ``t``, so transition ``t``
+        # is terminal iff ``dones[t + 1]`` (or ``next_done`` on the last step).
+        terminal = torch.empty_like(dones)
+        terminal[:-1] = dones[1:]
+        terminal[-1] = next_done
+        leaked = (rewards != 0) & (terminal == 0)
+        assert not bool(leaked.any()), (
+            "a nonzero decomposed reward outside a terminal transition is a "
+            "stale buffer cell"
+        )
+
+
+def test_train_rejects_vf_outcome_misuse_before_creating_the_run(tmp_path):
+    base = [
+        "--cuda", "False",
+        "--seed", "0",
+        "--exp-name", "vf_bad",
+        "--run-dir", str(tmp_path),
+        "--total-timesteps", "128",
+        "--num-envs", "2",
+        "--num-steps", "64",
+        "--num-minibatches", "2",
+        "--update-epochs", "1",
+        "--checkpoint-interval", "0",
+        "--log-interval", "0",
+    ]
+    with pytest.raises(SystemExit, match="discrete outcome jump"):
+        train(
+            parse_args(
+                [*base, "--reward-shaping", "terminal", "--vf-outcome", "true"]
+            )
+        )
+    with pytest.raises(SystemExit, match="incompatible"):
+        train(parse_args([*base, "--vf-outcome", "true", "--vf-nll", "true"]))
+    with pytest.raises(SystemExit, match="outcome-coef"):
+        train(parse_args([*base, "--outcome-coef", "-1"]))
+    assert not any(tmp_path.iterdir())
 
 
 def test_train_saturate_smoke(tmp_path):
@@ -471,6 +674,15 @@ def test_train_pool_opponent_smoke(tmp_path):
     )
     run_dir = train(args)
     assert (run_dir / "agent.pt").exists()
+    saved = json.loads((run_dir / "args.json").read_text())
+    assert saved["pool_sample"] is True
+
+
+def test_pool_sample_cli_default_is_on():
+    # Operator decision 2026-10-07 (ADR-0017): pool opponents sample actions
+    # by default; the historical greedy pool needs an explicit opt-out.
+    assert parse_args([]).pool_sample is True
+    assert parse_args(["--pool-sample", "False"]).pool_sample is False
 
 
 def test_pool_episode_and_pfsp_cli_defaults_are_off():
@@ -685,6 +897,166 @@ def test_train_towers_smoke(tmp_path):
     assert "obs_version" not in extra["args"]
     payload = torch.load(run_dir / "agent.pt", map_location="cpu", weights_only=True)
     assert payload["obs_version"] == 5
+
+
+# -- residual body + plain heads, LN/GroupNorm (docs/gnres-plan.md) ----------
+
+
+def test_parse_gnres_arch_and_gn_groups():
+    assert parse_args([]).gn_groups == 8
+    assert parse_args(["--arch", "gnres21"]).arch == "gnres21"
+    assert parse_args(["--arch", "lnres21"]).arch == "lnres21"
+    assert parse_args(["--arch", "bnres21"]).arch == "bnres21"
+    args = parse_args(["--arch", "gnres22", "--gn-groups", "16"])
+    assert args.gn_groups == 16
+    with pytest.raises(SystemExit):
+        parse_args(["--arch", "gnres11x"])
+
+
+def test_train_gnres_smoke(tmp_path):
+    run_dir = train(
+        _tiny_args(
+            tmp_path,
+            "--arch", "gnres21",
+            "--actor-out-std", "0.1",
+            "--gn-groups", "8",
+            "--checkpoint-interval", "0",
+        )
+    )
+    agent, extra = load_agent(run_dir / "agent.pt")
+    assert agent.arch == "gnres21"
+    assert agent.gn_groups == 8
+    assert extra["args"]["gn_groups"] == 8
+    payload = torch.load(run_dir / "agent.pt", map_location="cpu", weights_only=True)
+    assert payload["gn_groups"] == 8
+
+
+def test_parse_res_arch_family():
+    assert parse_args(["--arch", "res421"]).arch == "res421"
+    assert parse_args(["--arch", "res433"]).arch == "res433"
+    with pytest.raises(SystemExit):
+        parse_args(["--arch", "res421x"])
+
+
+def test_parse_bres_arch_family():
+    assert parse_args(["--arch", "bres421"]).arch == "bres421"
+    assert parse_args(["--arch", "bres221"]).arch == "bres221"
+    assert parse_args([]).res_expansion == 3
+    assert (
+        parse_args(["--arch", "bres421", "--res-expansion", "2"]).res_expansion
+        == 2
+    )
+    assert (
+        parse_args(["--arch", "bres221", "--res-expansion", "0.25"]).res_expansion
+        == 0.25
+    )
+    with pytest.raises(SystemExit):
+        parse_args(["--arch", "bres421x"])
+
+
+def test_train_res4_vf_outcome_smoke(tmp_path):
+    run_dir = train(
+        _tiny_args(
+            tmp_path,
+            "--arch", "res421",
+            "--hidden-size", "64",
+            "--actor-out-std", "0.1",
+            "--vf-outcome", "true",
+            "--checkpoint-interval", "0",
+        )
+    )
+    agent, extra = load_agent(run_dir / "agent.pt")
+    assert agent.arch == "res421" and agent.hidden == 64 and agent.vf_outcome
+    assert extra["args"]["hidden_size"] == 64
+
+
+def test_train_bres_vf_outcome_smoke(tmp_path):
+    run_dir = train(
+        _tiny_args(
+            tmp_path,
+            "--arch", "bres421",
+            "--hidden-size", "32",
+            "--res-expansion", "3",
+            "--actor-out-std", "0.1",
+            "--vf-outcome", "true",
+            "--checkpoint-interval", "0",
+        )
+    )
+    agent, extra = load_agent(run_dir / "agent.pt")
+    assert agent.arch == "bres421" and agent.hidden == 32 and agent.vf_outcome
+    assert agent.res_expansion == 3
+    block = agent.network.blocks[1][0]
+    assert (block.in_features, block.out_features) == (32, 96)
+    assert extra["args"]["res_expansion"] == 3
+
+
+def test_train_bnres_vf_outcome_smoke(tmp_path):
+    run_dir = train(
+        _tiny_args(
+            tmp_path,
+            "--arch", "bnres21",
+            "--actor-out-std", "0.1",
+            "--vf-outcome", "true",
+            "--checkpoint-interval", "0",
+        )
+    )
+    agent, extra = load_agent(run_dir / "agent.pt")
+    assert agent.arch == "bnres21" and agent.vf_outcome
+    assert extra["args"]["vf_outcome"] is True
+
+
+def test_train_restores_train_mode_after_the_periodic_eval(tmp_path, monkeypatch):
+    """Regression: ``NeuralPolicy(agent)`` evals the live learner in place.
+
+    A ``bnres`` body must keep updating its running statistics during the
+    rollout/update, so the periodic evaluation (which needs eval mode for
+    deterministic inference) has to restore train mode afterwards.
+    """
+    from seven523 import train as train_module
+
+    modes: list[bool] = []
+    real_ppo = train_module.ppo_update
+
+    def recording_ppo(agent, optimizer, batch, config):
+        modes.append(agent.training)
+        return real_ppo(agent, optimizer, batch, config)
+
+    monkeypatch.setattr(train_module, "ppo_update", recording_ppo)
+    train(
+        _tiny_args(
+            tmp_path,
+            "--total-timesteps", "256",
+            "--arch", "bnres21",
+            "--eval-interval", "1",
+            "--eval-episodes", "1",
+            "--checkpoint-interval", "0",
+        )
+    )
+    assert modes == [True, True]
+
+
+def test_train_rejects_gnres_group_misuse_before_creating_the_run(tmp_path):
+    with pytest.raises(SystemExit, match="must divide"):
+        train(
+            _tiny_args(
+                tmp_path,
+                "--arch", "gnres21",
+                "--hidden-size", "16",
+                "--gn-groups", "3",
+                "--checkpoint-interval", "0",
+            )
+        )
+    assert not any(tmp_path.iterdir())
+    with pytest.raises(SystemExit, match="gn-groups"):
+        train(
+            _tiny_args(
+                tmp_path,
+                "--arch", "gnres21",
+                "--gn-groups", "0",
+                "--checkpoint-interval", "0",
+            )
+        )
+    assert not any(tmp_path.iterdir())
 
 
 def test_train_warm_starts_a_same_layout_checkpoint(tmp_path):

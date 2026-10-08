@@ -225,7 +225,13 @@ def test_real_plugin_builds_only_manifest_configured_search_rungs(tmp_path):
     assert params["rollout_opponent"] == SEARCH_CONFIG["rollout_opponent"]
     assert params["value_ckpt"] == "runs/ei2_value_t5/t_leafq/critic.pt"
     factory = plugin.policy_factory
-    assert factory.search_configs[configured_spec] == SEARCH_CONFIG
+    # ``validate_search_config`` normalises the optional outcome blend and
+    # the optional exact-endgame flag in.
+    assert factory.search_configs[configured_spec] == {
+        **SEARCH_CONFIG,
+        "outcome_blend": 0.0,
+        "endgame": 0,
+    }
 
 
 def test_real_plugin_warns_on_a_malformed_search_config(tmp_path):

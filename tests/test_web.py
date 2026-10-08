@@ -491,6 +491,96 @@ def test_free_play_search_request_is_validated(tmp_path, monkeypatch):
     assert table.phase == "idle"
 
 
+def test_free_play_beta_is_a_validated_float(tmp_path, monkeypatch):
+    """``outcome_blend`` is a float knob: no int truncation, finite, bounded."""
+    import seven523.web.table as table_module
+
+    monkeypatch.setattr(table_module, "torch_available", lambda: True)
+    seen: list[dict] = []
+
+    def factory(spec, rules, seed, search):
+        seen.append(dict(search))
+        return RandomBot(random.Random(seed))
+
+    table = _table(
+        tmp_path,
+        opponents=(
+            Opponent("random", 0.0, anchor=True),
+            Opponent("wrapped", 100.0, spec="ckpt:runs/w2m/agent.pt"),
+        ),
+        policy_factory=factory,
+        search={
+            "label": "t/K/β 可选",
+            "options": {
+                "trunc_ply": {"min": 0, "max": 40, "default": 5},
+                "rollout_k": {"min": 1, "max": 512, "default": 32},
+                "outcome_blend": {
+                    "min": 0.0,
+                    "max": 8.0,
+                    "default": 0.0,
+                    "type": "float",
+                },
+            },
+        },
+    )
+    base = {"mode": "free", "opponent_id": "wrapped", "seat": 0, "seed": 7}
+    table.start({**base, "search": {"outcome_blend": 1.5}})
+    assert seen == [{"trunc_ply": 5, "rollout_k": 32, "outcome_blend": 1.5}]
+    assert table.snapshot()["search"] == {
+        "trunc_ply": 5,
+        "rollout_k": 32,
+        "outcome_blend": 1.5,
+    }
+    with pytest.raises(Exception) as boolean:
+        table.start({**base, "search": {"outcome_blend": True}})
+    assert "需要是数字" in str(boolean.value)
+    with pytest.raises(Exception) as out_of_range:
+        table.start({**base, "search": {"outcome_blend": 9.0}})
+    assert "越界" in str(out_of_range.value)
+    with pytest.raises(Exception) as non_finite:
+        table.start({**base, "search": {"outcome_blend": "inf"}})
+    assert "越界" in str(non_finite.value)
+
+
+class _ReadoutBot(RandomBot):
+    """Random play plus the head readout the live estimate panel asks for."""
+
+    def value_and_outcome(self, view):
+        return 0.125, 0.5
+
+
+def test_free_play_estimate_panel_is_opt_in(tmp_path, monkeypatch):
+    import seven523.web.table as table_module
+
+    monkeypatch.setattr(table_module, "torch_available", lambda: True)
+    table = _table(
+        tmp_path,
+        opponents=(
+            Opponent("random", 0.0, anchor=True),
+            Opponent("wrapped", 100.0, spec="ckpt:runs/w2m/agent.pt"),
+        ),
+        policy_factory=lambda spec, rules, seed, search: (
+            _ReadoutBot(random.Random(seed))
+            if spec.startswith("ckpt:")
+            else RandomBot(random.Random(seed))
+        ),
+    )
+    base = {"mode": "free", "opponent_id": "wrapped", "seat": 0, "seed": 7}
+    # Default off: the snapshot carries no estimate.
+    table.start(base)
+    assert table.snapshot()["model_estimate"] is None
+    # Opt in: the critic margin converts to points and the outcome head maps
+    # to a win probability; the flag must be a strict boolean.
+    table.start({**base, "estimate": True})
+    assert table.snapshot()["model_estimate"] == {"margin": 12.5, "win_prob": 0.75}
+    with pytest.raises(Exception) as bad:
+        table.start({**base, "estimate": "yes"})
+    assert "布尔" in str(bad.value)
+    # The random anchor has no model readout; the panel is simply absent.
+    table.start({**base, "opponent_id": "random", "estimate": True})
+    assert table.snapshot()["model_estimate"] is None
+
+
 def test_search_request_needs_a_search_launcher(tmp_path):
     table = _table(tmp_path)
     with pytest.raises(Exception) as excinfo:
@@ -614,6 +704,82 @@ def test_stock_web_skips_a_manifest_search_rung(tmp_path):
     assert {opponent.id for opponent in table.session.opponents} == {"random"}
 
 
+def test_config_exposes_each_opponents_pinned_search_identity(tmp_path):
+    """The page defaults t/K/β from the rung's published ``search_config``."""
+    manifest = _search_manifest(tmp_path)
+    document = json.loads(manifest.read_text(encoding="utf-8"))
+    document["subjects"][1]["search_config"] = {
+        "trunc_ply": 5,
+        "rollout_k": 32,
+        "outcome_blend": 1,
+    }
+    manifest.write_text(json.dumps(document), encoding="utf-8")
+    table = TableSession.from_config(
+        _web_config(
+            tmp_path,
+            manifest,
+            can_build_spec=lambda spec: spec in ("random", RATED_SPEC),
+        )
+    )
+    entries = {entry["id"]: entry for entry in table.config_document()["opponents"]}
+    assert entries["search_leafq"]["search_config"] == {
+        "trunc_ply": 5,
+        "rollout_k": 32,
+        "outcome_blend": 1,
+    }
+    assert "search_config" not in entries["random"]
+
+
+def test_free_play_uses_the_rungs_pinned_search_defaults(tmp_path, monkeypatch):
+    """Omitting a knob plays the rung's published identity; explicit wins."""
+    import seven523.web.table as table_module
+
+    monkeypatch.setattr(table_module, "torch_available", lambda: True)
+    manifest = _search_manifest(tmp_path)
+    document = json.loads(manifest.read_text(encoding="utf-8"))
+    document["subjects"][1]["search_config"] = {
+        "trunc_ply": 5,
+        "rollout_k": 32,
+        "outcome_blend": 1,
+    }
+    manifest.write_text(json.dumps(document), encoding="utf-8")
+    seen: list[dict] = []
+
+    def factory(spec, rules, seed, search):
+        seen.append(dict(search))
+        return RandomBot(random.Random(seed))
+
+    table = TableSession.from_config(
+        _web_config(
+            tmp_path,
+            manifest,
+            policy_factory=factory,
+            can_build_spec=lambda spec: spec in ("random", RATED_SPEC),
+            search={
+                "label": "t/K/β",
+                "options": {
+                    "trunc_ply": {"min": 0, "max": 40, "default": 5},
+                    "rollout_k": {"min": 1, "max": 512, "default": 16},
+                    "outcome_blend": {
+                        "min": 0.0,
+                        "max": 8.0,
+                        "default": 0.0,
+                        "type": "float",
+                    },
+                },
+            },
+        )
+    )
+    base = {"mode": "free", "opponent_id": "search_leafq", "seat": 0, "seed": 3}
+    table.start(base)
+    assert seen[-1] == {"trunc_ply": 5, "rollout_k": 32, "outcome_blend": 1.0}
+    table.start({**base, "search": {"rollout_k": 8, "outcome_blend": 0.0}})
+    assert seen[-1] == {"trunc_ply": 5, "rollout_k": 8, "outcome_blend": 0.0}
+    # The anchor has no pinned block: the global option defaults apply.
+    table.start({**base, "opponent_id": "random"})
+    assert seen[-1] == {"trunc_ply": 5, "rollout_k": 16, "outcome_blend": 0.0}
+
+
 def test_manifest_search_rung_is_admitted_with_the_plugin_gate(
     tmp_path, monkeypatch
 ):
@@ -710,7 +876,7 @@ def test_config_document_exposes_plugin_capabilities(tmp_path):
         can_build_spec=lambda spec: True,
     )
     config = table.config_document()
-    assert config["proto_version"] == PROTO_VERSION == 6
+    assert config["proto_version"] == PROTO_VERSION == 8
     assert config["plugin"] == {
         "source": "runs/o4lite-search/web_plugin.py",
         "error": None,
@@ -1060,7 +1226,7 @@ def test_http_placement_merged_pool_smoke(tmp_path, monkeypatch):
     try:
         status, config = _get(base, "/api/config")
         assert status == 200
-        assert config["proto_version"] == PROTO_VERSION == 6
+        assert config["proto_version"] == PROTO_VERSION == 8
         assert "rated_rungs" not in config and "unrated" not in config
         assert [entry["id"] for entry in config["opponents"]] == [
             "random",

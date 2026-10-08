@@ -148,6 +148,183 @@
     翻转率 22.2% 低于均匀重采样噪声 23.5%，oracle 真手牌仍 **+3.117** [+2.019,+4.271]。
     → 不集成、不 h2h；重访条件 = held-out top-k placement 优势显著变大。详见
     [`belief-posterior-probe.md`](./belief-posterior-probe.md)。
+17. **Stage-0 瓶颈诊断（2026-10-06，四探针；D-A/D-C/D-D 完成、D-B 按 operator 决定提前收束）**：
+    **削掉「信息缺口」假设、把「优化/表达限制」抬为主假设，并量出测量瓶颈。**
+    - **D-A oracle-obs**（信息上界）：obs 追加真实隐藏信息（对手手牌 + 牌堆划分，108 维）vs
+      全 0 等容量对照，500k × 3 seed；h2h O−Z = **−13.87 Elo**（z-CI [−27.08,−0.67]；t-CI 跨 0），
+      3 seed 全负，点 < +5 止损 → **信息不是 500k 平台的瓶颈**，O1/belief 先验下调。详见
+      [`stage0-oracle.md`](./stage0-oracle.md)。
+    - **D-C critic 天花板**：`w2m_ctl` 自对局 K=8 叶子，深/独立/加宽 critic 与 ×1/×2/×4
+      数据全部 ≤ shipped 129 参线性头（EV 0.5216 vs 可达上限 0.6409）→ **value 残差不可约
+      （H0）**，停止 critic 结构/数据线。详见 [`stage0-critic-ceiling.md`](./stage0-critic-ceiling.md)。
+    - **D-B 固定牌局**：固定 500 副 vs 新鲜发牌（200k × 3 seed × {T,H}）——`Δ_mem` +0.0143
+      z-CI [−0.006,+0.035] 含 0、`gap_F` +0.003 z-CI 含 0、`Δ_ceil` −0.001 z-CI 含 0：
+      **中间情形 / null**，四个差值 z/t CI 全含 0；vs-random 尺子在 ~100k 饱和，无法在该尺子
+      上区分优化 vs 泛化；500k 扩展按 operator 决定取消（A3）。详见
+      [`stage0-fixed-deals.md`](./stage0-fixed-deals.md)。
+    - **D-D 方差 screen**：`--target-kl 0.03` = no-op（approx_kl ≤ 0.0047、权重逐位同基线）；
+      `lr 1e-4` 把 run sd 17.21 → 3.52 Elo（≤ 基线一半，候选稳定器）但 200k 均值弱 −18.3 Elo
+      （n=3 不显著）→ **无免费稳定器**，需 k≥7 + 配平强度复核。详见
+      [`stage0-variance.md`](./stage0-variance.md)。
+
+    含义：平台更像**优化/表示限制**而非信息缺口；训练侧结构项只余 O2（深度/归一化，计划见
+    [`../depth-normalization-plan.md`](../depth-normalization-plan.md)）与条件项；搜索侧
+    `search_leafq`（μ=260.03）仍是唯一强杠杆。
+18. **O2 trunk 深度/归一化（2026-10-06，500k 2×2 + 容量对照；500k 从零=负/关闭，续训 A5 反转）**：主端点
+    `deep_ln − base`（k=7，7 seed × 1,200 副）**−13.95 Elo** [−25.84,−2.06]（t-CI [−28.79,+0.90]），
+    5/7 seed 为负；descriptive 归因：`deep − base` **−9.52** [−18.17,−0.86]、`ln − base` −17.91
+    [−41.23,+5.42]、`deep_ln − deep` +1.54 [−11.86,+14.95]；参数匹配的容量对照
+    `wide − base`（`--hidden-size 157`，72,202 参数）+0.97 [−16.65,+18.59] ≈ null → 负结果不是
+    容量混淆。**z-CI 上界 −2.06 < +5 → 按预注册止损关闭 trunk 深度/归一化轴**；训练侧结构项
+    至此清空。**残差补测（A1，k=3）**：`deep_res−deep` +6.82 [−4.62,+18.26]、
+    `deep_lnres−deep_ln` −4.69 [−15.00,+5.62]，未达「点 ≥ +10 且 CI 排 0」升级门槛 →
+    残差变体同样无增益。**不确定度 critic（A2，k=7）**：`nll − base` −13.55 [−21.67,−5.43]
+    （6/7 seed 负），logvar 头确有学习（均值 ≈ −3.8、无 clamp 塌缩）但均值头 EV 0.648 < base 0.709
+    → 同样关闭。**不确定度采样价值 + 1M（A3，k=7）**：`samp1m − base1m` −21.92 [−36.38,−7.46]（5/7 seed 负，
+    σ≈0.15–0.19 的噪声注入 GAE/λ-return），`samp1m − nll1m` −22.74、`nll1m − base1m` +2.51（未复现 A2 的 500k 亏损、也未转正）
+    → 同样关闭。**续训对标（A5/A5b）**：500k→+1M（T23 协议）后三臂相对自身 +29 Elo；对 `w2m_ctl`：
+    `o2c_base` **+10.12** [5.49,+14.76]（k=7）、`o2c_deep_ln` +9.27 [2.77,+15.77]（k=7）、`o2c_deep` +8.74（k=3）；
+    但 `o2c_deep_ln − o2c_base` = +1.01 [−4.97,+7.00]（k=7，null）→ **续训有效、架构无贡献；
+    k=3 的 deep_ln +15.41 是小样本高估**。后验探针：独立 bank 复现 `o2c_base − w2m_ctl` +11.91，
+    但与 `w2m_plain/w2m_low/ws_s2` 平局（−1~+4）→「略超冠军」是配对特异 + 非传递性 ~7 Elo，
+    w2m 血统 entropy 塌缩（1.57→1.31→1.08）提示「少做一次固定池续训」是可能原因。详见 §3.3。
+    **残差 × 续训（A6，k=3）**：`o2c_deep_lnres − o2c_deep_ln` **−2.08** [−8.71,+4.56]
+    （z 上界 +4.56 < +5 → 按预注册 H0）、`o2c_deep_res − o2c_deep` +2.13 [−9.61,+13.86]
+    （不可判定）；两残差臂自身的续训增益 +30.3/+20.9 复现杠杆，但 skip 相对 plain twin
+    增量 ≈ 零 → **「续训有效、架构无贡献」扩展到残差变体**。详见 §3.5。
+19. **异方差 critic 均值/方差解耦（2026-10-07，A4，null/收口）**：均值路径 = base 同款 clipped MSE，
+    方差头用 `mean.detach()` 的 NLL。`dec − base` k=7 **−1.10** [−10.94,+8.73]（三档均未触发：
+    不通告增益也不关闭）、`dec − nll` **+9.34** [−4.19,+22.88] → A2 的亏损机制确证为逆方差加权，
+    解耦后方差辅助目标对策略净零（EV 0.655 vs base 0.709）。高斯 NLL 线收口：建模噪声不改变策略。
+    详见 [`depth-normalization-500k.md`](./depth-normalization-500k.md) §4e。
+20. **头部深度网格：策略头 × 价值头 {1,2,3}²（2026-10-07，k=1 preliminary screen；pool-episode 从零 500k）**：
+    多层头默认残差；对手 = ADR-0015 的 pool-episode（6×t17 `3@` + `2@random`）；
+    8 个 cell 对 `hd_base`：唯一正号过线 **`head12`（策略头 2 层） +17.40 [+4.1,+30.7]**、
+    唯一负号过线 `head22` −20.15 [−32.9,−7.4]，其余 CI 跨 0（−6.4…+8.1）；无单调深度/
+    容量趋势；等参数边 {13,22,31} 上 actor-heavy 优于 critic-heavy。**k=1（seed sd 8.4–17.2
+    不在 CI 内）不构成结论**，`head12` 按预注册待补 seed 2–3（未执行）。配方侧：pool-episode
+    从零可训（9/9 无 NaN、EV 0.52–0.71、entropy 1.54–1.71、vs-random 0.78–0.93）。
+    详见 [`head-depth-500k.md`](./head-depth-500k.md)；预注册 [`../head-depth-plan.md`](../head-depth-plan.md)。
+    **H1（新配置续训，k=1）**：head12/22/32 从各自 500k 起点用 ADR-0016 默认（arcsin 0.5/λ=1/lr-floor 1e-5）+ ADR-0015 pool 续训 +1M；
+    对自身起点 −4.34/+13.05/+10.28，两两 +9.56（12c>32c）/−10.14（22c<32c），对 `o2c_base` −0.87/−6.23/+4.78，
+    对 `w2m_ctl` +11.30/−9.41/+4.78（CI 全跨 0）。operator 指出头部残差设计缺口（无 LN、actor out init 过小）→
+    plan §10 的 `head<a><c>ln` + `--actor-out-std` v2 待跑。详见 [`head-depth-500k.md`](./head-depth-500k.md) §8。
+    **H2/H2b（v2 设计，k=1）**：`head32ln`（pre-norm LN 残差块 + `actor_out_std 0.1`）从零 500k
+    对旧网格 `head32` −7.98 [−25.35,+9.40]；同配方 1M 续训后 `head32lnc − head32c` = **−7.82**
+    [−19.21,+3.57]（同配方同预算只差设计，无改进证据）、对自身 500k 起点 **+19.42**
+    [+7.46,+31.39]（续训杠杆复现）；对 `o2c_base`/`w2m_ctl`/`head12c`/`head22c` = −5.36/+0.43/−4.20/−5.94。
+    机制：`head32lnc` entropy **1.212**（全部续训臂最低）、evalW 0.820 最低 → 更像更早的池特化。
+    k=1 不关轴，是否关闭由 operator 裁定。详见 §9/§10。
+    **H2c（+2M，总 3.5M，k=1）**：对自身 1.5M **−0.72** [−11.77,+10.32]（平台）、对 `head32c` +1.74、
+    对 `o2c_base` −0.58、对 `w2m_ctl` +9.99 [−0.94,+20.93]、对 `head12c`/`head22c` −5.22/+1.59；
+    entropy 1.212→**1.163**、evalW 0.820→0.910。无 H1；operator 指定继续 +5M。详见 §11。
+    **H2d（+5M，总 8.5M，k=1）**：对自身 3.5M **+16.69** [−1.58,+34.95]、对 `w2m_ctl` +11.16、
+    对 `head32c` +8.26、对 `o2c_base` +3.18、对 `head12c`/`head22c` +12.18/+21.90 [+9.67,+34.13]；
+    entropy 1.140、maxKL 0.0422。无 H1。该 checkpoint 已加入 `7g523-web` 默认 manifest
+    （raw `head32ln5m` + 搜索档 `search_head32ln5m`，计划 §15）。
+21. **跳变奖励的胜负分解价值头 `--vf-outcome`（2026-10-07，k=1 preliminary screen；pool-episode 从零 500k）**：
+    价值头只学 **跳变-free return**，另加 `tanh` 胜负头预测 `E[γ^(T-t)·seat_outcome]`；GAE 精确拆成
+    `A_total = A_base + A_jump`（jump 流以 `λ·head` 为基线）。首轮 rollout 缓冲未按轮清零导致
+    stale-jump 污染（critic scale 漂到 ~5），修正并加回归测试后重跑。**强度端点
+    `vfo_outcome − vfo_base` = −0.43 [−12.95,+12.09]（k=3 h2h，1200 副/2400 局）→ null，
+    点 <+5 止损**；机制成立：胜负头对 random 符号准确率 **0.884**、AUC **0.879**
+    （对 t17long 0.745 / 0.817），implied `E[y]` 分桶实际胜率 0.19/0.65/0.86/0.98；
+    价值头值域回到 ±1。k=1 不宣布增益/无增益结论。详见 [`vf-outcome.md`](./vf-outcome.md)。
+22. **残差 body + 非残差头 + GroupNorm（`gnres`/`lnres`）500k screen（2026-10-07，k=1；头深度取 (2,1)：策略 2 层 / 价值 1 层）**：
+    首轮三臂 @ `--actor-out-std 0.1` 给出假阳性 `gnres21 − head21` **+37.21** [+24.84,+49.57]、
+    `lnres21 − head21` +40.14；Amendment G1 补 0.01 两臂后真相反转：`head21@0.01 − head21@0.1`
+    **+18.26** [+5.75,+30.76]（0.1 伤残差头）、`gnres21@0.1 − gnres21@0.01` **+22.33**
+    [+10.31,+34.35]（plain 头需要 0.1）；各自较好 init 直接对比 **−0.14** [−12.62,+12.34]
+    → 架构无效应；GN vs LN +0.43（不可分）；canonical init 下 `head21@0.01 − vfo_base` +2.46
+    （中性）、`gnres21@0.1 − vfo_base` +8.84 / `− hd_head32ln` +10.89（均 CI 含 0）。
+    结论：`actor_out_std` 对残差/plain 深头是反向旋钮，深头实验必须把 init 与结构一起做因子。
+    不补 seed、方向收束。详见 [`gnres-500k.md`](./gnres-500k.md)。
+23. **BatchNorm 残差 body + 三头（策略+价值+胜负）（`bnres` + `--vf-outcome`）500k screen（2026-10-07，k=1）**：
+    头深 (2,1)、`--actor-out-std 0.1`。BN 臂**强负**：`bnres21 − gnres21` **−41.97**
+    [−61.15,−22.78]、`− lnres21` **−42.78** [−55.44,−30.12]、`− vfo_outcome`（三头默认）
+    −33.85、`− vfo_base` −46.35，三 deal seed 全同号。机制：entropy 塌缩到 **0.103**
+    （GN/LN 1.59–1.61）、早期 clipfrac 0.277（GN/LN 0.05–0.11）——rollout 每步 batch=8 的
+    BN 统计 vs PPO update minibatch=256 不一致，old/new logprob 比值失真。公平测试 BN 需先
+    解决统计一致性（未做）。GN/LN 三头对现有三头默认 null（−3.3/−5.1，CI 含 0）；三头本身
+    在新家族内 null（+2.2/−4.5），延续 `vfo_outcome − vfo_base` = −0.43 的结论。不补 seed。
+    详见 [`bnres-500k.md`](./bnres-500k.md)。
+24. **小模型 res4：无 norm 4-block 残差 body + plain (2,1) 头 + 胜负头、hidden 64、2M 从 random（2026-10-08，k=1 = seed 1）**：
+    36,108 参数。h2h（3×400 换座）：对同预算 `t17long` 2M **+28.29** [+16.24,+40.35]、
+    对 `w2m_ctl` **+18.55** [+7.04,+30.05]、对 `o2c_base` +9.85 [−1.42,+21.12]、
+    对 `vfo_outcome` +19.90 [−1.99,+41.79]、对 `head32ln5m` −5.50 [−17.10,+6.09]（平）；
+    独立 vs-random eval 1000 局 **0.909**（`t17long` 0.884）。**位置 = raw 顶簇，但对比是
+    「新默认配方 + 新结构 vs 旧 T17 配方 + shared h128」的复合，不能归因给架构（尤其 2M
+    尾巴的 LR floor/配方）；k=1 未复现**，下一步 seed 2–3 + 匹配对照拆归因。详见
+    [`res4-2m.md`](./res4-2m.md)。
+25. **小模型 bres4：瓶颈残差块 (32, 96, 32)（无 norm 4-block body + plain (2,1) 头 + 胜负头，hidden 32，2M 从 random）（2026-10-08，k=1 = seed 1）**：
+    29,676 参数。**直接消融为负**：对同配方同预算父模型 `res421_h64_2m`（(64,64) 块、hidden 64）
+    **−17.25** [−28.62,−5.87]（3/3 deal seed 同号，p=0.005），对 `head32ln5m` −13.62
+    [−25.73,−1.50]；对旧配方 `t17long` 2M +18.70 [+6.02,+31.38]、`w2m_ctl` +8.98、
+    `o2c_base` +10.73。训练内 EV 与父模型相同（0.6644 vs 0.6645），独立 vs-random 1000 局
+    0.889（父 0.909）。把 (64,64) 换成 (32,96,32) 在这条配方下没有收益；消融混了「窄流 32」
+    与「瓶颈分支」两个因素，拆因 arm 见报告 §4。详见 [`bres-2m.md`](./bres-2m.md)。
+26. **小模型 bres221：瓶颈残差块 (32, 96, 32) + depth 2（无 norm 2-block body + plain (2,1) 头 + 胜负头，hidden 32，2M 从 random）（2026-10-08，k=1 = seed 1）**：
+    17,132 参数。**落在 raw 顶簇**：对同块 depth-4 `bres421` **+14.63** [+2.51,+26.75]
+    （3/3 seed 同号，p=0.019）、对 `head32ln5m` +2.03 [−9.49,+13.55]（平）、对
+    `res421_h64_2m` −1.16 [−12.51,+10.19]（平）、对旧配方 `t17long` +24.65 [+12.41,+36.90]；
+    独立 vs-random 1000 局 0.898。depth 4→2 的 +14.6 是同块干净消融；与父模型持平混了
+    流宽/块/深度/参数量。k=1 未复现（前置：seed 2–3）。详见 [`bres221-2m.md`](./bres221-2m.md)。
+27. **小模型 bres221 h48：瓶颈残差块 (48, 96, 48) + batch 2048 / 8 minibatch / 2 epochs（depth 2，hidden 48，2M 从 random）（2026-10-08，k=1 = seed 1）**：
+    26,348 参数。**组合改动的读数是 null**：对上一臂 `bres221_32x96x32_2m` −3.04
+    [−15.05,+8.97]、对 `head32ln5m` −3.77 [−15.79,+8.26]、对 `res421_h64_2m` −8.26
+    [−22.80,+6.28]（CI 全含 0）、对旧配方 `t17long` +18.87 [−1.38,+39.12]（CI 含 0，
+    between-seed sd 17.9）；独立 vs-random 1000 局 0.897（= h32 臂 0.898）。与上臂的对比
+    同时含块宽与 PPO 配方两项改动，非单因子；拆因臂未跑。详见
+    [`bres221-h48-b2048-2m.md`](./bres221-h48-b2048-2m.md)。
+28. **小模型 bres222 h48：value 头 1→2 层（同策略头），其余同 bres221 h48 配方（depth 2，hidden 48，(48,96,48)，batch 2048，2M 从 random）（2026-10-08，k=1 = seed 1）**：
+    28,700 参数。**没有帮助、外部锚点明显更弱**：对 `head32ln5m` **−19.58** [−31.91,−7.25]、
+    对 `res421_h64_2m` **−19.13** [−31.14,−7.12]（均 3/3 seed 负）；对直接父模型
+    `bres221_48x96x48_b2048_2m` −6.96 [−29.55,+15.62]（CI 含 0，seed 间 sd 20）；对旧配方
+    `t17long` −0.14（父模型 +18.9）。独立 vs-random 1000 局 0.906（父 0.897）；训练内 eval
+    反而最好（return 0.602）——训练指标与 h2h 再次脱钩。详见
+    [`bres222-h48-b2048-2m.md`](./bres222-h48-b2048-2m.md)。
+29. **小模型 bres221 h64c：压缩型瓶颈 (64, 16, 64) + batch 2048（depth 2，hidden 64，2M 从 random）（2026-10-08，k=1 = seed 1）**：
+    25,756 参数。**没有增益、低于顶簇**：对同配方 h48 臂 `bres221_48x96x48_b2048_2m` −12.76
+    [−29.31,+3.80]、对族内最佳 `bres221_32x96x32_2m` −7.96 [−19.90,+3.97]（点负、CI 含 0）、
+    对 `head32ln5m` **−21.77** [−36.85,−6.69]、对 `res421_h64_2m` **−16.37** [−28.45,−4.29]
+    （CI 排 0）；对旧配方 `t17long` +19.72 [+6.98,+32.45]。独立 vs-random 1000 局 0.903。
+    这是 `--res-expansion` 支持小数后的第一个 run（0.25）。详见
+    [`bres221-64x16x64-b2048-2m.md`](./bres221-64x16x64-b2048-2m.md)。
+30. **小模型 bres221 (32,96,32) 续训 10M（ADR-0015 池 + AdamW/cosine，每 1M 快照）（2026-10-08，k=1 = seed 1）**：
+    17,132 参数。**首次越出原顶簇**：对起点 `bres221_32x96x32_2m` **+16.81** [+4.95,+28.68]
+    （3/3 seed 正，p=0.002）、对 `res421_h64_2m` **+13.32** [+2.55,+24.10]（seed sd 1.1）、
+    对 `head32ln5m` +12.61 [−0.62,+25.84]（点 ≥ +10、p=0.028，CI 含 0）、对 `t17long` +46.34
+    [+32.85,+59.84]（池同源，含特化成分）。独立 vs-random 1000 局 0.881（起点 0.898，
+    饱和）；熵 1.65→1.16（固定池特化）但强度反向上涨。3h53m、9,998,336 步、9 个 1M 快照
+    + 最终 agent.pt；新增 `--snapshot-steps`。逐快照对基线（27 面板）：前 3M 平、4M 起跃升、
+    7M/9M 点估计最高（对起点 +20.0/+17.4）、之后平台。k=1 未复现。详见
+    [`bres221-cont10m.md`](./bres221-cont10m.md)。
+31. **outcome 头进搜索的第一版探针：截断叶值 V+βu（2026-10-08，k=1 机制 + 离线 ROI）**：
+    机制非空——β=1 翻转约 8% 的搜索决策（β=2 约 9.5%）；离线 ROI（翻转决策 × K=32
+    全终局判定，80 局 bank）：9M β=1 胜率 **+4.16pp**（41/18，p=0.0038）、β=2 胜率
+    **+4.81pp**（48/25，p=0.0095）但 margin 增益从 +0.45 降到 +0.05；7M β=1 为负、β=2 仍
+    平/负（−1.17pp）。β=2 的胜率点估计略高但与 β=1 不可分；判定器是自博弈，**未进 game
+    screen**。下一步：spec 带 β + 小规模 A/B screen，guard 规则离线探针。代码
+    `rollout_trunc.outcome_blend`（env `O4_OUTCOME_BLEND`，默认 0）+ `outcome_probe.py`。
+    **Web 池发布（2026-10-08）**：两档以已测量 subject 进入 `traces/study`（=pool10）——
+    `bres221_7M_b1` μ=262.14 [256.94,267.58]、`bres221_9M_b1` μ=265.70 [260.37,271.10]
+    （σ≈2.7、n=8000；34k joint fit；`search_leafq` 按 option B carried-over）。详见
+    [`outcome-search-probe.md`](./outcome-search-probe.md)；provenance
+    [`artifacts/web-bres221-b1/`](../artifacts/web-bres221-b1/README.md)。
+32. **空底精确 minimax 审计 + endgame solver 接入（2026-10-08，逐位验证；Elo 未确认）**：
+    对 7 局真人对局、40 个空底（`draw_count=0`）决策做**精确 minimax** 复盘。机制层：空底后
+    2 家局是完全信息，`sample_hidden` 对所有决定化给出**同一个世界**（已验证），K=128 只是重复
+    采样，误差是 critic 系统偏差 + β 过权而非 MC 噪声。两处决定性翻转（确定性精确值）：
+    `s1816097613` step 29 的 raw ♥9=**+20** 被 t3/K128/β1.5 改成 ♠5=**−20**（同 view 下
+    β0/β1 → ♣Q=0，t5/t7 β0 → ♥9=+20；终局 40-60）；`s2032056744` step 38 的 raw ♣6=**+40**
+    被改成 ♠2=0（终局 50-50）。40 决策描述性读数：raw 5/40 低于最优（Σ130）、t5/K32/β0 4/40
+    （Σ130）、实战 t3/β1.5 5/40（Σ140）、全终局自博弈 6/40（Σ170）——没有任何现有臂零遗憾，
+    且上表是重复计数的便利样本、不含任何 Elo 结论。已接入 run-local `endgame_solver.py`
+    （α-β + canonical TT + 1e6 节点/5s 预算，超限回退搜索；`O4_ENDGAME` / 页面开关）；
+    未测量身份默认不叠加（ADR-0019）。性能：α-β 对 6 个最难局面 14–90× 于无剪枝 negamax，
+    走法生成再 ~2.5×（0.09–1.56s，叠 fast_engine worst ~1.43s）；搜索侧 CPU 线程默认 1 再
+    1.17–1.44×。验证：`check_endgame_solver.py` 122 项 0 failures、pytest 932 passed。
+    详见 [`endgame-minimax-audit.md`](./endgame-minimax-audit.md)；[ADR-0019](../adr/0019-endgame-exact-minimax-overlay.md)。
 
 ### 0.1 规范数字表（2026-09-25 建立，C-4；跨报告引用必须带口径）
 

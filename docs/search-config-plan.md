@@ -1,5 +1,11 @@
 # 搜索配置与定级模式：可用边界、测量方案与逐局 (t, K) 落地（7鬼523）
 
+> **更新（2026-10-08）**：`subjects[].search_config` 新增可选键 `endgame`（0/1，缺省 **0**）：
+> 只有显式写 1 时，空底精确 minimax overlay 才属于该搜索 rung 的发布身份（消费侧
+> plugin/twin 按 0 重建；`refit_mle` 逐字保留）。自由对战默认开（页面逐局可关），不进口径；
+> 求解器机制、审计与性能见 [`experiments/endgame-minimax-audit.md`](./experiments/endgame-minimax-audit.md)，
+> 身份边界裁定见 [ADR-0019](./adr/0019-endgame-exact-minimax-overlay.md)。
+
 > **更新（2026-09-29，P6）**：owner 决定把定级池合并为一个：placement 直接使用 manifest
 > `levels`（raw 档 + `search_leafq` 同一次联合拟合尺度，C3 调度），删除 `rated` 子池与
 > **experimental/unrated** 整个模式。搜索身份的唯一运行时来源改为
@@ -158,6 +164,12 @@
   factory 按请求参数构造 `ValueChampion(trunc_ply=t)`（按 t 缓存）或 `BatchChampion`（全量，按 spec
   缓存）。定级侧 factory 注入已在 P4a 发布后接上（§4.3），但只对 manifest 的非 grammar spec 生效。
 - **约束**：包装只作用于 `ckpt:` 对手；`random` 锚不包装；搜索核心固定在 CPU（与 JS 评测同口径）。
+
+> **更新（2026-10-08，搜索部署单模型化）**：自由对战不再有第二个 `--value-ckpt` 包装核心
+> （dual checkpoints 已删）：选中 ckpt 同时做 base/argmax 与自己的 value/outcome 核心；
+> 页面逐局可选 `t`/`K`/`β`（`β = outcome_blend`，`V_leaf = V + β·u`），K 硬界放宽到
+> **1..512**；`web_search.py --value-ckpt` 已删除，`web_twin` 的 pinned
+> `rolloutt:<t_leafq>` 身份保留。定级仍用 manifest `search_config`（含 `outcome_blend`）。
 
 ### 4.2 定级：`search_t5k16` rung（规划，本次未做；P6 以 `search_config`+单一池落地，见文首更新）
 

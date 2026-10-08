@@ -35,6 +35,7 @@ human is the only driver.
 """
 from __future__ import annotations
 
+import math
 import random
 import threading
 from collections.abc import Callable, Mapping, Sequence
@@ -103,8 +104,11 @@ __all__ = [
 #: gained ``twin`` and ``/api/continue`` became ``continue_round``.  v5:
 #: ``/api/config`` gained ``plugin`` / ``rated_rungs`` / ``unrated`` and the
 #: snapshot gained ``series``.  v6: the rated/unrated paths were deleted and
-#: placement uses the one merged manifest pool.
-PROTO_VERSION = 6
+#: placement uses the one merged manifest pool.  v7: the free-play search
+#: wrapper is single-model and its ``options`` may declare float knobs
+#: (``outcome_blend`` / beta).  v8: free play gained the opt-in live
+#: ``estimate`` readout (snapshot field + start flag).
+PROTO_VERSION = 8
 
 
 class WebError(Exception):
@@ -160,8 +164,9 @@ class WebConfig:
     policy_factory: Callable[[str, Rules, int, Mapping[str, Any]], Policy] | None = None
     #: Metadata for the injected search wrapper (``None`` = raw pool).  The page
     #: renders ``label`` / ``note`` / ``presets`` and validates against
-    #: ``options`` (``key -> {min, max, default}``); the server treats only
-    #: ``options`` structurally, the rest is opaque JSON.
+    #: ``options`` (``key -> {min, max, default, type?}``; ``type="float"``
+    #: admits fractional values such as the outcome blend); the server treats
+    #: only ``options`` structurally, the rest is opaque JSON.
     search: Mapping[str, Any] | None = None
     #: Metadata for the deal-twin mode (``None`` = twin unavailable).  The
     #: run-local launcher pins both arms; the server reads only the arm ids,
@@ -194,6 +199,7 @@ class TableSession:
         opponents: Sequence[Opponent],
         anchors: Mapping[str, float],
         prior: TracePrior | None,
+        search_configs: Mapping[str, Mapping[str, Any]] | None = None,
         rules: Rules = DEFAULT_RULES,
         rng: random.Random | None = None,
         run_id: str | None = None,
@@ -203,6 +209,11 @@ class TableSession:
         self.web_config = web_config
         self.rules = rules
         self.opponents = tuple(opponents)
+        #: Measured search identities per opponent id (free-play defaults).
+        self.search_configs = {
+            str(id_): dict(config)
+            for id_, config in (search_configs or {}).items()
+        }
         self.anchors = {str(key): float(value) for key, value in anchors.items()}
         self.prior = prior
         self.rng = rng or random.Random(web_config.seed)
@@ -223,11 +234,19 @@ class TableSession:
             # the stock ``random``/``ckpt:`` grammar: anything else (a
             # manifest ``rolloutt:`` search rung) is skipped with a warning by
             # ``load_opponents`` instead of crashing mid-session.
+            manifest = load_manifest(web_config.manifest)
             opponents, anchors = load_opponents(
-                load_manifest(web_config.manifest),
+                manifest,
                 rules=DEFAULT_RULES,
                 can_build=web_config.can_build_spec or buildable_by_grammar,
             )
+        search_configs = {
+            str(entry["id"]): entry["search_config"]
+            for entry in manifest.get("subjects") or []
+            if isinstance(entry, Mapping)
+            and entry.get("id") is not None
+            and "search_config" in entry
+        }
         prior = None
         if web_config.prior is not None:
             prior = TracePrior.load(web_config.prior)
@@ -236,6 +255,7 @@ class TableSession:
             opponents=opponents,
             anchors=anchors,
             prior=prior,
+            search_configs=search_configs,
         )
         session.manifest_warnings = [str(warning.message) for warning in caught]
         return session
@@ -270,7 +290,12 @@ class TableSession:
         self.report: dict[str, Any] | None = None
         self.stopped_reason: str | None = None
         #: Effective free-play search parameters for the live game.
-        self.search: dict[str, int] = {}
+        self.search: dict[str, float] = {}
+        #: The built opponent policy of the live free game (the live estimate
+        #: readout asks it for the raw critic/outcome heads).
+        self.free_policy: Policy | None = None
+        #: Whether the live free game opted into the model estimate panel.
+        self.show_estimate = False
 
     # -- config ------------------------------------------------------------
 
@@ -284,6 +309,11 @@ class TableSession:
                     "sigma": opponent.sigma,
                     "anchor": bool(opponent.anchor),
                     "spec": opponent.spec,
+                    **(
+                        {"search_config": dict(self.search_configs[opponent.id])}
+                        if opponent.id in self.search_configs
+                        else {}
+                    ),
                 }
                 for opponent in self.opponents
             ]
@@ -343,14 +373,23 @@ class TableSession:
         except (TypeError, ValueError) as exc:
             raise WebError(f"seed 需要是整数：{raw!r}") from exc
 
-    def normalize_search(self, raw: Any) -> dict[str, int]:
+    def normalize_search(
+        self,
+        raw: Any,
+        *,
+        pinned: Mapping[str, Any] | None = None,
+    ) -> dict[str, float]:
         """Validate a free-play ``search`` request against the launcher options.
 
-        ``WebConfig.search["options"]`` declares ``key -> {min, max, default}``;
-        every declared key is returned with the request value or its default,
-        so the factory always sees one complete parameter document.  A request
-        with an unknown key or an out-of-range / non-integer value is refused
-        before any game state changes.
+        ``WebConfig.search["options"]`` declares ``key -> {min, max, default}``
+        (plus ``type: "float"`` for fractional knobs); every declared key is
+        returned with the request value or a default, so the factory always
+        sees one complete parameter document.  ``pinned`` (the selected
+        subject's published ``search_config``) supplies the default for a
+        measured search rung, so omitting a knob plays the rung's measured
+        identity while an explicit request value still overrides it.  A
+        request with an unknown key or an out-of-range / wrongly-typed value
+        is refused before any game state changes.
         """
         meta = self.web_config.search
         if meta is None:
@@ -367,9 +406,26 @@ class TableSession:
         unknown = set(raw) - set(options)
         if unknown:
             raise WebError(f"未知搜索参数：{sorted(unknown)}")
-        effective: dict[str, int] = {}
+        pinned = pinned or {}
+        effective: dict[str, float] = {}
         for key, spec in options.items():
-            value = raw.get(key, spec.get("default"))
+            value = raw.get(key, pinned.get(key, spec.get("default")))
+            if isinstance(value, bool):
+                raise WebError(f"搜索参数 {key} 需要是数字：{value!r}")
+            if str(spec.get("type") or "int") == "float":
+                try:
+                    number = float(value)
+                except (TypeError, ValueError) as exc:
+                    raise WebError(
+                        f"搜索参数 {key} 需要是数字：{value!r}"
+                    ) from exc
+                low, high = float(spec["min"]), float(spec["max"])
+                if not math.isfinite(number) or not low <= number <= high:
+                    raise WebError(
+                        f"搜索参数 {key} 越界：{number:g}（允许 {low:g}..{high:g}）"
+                    )
+                effective[key] = number
+                continue
             try:
                 number = int(value)
             except (TypeError, ValueError) as exc:
@@ -447,7 +503,12 @@ class TableSession:
         if not 0 <= seat < self.rules.num_players:
             raise WebError(f"seat 越界：{seat}")
         seed = self._seed_from(request)
-        search = self.normalize_search(request.get("search"))
+        search = self.normalize_search(
+            request.get("search"), pinned=self.search_configs.get(opponent.id)
+        )
+        show_estimate = request.get("estimate", False)
+        if not isinstance(show_estimate, bool):
+            raise WebError(f"estimate 需要是布尔值：{show_estimate!r}")
         policy = self.free_play_policy(
             opponent.spec or "random", policy_seed(seed, seat), search
         )
@@ -459,6 +520,8 @@ class TableSession:
         self.opponent = opponent
         self.seed = seed
         self.search = search
+        self.free_policy = policy
+        self.show_estimate = show_estimate
         self.names = seat_names(seat, self.rules.num_players, opponent.id)
         self.game_index = 1
         self.games_total = 1
@@ -770,8 +833,8 @@ class TableSession:
         record = self.record
         record["final_scores"] = list(match.state.scores)
         if self.search:
-            # Free-play annotation: which (t, K) this game faced.  Batch traces
-            # never carry it; replays ignore unknown top-level keys.
+            # Free-play annotation: which (t, K, beta) this game faced.  Batch
+            # traces never carry it; replays ignore unknown top-level keys.
             record["opponent_search"] = dict(self.search)
         trace = build_trace(
             self.rules,
@@ -813,6 +876,34 @@ class TableSession:
         self.view = match.game.view(match.state, self.human_seat)
 
     # -- snapshot ------------------------------------------------------------
+
+    def free_play_estimate(self) -> dict[str, Any] | None:
+        """The opponent model's live one-pass readout for the human's seat.
+
+        ``None`` unless the free-play request opted in and the built policy
+        carries a value/outcome readout (a neural ``ckpt:`` opponent; the
+        search wrapper delegates to its base policy).  The critic margin is
+        converted from ``Game.returns`` units to final points; ``win_prob``
+        maps the discounted outcome head with ``(1 + outcome) / 2`` and is
+        ``None`` when the checkpoint carries no outcome head.  The readout is
+        a raw head pass -- search, rollouts and beta do not enter it.
+        """
+        if not self.show_estimate or self.mode != "free" or self.view is None:
+            return None
+        reader = getattr(self.free_policy, "value_and_outcome", None)
+        if reader is None:
+            return None
+        try:
+            value, outcome = reader(self.view)
+        except Exception:  # noqa: BLE001 - a readout never breaks the table
+            return None
+        margin = float(value) * float(self.rules.total_points)
+        win_prob = (
+            None
+            if outcome is None
+            else min(max((1.0 + float(outcome)) / 2.0, 0.0), 1.0)
+        )
+        return {"margin": margin, "win_prob": win_prob}
 
     def placement_progress(self) -> dict[str, Any] | None:
         """Interim placement numbers for the in-game sidebar."""
@@ -902,6 +993,7 @@ class TableSession:
                     if self.mode == "free" and self.web_config.search is not None
                     else None
                 ),
+                "model_estimate": self.free_play_estimate(),
                 "game_index": self.game_index,
                 "games_total": self.games_total,
                 "turn": self.turn,

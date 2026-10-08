@@ -8,7 +8,14 @@ torch = pytest.importorskip("torch")
 
 from seven523.history import EVENT_DIM  # noqa: E402
 from seven523.networks import Agent  # noqa: E402
-from seven523.ppo import PPOConfig, RolloutBatch, compute_gae, ppo_update  # noqa: E402
+from seven523.ppo import (  # noqa: E402
+    PPOConfig,
+    RolloutBatch,
+    compute_gae,
+    decoupled_value_loss,
+    gaussian_nll,
+    ppo_update,
+)
 
 OBS_DIM = 8
 NVEC = [4, 2]
@@ -194,6 +201,29 @@ def test_rollout_batch_flatten_shapes_with_events():
     )
     assert empty.seqs is None and empty.events is None
     assert empty.event_seats is None and empty.event_mask is None
+    assert empty.outcome_targets is None and empty.outcome_mask is None
+
+
+def test_rollout_batch_flatten_carries_outcome_fields():
+    steps, envs = 3, 2
+    targets = torch.randn(steps, envs)
+    mask = torch.zeros(steps, envs, dtype=torch.bool)
+    mask[0, 1] = True
+    batch = RolloutBatch.flatten(
+        obs=torch.zeros(steps, envs, OBS_DIM),
+        actions=torch.zeros(steps, envs, len(NVEC)),
+        logprobs=torch.zeros(steps, envs),
+        advantages=torch.zeros(steps, envs),
+        returns=torch.zeros(steps, envs),
+        values=torch.zeros(steps, envs),
+        action_masks=torch.ones(steps, envs, sum(NVEC)),
+        outcome_targets=targets,
+        outcome_mask=mask,
+    )
+    assert batch.outcome_targets.shape == (steps * envs,)
+    assert torch.equal(batch.outcome_targets, targets.reshape(-1))
+    assert batch.outcome_mask.shape == (steps * envs,)
+    assert torch.equal(batch.outcome_mask, mask.reshape(-1))
 
 
 def test_ppo_update_trains_the_event_encoder():
@@ -217,3 +247,147 @@ def test_ppo_update_trains_the_event_encoder():
     losses = ppo_update(agent, optimizer, batch, _config())
     assert all(np.isfinite(value) for value in losses.values())
     assert not torch.equal(before, agent.event_encoder.mlp[0].weight.detach())
+
+
+def test_gaussian_nll_matches_the_closed_form():
+    mean = torch.tensor([0.0, 1.0])
+    logvar = torch.tensor([0.0, 2.0])
+    target = torch.tensor([1.0, 3.0])
+    expected = 0.5 * (logvar + (target - mean) ** 2 * torch.exp(-logvar))
+    assert torch.allclose(gaussian_nll(mean, logvar, target), expected)
+    # The clamp keeps extreme logvar values finite.
+    assert torch.isfinite(gaussian_nll(mean, torch.tensor([50.0, -50.0]), target)).all()
+
+
+def test_ppo_update_trains_the_variance_head():
+    torch.manual_seed(0)
+    agent = Agent(OBS_DIM, NVEC, hidden=16, vf_nll=True)
+    optimizer = torch.optim.Adam(agent.parameters(), lr=1e-3)
+    batch = RolloutBatch.flatten(
+        obs=torch.rand(4, 2, OBS_DIM),
+        actions=torch.zeros(4, 2, len(NVEC), dtype=torch.long),
+        logprobs=torch.zeros(4, 2),
+        advantages=torch.randn(4, 2),
+        returns=torch.randn(4, 2),
+        values=torch.randn(4, 2),
+        action_masks=torch.ones(4, 2, sum(NVEC)),
+    )
+    before = agent.critic.weight.detach().clone()
+    losses = ppo_update(agent, optimizer, batch, _config(vf_nll=True))
+    assert all(np.isfinite(value) for value in losses.values())
+    after = agent.critic.weight.detach()
+    # Both the mean row and the zero-initialised logvar row receive gradient.
+    assert not torch.equal(before[0], after[0])
+    assert not torch.equal(before[1], after[1])
+
+
+def test_decoupled_value_loss_keeps_the_base_mean_gradient():
+    mean = torch.tensor([0.5, -0.5], requires_grad=True)
+    logvar = torch.tensor([0.0, 1.0], requires_grad=True)
+    target = torch.tensor([1.0, 0.0])
+    old = torch.zeros(2)
+    mean_loss, var_loss = decoupled_value_loss(
+        mean, logvar, target, clip_vloss=False, old_value=old, clip_coef=0.1
+    )
+    assert torch.allclose(
+        mean_loss.detach(), 0.5 * ((mean.detach() - target) ** 2).mean()
+    )
+    expected_var = 0.5 * (
+        logvar.detach() + (target - mean.detach()) ** 2 * torch.exp(-logvar.detach())
+    ).mean()
+    assert torch.allclose(var_loss.detach(), expected_var)
+    (mean_loss + var_loss).backward()
+    # The mean path sees exactly the MSE gradient: the variance objective is
+    # detached from it (no inverse-variance reweighting).
+    assert torch.allclose(mean.grad, (mean.detach() - target) / 2)
+    assert logvar.grad is not None and logvar.grad.abs().sum() > 0
+
+
+def test_ppo_update_trains_the_decoupled_variance_head():
+    torch.manual_seed(0)
+    agent = Agent(OBS_DIM, NVEC, hidden=16, vf_nll=True)
+    optimizer = torch.optim.Adam(agent.parameters(), lr=1e-3)
+    batch = RolloutBatch.flatten(
+        obs=torch.rand(4, 2, OBS_DIM),
+        actions=torch.zeros(4, 2, len(NVEC), dtype=torch.long),
+        logprobs=torch.zeros(4, 2),
+        advantages=torch.randn(4, 2),
+        returns=torch.randn(4, 2),
+        values=torch.randn(4, 2),
+        action_masks=torch.ones(4, 2, sum(NVEC)),
+    )
+    losses = ppo_update(
+        agent, optimizer, batch, _config(vf_nll=True, vf_decoupled=True)
+    )
+    assert all(np.isfinite(value) for value in losses.values())
+
+
+def test_outcome_gae_splits_linearly_into_base_and_jump_streams():
+    torch.manual_seed(0)
+    steps = 5
+    base_rewards = torch.randn(steps, 1)
+    jumps = torch.zeros(steps, 1)
+    jumps[-1] = 0.75
+    values_base = torch.randn(steps, 1)
+    values_jump = torch.randn(steps, 1)
+    dones = torch.zeros(steps, 1)
+    next_base = torch.randn(1, 1)
+    next_jump = torch.randn(1, 1)
+    next_done = torch.zeros(1)
+    kwargs = {"gamma": 0.9, "gae_lambda": 0.8}
+    adv_base, ret_base = compute_gae(
+        base_rewards, values_base, dones, next_base, next_done, **kwargs
+    )
+    adv_jump, _ = compute_gae(
+        jumps, values_jump, dones, next_jump, next_done, **kwargs
+    )
+    adv_total, _ = compute_gae(
+        base_rewards + jumps,
+        values_base + values_jump,
+        dones,
+        next_base + next_jump,
+        next_done,
+        **kwargs,
+    )
+    # The decomposed advantages are exactly the total-reward advantages, and
+    # the critic target (returns) is the jump-free stream.
+    assert torch.allclose(adv_base + adv_jump, adv_total)
+    assert torch.allclose(ret_base, adv_base + values_base)
+
+
+def _outcome_batch(mask):
+    targets = torch.cat([torch.full((6,), 0.5), torch.full((2,), -0.25)])
+    return RolloutBatch.flatten(
+        obs=torch.rand(4, 2, OBS_DIM),
+        actions=torch.zeros(4, 2, len(NVEC), dtype=torch.long),
+        logprobs=torch.zeros(4, 2),
+        advantages=torch.randn(4, 2),
+        returns=torch.randn(4, 2),
+        values=torch.randn(4, 2),
+        action_masks=torch.ones(4, 2, sum(NVEC)),
+        outcome_targets=targets,
+        outcome_mask=mask,
+    )
+
+
+def test_ppo_update_trains_the_outcome_head_and_reports_accuracy():
+    torch.manual_seed(0)
+    agent = Agent(OBS_DIM, NVEC, hidden=16, vf_outcome=True)
+    optimizer = torch.optim.Adam(agent.parameters(), lr=1e-3)
+    mask = torch.tensor([True] * 6 + [False] * 2)
+    batch = _outcome_batch(mask)
+    before = agent.outcome_head.weight.detach().clone()
+    losses = ppo_update(agent, optimizer, batch, _config(vf_outcome=True))
+    assert {"outcome_loss", "outcome_accuracy"} <= set(losses)
+    assert all(np.isfinite(value) for value in losses.values())
+    assert not torch.equal(before, agent.outcome_head.weight.detach())
+
+
+def test_ppo_update_masks_unavailable_outcome_labels():
+    torch.manual_seed(0)
+    agent = Agent(OBS_DIM, NVEC, hidden=16, vf_outcome=True)
+    optimizer = torch.optim.Adam(agent.parameters(), lr=1e-3)
+    batch = _outcome_batch(torch.zeros(8, dtype=torch.bool))
+    losses = ppo_update(agent, optimizer, batch, _config(vf_outcome=True))
+    assert losses["outcome_loss"] == 0.0
+    assert np.isnan(losses["outcome_accuracy"])

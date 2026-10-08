@@ -61,6 +61,10 @@ class LeagueConfig:
     mix_random_prob: float = 0.5
     pool_episode: bool = False
     self_play_sample: bool = False
+    #: Pool mode only: every policy member (``ckpt:`` and ``self``) samples
+    #: actions instead of acting greedily.  Default true is the operator
+    #: decision of ADR-0017; ``self``/``mix`` keep ``self_play_sample``.
+    pool_sample: bool = True
 
 
 @dataclass(slots=True)
@@ -157,7 +161,11 @@ def build_league(
             copy.deepcopy(agent),
             rules,
             device=device,
-            sample=config.self_play_sample,
+            sample=(
+                config.pool_sample
+                if config.opponent == "pool"
+                else config.self_play_sample
+            ),
             seed=seed,
         )
         assert history_layout(frozen.agent) == history_layout(agent), (
@@ -186,7 +194,11 @@ def build_league(
                     member: Policy = frozen
                 else:
                     member = policy_from_spec(
-                        spec, rules, seed=seed + index, device=str(device)
+                        spec,
+                        rules,
+                        seed=seed + index,
+                        device=str(device),
+                        sample=config.pool_sample,
                     )
                 members.append((weight, member, member_ids[index]))
             opponents = _mixture_opponents(

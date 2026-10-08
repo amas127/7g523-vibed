@@ -7,6 +7,7 @@ only place that does.  It needs the optional ``train`` dependency group:
 """
 from __future__ import annotations
 
+import math
 import random
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -62,9 +63,106 @@ _ACTIVATIONS: dict[str, type[nn.Module]] = {
     "silu": nn.SiLU,
 }
 
-#: ``shared`` = one trunk feeding both heads (ADR-0003 source); ``towers`` =
-#: independent actor/critic trunks (the reference ``ppo.py`` layout).
-_ARCHITECTURES = ("shared", "towers")
+#: Trunk topologies.  ``shared`` = one trunk feeding both heads (ADR-0003
+#: source); ``towers`` = independent actor/critic trunks (the reference
+#: ``ppo.py`` layout); ``ln`` = shared + LayerNorm before each hidden
+#: activation; ``deep`` = shared with a third hidden layer; ``deep_ln`` =
+#: both (the O2 depth/normalization factorial, docs/depth-normalization-plan.md);
+#: ``deep_res``/``deep_lnres`` = ``deep``/``deep_ln`` plus residual skips on
+#: blocks 2-3 (O2 Amendment A1, same parameter counts as their plain twins).
+#: ``head<a><c>`` = the shared trunk plus a-head/critic-head depth grid
+#: (docs/head-depth-plan.md): a = actor-head Linear layers, c = critic-head
+#: Linear layers, both in {1,2,3}; ``shared`` is the (1,1) cell.  The ``ln``
+#: suffix (``head<a><c>ln``) inserts LayerNorm inside every residual head
+#: block (head design v2, plan section 10).  ``lnres<a><c>``/``gnres<a><c>``/
+#: ``bnres<a><c>`` move the residual into a 3-block body normalized with
+#: LayerNorm / GroupNorm / BatchNorm and give the actor/critic non-residual
+#: (plain) ``<a>``/``<c>`` layer heads (docs/gnres-plan.md); ``gnres11`` is
+#: the new GroupNorm body with the historical single-layer heads.
+#: ``res<d><a><c>`` = no-norm residual body with ``d`` blocks plus the same
+#: plain heads (docs/experiments/res4-plan.md); ``res4`` = 4 blocks.
+#: ``bres<d><a><c>`` = the same body and heads but every residual block is a
+#: bottleneck ``hidden -> mid -> hidden`` (``mid`` = ``--res-expansion``
+#: times ``hidden``, default 3): ``bres421`` at hidden 32 is the
+#: ``(32, 96, 32)`` block, ``bres221`` is the same block at depth 2.
+_ARCHITECTURES = (
+    "shared",
+    "towers",
+    "ln",
+    "deep",
+    "deep_ln",
+    "deep_res",
+    "deep_lnres",
+    "head21",
+    "head31",
+    "head12",
+    "head22",
+    "head32",
+    "head13",
+    "head23",
+    "head33",
+    "head21ln",
+    "head31ln",
+    "head12ln",
+    "head22ln",
+    "head32ln",
+    "head13ln",
+    "head23ln",
+    "head33ln",
+    "lnres21",
+    "lnres31",
+    "lnres12",
+    "lnres22",
+    "lnres32",
+    "lnres13",
+    "lnres23",
+    "lnres33",
+    "gnres11",
+    "gnres21",
+    "gnres31",
+    "gnres12",
+    "gnres22",
+    "gnres32",
+    "gnres13",
+    "gnres23",
+    "gnres33",
+    "bnres11",
+    "bnres21",
+    "bnres31",
+    "bnres12",
+    "bnres22",
+    "bnres32",
+    "bnres13",
+    "bnres23",
+    "bnres33",
+    "res411",
+    "res421",
+    "res431",
+    "res412",
+    "res422",
+    "res432",
+    "res413",
+    "res423",
+    "res433",
+    "bres411",
+    "bres421",
+    "bres431",
+    "bres412",
+    "bres422",
+    "bres432",
+    "bres413",
+    "bres423",
+    "bres433",
+    "bres211",
+    "bres221",
+    "bres231",
+    "bres212",
+    "bres222",
+    "bres232",
+    "bres213",
+    "bres223",
+    "bres233",
+)
 
 
 class CategoricalMasked(Categorical):
@@ -208,6 +306,174 @@ class EventSequenceEncoder(nn.Module):
         return out.gather(1, index).squeeze(1)
 
 
+#: Normalization options of :class:`ResidualTrunk` (`bnres` adds ``batch``).
+_TRUNK_NORMS = ("none", "layer", "group", "batch")
+
+
+class ResidualTrunk(nn.Module):
+    """O2 Amendment A1: ``blocks``-block trunk with residual skips.
+
+    Identical module sequence and parameter count to ``deep`` (``norm='none'``)
+    or ``deep_ln`` (``norm='layer'``) when ``blocks=3``; the only change is
+    that every block after the first adds its output to the running hidden
+    state (``h = h + block(h)``) instead of replacing it, so the comparison
+    isolates the skip connection.  ``res<d><a><c>`` uses ``blocks=d`` with no
+    normalization (docs/experiments/res4-plan.md).  ``mid`` turns every
+    residual block into a bottleneck ``hidden -> mid -> hidden`` (the block
+    input and output stay ``hidden``, so the skip is still exact); ``None``
+    keeps the historical single hidden projection.
+
+    ``norm`` picks the per-block normalization (``none``/``layer``/
+    ``group``/``batch``; ``group`` needs ``gn_groups``); the block topology
+    (norm between Linear and activation, on every block) is unchanged, so the
+    normalization type is a single-factor comparison.  ``batch`` registers a
+    :class:`nn.BatchNorm1d` whose running statistics are part of the
+    checkpoint and must be used in eval mode (``NeuralPolicy`` does).
+    """
+
+    def __init__(
+        self,
+        in_dim: int,
+        hidden: int,
+        activation: str,
+        *,
+        norm: str = "none",
+        gn_groups: int | None = None,
+        blocks: int = 3,
+        mid: int | None = None,
+    ) -> None:
+        super().__init__()
+        if norm not in _TRUNK_NORMS:
+            raise ValueError(
+                f"unknown trunk norm {norm!r}; choose from {_TRUNK_NORMS}"
+            )
+        if gn_groups is not None and norm != "group":
+            raise ValueError("gn_groups is only valid with norm='group'")
+        if norm == "group" and gn_groups is None:
+            raise ValueError("norm='group' requires gn_groups")
+        if int(blocks) < 1:
+            raise ValueError(f"blocks must be >= 1, got {blocks!r}")
+        if mid is not None and int(mid) < 1:
+            raise ValueError(f"mid must be >= 1 when set, got {mid!r}")
+        make_activation = _ACTIVATIONS[activation]
+        self.blocks = nn.ModuleList()
+        for index in range(int(blocks)):
+            # The bottleneck (``mid`` set) widens every residual block to
+            # ``hidden -> mid -> hidden``; the input projection (block 0) and
+            # the skip widths are unchanged.
+            widths = (
+                [(in_dim if index == 0 else hidden, hidden)]
+                if mid is None or index == 0
+                else [(hidden, int(mid)), (int(mid), hidden)]
+            )
+            modules: list[nn.Module] = []
+            for fan_in, fan_out in widths:
+                modules.append(layer_init(nn.Linear(fan_in, fan_out)))
+                if norm == "layer":
+                    modules.append(nn.LayerNorm(fan_out))
+                elif norm == "group":
+                    modules.append(nn.GroupNorm(gn_groups, fan_out))
+                elif norm == "batch":
+                    modules.append(nn.BatchNorm1d(fan_out))
+                modules.append(make_activation())
+            self.blocks.append(nn.Sequential(*modules))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.blocks[0](x)
+        for block in self.blocks[1:]:
+            h = h + block(h)
+        return h
+
+
+def _head_layers(arch: str) -> tuple[int, int]:
+    """(actor, critic) head Linear layers for the grid archs."""
+    if arch.startswith("head"):
+        return int(arch[4]), int(arch[5])
+    if arch.startswith(("lnres", "gnres", "bnres", "bres")):
+        return int(arch[5]), int(arch[6])
+    if arch.startswith("res"):  # res<depth><actor><critic>, e.g. res421
+        return int(arch[4]), int(arch[5])
+    return 1, 1
+
+
+def _head_ln(arch: str) -> bool:
+    """Whether a grid arch uses LayerNorm inside its residual head blocks."""
+    return arch.startswith("head") and arch.endswith("ln")
+
+
+class PlainHead(nn.Module):
+    """Non-residual multi-layer actor/critic head (docs/gnres-plan.md).
+
+    The ``lnres``/``gnres`` families put the skip connections and the
+    normalization in the shared body; the heads stay plain: ``layers - 1``
+    blocks of ``x = act(Linear(x))`` followed by the output projection, no
+    skip and no norm.  ``layers == 1`` is built as the historical plain
+    ``Linear`` by :class:`Agent` (same as :class:`ResidualHead`), so the
+    family's parameter counts match ``head<a><c>`` plus the body difference.
+    """
+
+    def __init__(
+        self,
+        hidden: int,
+        out_dim: int,
+        out_std: float,
+        activation: str,
+        layers: int,
+    ) -> None:
+        super().__init__()
+        make_activation = _ACTIVATIONS[activation]
+        blocks: list[nn.Module] = []
+        for _ in range(layers - 1):
+            blocks.append(layer_init(nn.Linear(hidden, hidden)))
+            blocks.append(make_activation())
+        self.body = nn.Sequential(*blocks)
+        self.out = layer_init(nn.Linear(hidden, out_dim), std=out_std)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.out(self.body(x))
+
+
+class ResidualHead(nn.Module):
+    """Residual multi-layer actor/critic head (docs/head-depth-plan.md).
+
+    ``layers`` Linear layers: ``layers - 1`` residual hidden blocks
+    (``h = h + act(Linear(h))``, or ``h = h + act(Linear(LayerNorm(h)))``
+    when ``ln`` is set) followed by the output projection.  The ``ln`` variant
+    applies the norm to the **block input** (pre-norm) so the residual stream
+    variance stays stable with depth.  Residual is the default head design; a
+    one-layer head is the historical plain ``Linear`` (built directly by
+    :class:`Agent`, no skip is possible).
+    """
+
+    def __init__(
+        self,
+        hidden: int,
+        out_dim: int,
+        out_std: float,
+        activation: str,
+        layers: int,
+        *,
+        ln: bool = False,
+    ) -> None:
+        super().__init__()
+        make_activation = _ACTIVATIONS[activation]
+        blocks: list[nn.Module] = []
+        for _ in range(layers - 1):
+            modules: list[nn.Module] = []
+            if ln:
+                modules.append(nn.LayerNorm(hidden))
+            modules.append(layer_init(nn.Linear(hidden, hidden)))
+            modules.append(make_activation())
+            blocks.append(nn.Sequential(*modules))
+        self.blocks = nn.ModuleList(blocks)
+        self.out = layer_init(nn.Linear(hidden, out_dim), std=out_std)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for block in self.blocks:
+            x = x + block(x)
+        return self.out(x)
+
+
 class Agent(nn.Module):
     """MLP actor-critic with one masked categorical head per action dimension.
 
@@ -228,6 +494,9 @@ class Agent(nn.Module):
         hidden: int = 128,
         activation: str = "relu",
         arch: str = "shared",
+        actor_out_std: float = 0.01,
+        gn_groups: int = 8,
+        res_expansion: float = 3.0,
         seq_len: int = 0,
         seq_emb: int = 16,
         seq_hidden: int = 32,
@@ -246,6 +515,9 @@ class Agent(nn.Module):
         event_noisy: bool = False,
         event_went_out: str = "keep",
         num_players: int = 2,
+        vf_nll: bool = False,
+        vf_sample: bool = False,
+        vf_outcome: bool = False,
     ) -> None:
         super().__init__()
         if activation not in _ACTIVATIONS:
@@ -253,9 +525,31 @@ class Agent(nn.Module):
                 f"unknown activation {activation!r}; "
                 f"choose from {sorted(_ACTIVATIONS)}"
             )
+        if not math.isfinite(actor_out_std) or actor_out_std <= 0.0:
+            raise ValueError(
+                f"actor_out_std must be finite and > 0, got {actor_out_std!r}"
+            )
         if arch not in _ARCHITECTURES:
             raise ValueError(
                 f"unknown arch {arch!r}; choose from {sorted(_ARCHITECTURES)}"
+            )
+        if int(gn_groups) < 1:
+            raise ValueError(f"gn_groups must be >= 1, got {gn_groups!r}")
+        if not math.isfinite(float(res_expansion)) or float(res_expansion) <= 0.0:
+            raise ValueError(
+                f"res_expansion must be finite and > 0, got {res_expansion!r}"
+            )
+        if arch.startswith("bres"):
+            mid_width = hidden * float(res_expansion)
+            if round(mid_width) < 1 or abs(mid_width - round(mid_width)) > 1e-9:
+                raise ValueError(
+                    "hidden * res_expansion must be a positive integer, got "
+                    f"{hidden} * {res_expansion} = {mid_width}"
+                )
+        if arch.startswith("gnres") and hidden % int(gn_groups) != 0:
+            raise ValueError(
+                f"gn_groups={gn_groups} must divide hidden={hidden} for arch "
+                f"{arch!r}"
             )
         self.obs_dim = int(obs_dim)
         self.nvec = torch.as_tensor(list(nvec), dtype=torch.long)
@@ -264,6 +558,34 @@ class Agent(nn.Module):
         #: Trunk topology: the shared checkpoint keys (``network.*``,
         #: ``actor.*``, ``critic.*``) stay unchanged by design.
         self.arch = arch
+        #: Number of groups of the ``gnres`` body's GroupNorm (unused by every
+        #: other arch, but stored so a warm start cannot silently switch it).
+        self.gn_groups = int(gn_groups)
+        #: Bottleneck multiplier of the ``bres`` body's residual blocks (unused
+        #: by every other arch, but stored so a warm start cannot silently
+        #: switch it).  ``mid = hidden * res_expansion``; values < 1 are a
+        #: compression bottleneck (e.g. 0.25 at hidden 64 = (64, 16, 64)).
+        self.res_expansion = float(res_expansion)
+        #: Amendment A2: heteroscedastic critic -> (mean, logvar) head trained
+        #: with the Gaussian NLL (see docs/depth-normalization-plan.md §11).
+        self.vf_nll = bool(vf_nll)
+        #: Amendment A3: draw the rollout value from N(mean, var) instead of
+        #: using the mean (Thompson-style value sampling).
+        if vf_sample and not vf_nll:
+            raise ValueError(
+                "vf_sample requires vf_nll: there is no variance head to sample from"
+            )
+        self.vf_sample = bool(vf_sample)
+        #: Outcome-decomposed value head (docs/experiments/vf-outcome.md): a
+        #: second scalar head predicts the discounted win/loss term and the
+        #: critic is trained on the jump-free return.  Kept separate from
+        #: ``vf_nll`` until the two value layouts are composed deliberately.
+        if vf_outcome and vf_nll:
+            raise ValueError(
+                "vf_outcome and vf_nll are mutually exclusive: the outcome "
+                "head decomposition is only defined for the mean-only critic"
+            )
+        self.vf_outcome = bool(vf_outcome)
         self.seq_len = int(seq_len)
         self.seq_emb = int(seq_emb)
         self.seq_hidden = int(seq_hidden)
@@ -344,15 +666,113 @@ class Agent(nn.Module):
                 layer_init(nn.Linear(hidden, hidden)),
                 make_activation(),
             )
-        else:
-            self.network = nn.Sequential(
-                layer_init(nn.Linear(trunk_input, hidden)),
-                make_activation(),
-                layer_init(nn.Linear(hidden, hidden)),
-                make_activation(),
+        elif arch in {"deep_res", "deep_lnres"}:
+            # O2 Amendment A1: deep/deep_ln plus residual skips on blocks 2-3.
+            self.network = ResidualTrunk(
+                trunk_input,
+                hidden,
+                activation,
+                norm="layer" if arch == "deep_lnres" else "none",
             )
-        self.actor = layer_init(nn.Linear(hidden, int(self.nvec.sum())), std=0.01)
-        self.critic = layer_init(nn.Linear(hidden, 1), std=1.0)
+        elif arch.startswith(("lnres", "gnres", "bnres")):
+            # docs/gnres-plan.md: the deep_res/deep_lnres body topology with
+            # the normalization switched to LayerNorm/GroupNorm/BatchNorm and
+            # the heads moved to plain multi-layer MLPs (PlainHead below).
+            family = arch[:5]
+            norm = {"lnres": "layer", "gnres": "group", "bnres": "batch"}[
+                family
+            ]
+            self.network = ResidualTrunk(
+                trunk_input,
+                hidden,
+                activation,
+                norm=norm,
+                gn_groups=self.gn_groups if norm == "group" else None,
+            )
+        elif arch.startswith("bres"):
+            # docs/experiments/bres-2m.md: the res4 body with every residual
+            # block turned into a ``hidden -> mid -> hidden`` bottleneck; the
+            # block count is arch[4] (bres<depth><actor><critic>).
+            self.network = ResidualTrunk(
+                trunk_input,
+                hidden,
+                activation,
+                norm="none",
+                blocks=int(arch[4]),
+                mid=round(hidden * self.res_expansion),
+            )
+        elif arch.startswith("res"):
+            # docs/experiments/res4-plan.md: no-norm residual body with the
+            # block count encoded in the arch (res<depth><actor><critic>),
+            # plus plain (non-residual) heads.  ``res4...`` = depth 4.
+            self.network = ResidualTrunk(
+                trunk_input,
+                hidden,
+                activation,
+                norm="none",
+                blocks=int(arch[3]),
+            )
+        else:
+            # O2 factorial (docs/depth-normalization-plan.md): ``deep`` adds a
+            # third hidden Linear; ``ln``/``deep_ln`` insert LayerNorm between
+            # each hidden Linear and its activation, including the last one
+            # (i.e. on the heads' input side).  ``shared`` builds exactly the
+            # historical module sequence and consumes the same ``layer_init``
+            # draws, so the default path stays bit-identical.
+            layers: list[nn.Module] = []
+            width = trunk_input
+            for _ in range(3 if arch in {"deep", "deep_ln"} else 2):
+                layers.append(layer_init(nn.Linear(width, hidden)))
+                if arch in {"ln", "deep_ln"}:
+                    layers.append(nn.LayerNorm(hidden))
+                layers.append(make_activation())
+                width = hidden
+            self.network = nn.Sequential(*layers)
+        # Head-depth grid (docs/head-depth-plan.md): ``head<a><c>`` gives the
+        # actor/critic heads ``a``/``c`` Linear layers, and the ``ln`` suffix
+        # adds pre-norm LayerNorm inside every residual head block.  Every
+        # multi-layer ``head`` head is residual: ``layers - 1`` blocks of
+        # ``h = h + act(Linear(h))`` followed by the output projection.  The
+        # ``lnres``/``gnres`` families (docs/gnres-plan.md) move the residual
+        # into a normalized body and build ``a``/``c``-layer *plain* heads
+        # instead.  A one-layer head stays the historical plain Linear in
+        # every family, so ``shared`` and every pre-grid arch keep the same
+        # module types and init draws.  ``actor_out_std`` scales the actor
+        # output init (default 0.01 keeps history; deep actor heads need a
+        # larger gain to avoid starving their hidden layers).
+        actor_layers, critic_layers = _head_layers(arch)
+        head_ln = _head_ln(arch)
+        plain_heads = arch.startswith(
+            ("lnres", "gnres", "bnres", "res", "bres")
+        )
+
+        def make_head(out_dim: int, out_std: float, layers: int) -> nn.Module:
+            if layers == 1:
+                return layer_init(nn.Linear(hidden, out_dim), std=out_std)
+            if plain_heads:
+                return PlainHead(hidden, out_dim, out_std, activation, layers)
+            return ResidualHead(
+                hidden, out_dim, out_std, activation, layers, ln=head_ln
+            )
+
+        self.actor = make_head(int(self.nvec.sum()), actor_out_std, actor_layers)
+        if self.vf_nll:
+            # (mean, logvar); logvar starts at 0 so the initial variance is 1.
+            self.critic = make_head(2, 1.0, critic_layers)
+            final = (
+                self.critic.out
+                if isinstance(self.critic, (ResidualHead, PlainHead))
+                else self.critic
+            )
+            nn.init.zeros_(final.weight[1])
+            nn.init.zeros_(final.bias[1])
+        else:
+            self.critic = make_head(1, 1.0, critic_layers)
+        if self.vf_outcome:
+            # Scalar regression of the discounted win/loss outcome
+            # (E[gamma**(T-t) * seat_outcome]); small init keeps the initial
+            # prediction near 0 so the tanh does not saturate.
+            self.outcome_head = layer_init(nn.Linear(hidden, 1), std=0.01)
 
     def _trunk_input(
         self,
@@ -433,9 +853,65 @@ class Agent(nn.Module):
         event_seats: torch.Tensor | None = None,
         event_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.critic(
+        out = self.critic(
             self._critic_hidden(x, seqs, events, event_seats, event_mask)
         )
+        return out[:, :1] if self.vf_nll else out
+
+    def get_value_dist(
+        self,
+        x: torch.Tensor,
+        seqs: torch.Tensor | None = None,
+        events: torch.Tensor | None = None,
+        event_seats: torch.Tensor | None = None,
+        event_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return ``(mean, logvar)`` from the heteroscedastic critic."""
+        if not self.vf_nll:
+            raise ValueError(
+                "agent was built without vf_nll; the critic has no variance head"
+            )
+        out = self.critic(
+            self._critic_hidden(x, seqs, events, event_seats, event_mask)
+        )
+        return out[:, 0], out[:, 1]
+
+    def get_outcome(
+        self,
+        x: torch.Tensor,
+        seqs: torch.Tensor | None = None,
+        events: torch.Tensor | None = None,
+        event_seats: torch.Tensor | None = None,
+        event_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """``tanh`` outcome prediction ``E[gamma**(T-t) * seat_outcome]``.
+
+        The discount is part of the target (the jump is received at the
+        terminal step), so the head estimates the jump's contribution to the
+        value at the current state; its sign is the predicted win/loss.
+        """
+        if not self.vf_outcome:
+            raise ValueError(
+                "agent was built without vf_outcome; the critic has no outcome head"
+            )
+        hidden = self._critic_hidden(x, seqs, events, event_seats, event_mask)
+        return torch.tanh(self.outcome_head(hidden))
+
+    def get_value_and_outcome(
+        self,
+        x: torch.Tensor,
+        seqs: torch.Tensor | None = None,
+        events: torch.Tensor | None = None,
+        event_seats: torch.Tensor | None = None,
+        event_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """One trunk pass returning ``(value, outcome)`` for the trainer."""
+        if not self.vf_outcome:
+            raise ValueError(
+                "agent was built without vf_outcome; the critic has no outcome head"
+            )
+        hidden = self._critic_hidden(x, seqs, events, event_seats, event_mask)
+        return self.critic(hidden), torch.tanh(self.outcome_head(hidden))
 
     def get_action_and_value(
         self,
@@ -476,15 +952,25 @@ class Agent(nn.Module):
         entropy = torch.stack(
             [categorical.entropy() for categorical in multi_categoricals]
         ).sum(0)
-        # The shared architecture reuses the trunk it already computed for
-        # the policy; towers computes its independent critic trunk here.
+        # The shared trunk (also the new O2 layouts) reuses the hidden state
+        # it already computed for the policy; towers computes its independent
+        # critic trunk here.
         value = (
             self.critic(hidden)
-            if self.arch == "shared"
+            if self.arch != "towers"
             else self.critic(
                 self._critic_hidden(x, seqs, events, event_seats, event_mask)
             )
         )
+        if self.vf_nll:
+            mean = value[:, 0]
+            if self.vf_sample:
+                logvar = value[:, 1].clamp(-10.0, 10.0)
+                value = (
+                    mean + torch.randn_like(mean) * torch.exp(0.5 * logvar)
+                ).unsqueeze(-1)
+            else:
+                value = value[:, :1]
         return action.T, logprob, entropy, value
 
 
@@ -542,6 +1028,11 @@ def save_agent(path: str | Path, agent: Agent, extra: dict[str, Any] | None = No
         "event_noisy": getattr(agent, "event_noisy", False),
         "event_went_out": getattr(agent, "event_went_out", "keep"),
         "num_players": getattr(agent, "num_players", 2),
+        "vf_nll": getattr(agent, "vf_nll", False),
+        "vf_sample": getattr(agent, "vf_sample", False),
+        "vf_outcome": getattr(agent, "vf_outcome", False),
+        "gn_groups": getattr(agent, "gn_groups", 8),
+        "res_expansion": getattr(agent, "res_expansion", 3),
         "history_layout": history_layout(agent),
     }
     if extra:
@@ -593,6 +1084,11 @@ def load_agent(
         event_noisy=payload.get("event_noisy", False),
         event_went_out=payload.get("event_went_out", "keep"),
         num_players=payload.get("num_players", 2),
+        vf_nll=payload.get("vf_nll", False),
+        vf_sample=payload.get("vf_sample", False),
+        vf_outcome=payload.get("vf_outcome", False),
+        gn_groups=payload.get("gn_groups", 8),
+        res_expansion=payload.get("res_expansion", 3),
     )
     agent.load_state_dict(payload["model"])
     return agent.to(device), payload.get("extra", {})
@@ -615,7 +1111,7 @@ class WarmStart:
 
 
 class WarmStartLayoutError(ValueError):
-    """A checkpoint whose observation or second-input layout does not match."""
+    """A checkpoint whose arch, observation, or second-input layout mismatches."""
 
     def __init__(
         self,
@@ -624,12 +1120,28 @@ class WarmStartLayoutError(ValueError):
         *,
         loaded_layout: str | None = None,
         agent_layout: str | None = None,
+        loaded_arch: str | None = None,
+        agent_arch: str | None = None,
+        reason: str | None = None,
     ) -> None:
         self.loaded_obs_dim = loaded_obs_dim
         self.agent_obs_dim = agent_obs_dim
         self.loaded_layout = loaded_layout
         self.agent_layout = agent_layout
-        if loaded_layout is not None and loaded_layout != agent_layout:
+        self.loaded_arch = loaded_arch
+        self.agent_arch = agent_arch
+        self.reason = reason
+        if reason is not None:
+            super().__init__(reason)
+        elif loaded_arch is not None and loaded_arch != agent_arch:
+            super().__init__(
+                f"cannot warm-start a checkpoint with arch {loaded_arch!r} into "
+                f"an agent with arch {agent_arch!r}: cross-architecture warm-start "
+                f"is only bridged between 'shared' and 'towers'; the new trunk "
+                f"layouts need their own from-scratch run (the layouts are not "
+                f"partially compatible)"
+            )
+        elif loaded_layout is not None and loaded_layout != agent_layout:
             super().__init__(
                 f"cannot warm-start a checkpoint with history layout "
                 f"{loaded_layout!r} into an agent with layout {agent_layout!r}: "
@@ -642,6 +1154,28 @@ class WarmStartLayoutError(ValueError):
                 f"{agent_obs_dim}-wide agent: observation layouts must match "
                 f"(v5 is the only supported layout)"
             )
+
+
+def _gn_groups_mismatch(agent: Agent, loaded: Agent) -> bool:
+    """Whether two ``gnres`` agents disagree on the GroupNorm group count."""
+    agent_arch = getattr(agent, "arch", "shared")
+    loaded_arch = getattr(loaded, "arch", "shared")
+    if not (agent_arch.startswith("gnres") and loaded_arch.startswith("gnres")):
+        return False
+    return int(getattr(agent, "gn_groups", 8)) != int(
+        getattr(loaded, "gn_groups", 8)
+    )
+
+
+def _res_expansion_mismatch(agent: Agent, loaded: Agent) -> bool:
+    """Whether two ``bres`` agents disagree on the bottleneck multiplier."""
+    agent_arch = getattr(agent, "arch", "shared")
+    loaded_arch = getattr(loaded, "arch", "shared")
+    if not (agent_arch.startswith("bres") and loaded_arch.startswith("bres")):
+        return False
+    return float(getattr(agent, "res_expansion", 3)) != float(
+        getattr(loaded, "res_expansion", 3)
+    )
 
 
 def _mapped_source_key(agent: Agent, loaded: Agent, key: str) -> str:
@@ -677,8 +1211,17 @@ def warm_start_into(agent: Agent, loaded: Agent) -> list[str]:
     and the value head is re-adapted to the actor trunk, so value is *not*
     preserved in that direction.
 
+    A ``vf_outcome`` mismatch bridges as a partial copy: the shared
+    trunk/actor/critic keys transfer and the added (or dropped) outcome head
+    starts from its fresh init.  The two variants' critic targets differ (base
+    vs total return), so the copied critic is a warm start, not an exact one.
+
     Both checkpoints must use the one live v5 layout; a different ``obs_dim``
-    raises :class:`ValueError` rather than guessing a column mapping.
+    raises :class:`ValueError` rather than guessing a column mapping.  Across
+    architectures only the ``shared``/``towers`` pair may bridge; any other
+    arch mismatch raises :class:`WarmStartLayoutError` because the new trunk
+    layouts have no partial-copy semantics (silently half-copying them would
+    look like a successful warm start while leaving random weights behind).
     """
     if loaded.obs_dim != agent.obs_dim:
         raise WarmStartLayoutError(loaded.obs_dim, agent.obs_dim)
@@ -688,6 +1231,55 @@ def warm_start_into(agent: Agent, loaded: Agent) -> list[str]:
             agent.obs_dim,
             loaded_layout=history_layout(loaded),
             agent_layout=history_layout(agent),
+        )
+    loaded_arch = getattr(loaded, "arch", "shared")
+    agent_arch = getattr(agent, "arch", "shared")
+    if agent_arch != loaded_arch and not (
+        {agent_arch, loaded_arch} <= {"shared", "towers"}
+    ):
+        raise WarmStartLayoutError(
+            loaded.obs_dim,
+            agent.obs_dim,
+            loaded_arch=loaded_arch,
+            agent_arch=agent_arch,
+        )
+    if (
+        bool(getattr(agent, "vf_nll", False)),
+        bool(getattr(agent, "vf_sample", False)),
+    ) != (
+        bool(getattr(loaded, "vf_nll", False)),
+        bool(getattr(loaded, "vf_sample", False)),
+    ):
+        raise WarmStartLayoutError(
+            loaded.obs_dim,
+            agent.obs_dim,
+            reason=(
+                "cannot warm-start between different value-head layouts "
+                "(mean-only, variance-head, or sampled variance-head): "
+                "the critic layouts differ"
+            ),
+        )
+    if _gn_groups_mismatch(agent, loaded):
+        raise WarmStartLayoutError(
+            loaded.obs_dim,
+            agent.obs_dim,
+            reason=(
+                "cannot warm-start between different GroupNorm group counts "
+                f"({getattr(loaded, 'gn_groups', 8)} -> "
+                f"{getattr(agent, 'gn_groups', 8)}): the normalization "
+                "layouts differ"
+            ),
+        )
+    if _res_expansion_mismatch(agent, loaded):
+        raise WarmStartLayoutError(
+            loaded.obs_dim,
+            agent.obs_dim,
+            reason=(
+                "cannot warm-start between different bottleneck expansions "
+                f"({getattr(loaded, 'res_expansion', 3)} -> "
+                f"{getattr(agent, 'res_expansion', 3)}): the residual-block "
+                "widths differ"
+            ),
         )
     copied: list[str] = []
     source = loaded.state_dict()
@@ -729,7 +1321,14 @@ def warm_start_from(
             loaded_layout=history_layout(loaded),
             agent_layout=history_layout(agent),
         )
-    if loaded.nvec.tolist() == agent.nvec.tolist() and loaded.arch == agent.arch:
+    if (
+        loaded.nvec.tolist() == agent.nvec.tolist()
+        and loaded.arch == agent.arch
+        and bool(getattr(loaded, "vf_outcome", False))
+        == bool(getattr(agent, "vf_outcome", False))
+        and not _gn_groups_mismatch(agent, loaded)
+        and not _res_expansion_mismatch(agent, loaded)
+    ):
         agent.load_state_dict(loaded.state_dict())
         copied: list[str] = []
         exact = True
@@ -779,6 +1378,41 @@ class NeuralPolicy:
         )
         if not bool(mask[:, : nvec[0]].any()):
             raise ValueError("NeuralPolicy was asked to act with no legal action")
+        obs, seqs, events, event_seats, event_mask = self._observation_inputs(view)
+        logits = self.agent.policy_logits(
+            obs, seqs, events, event_seats, event_mask
+        )
+        choices: list[int] = []
+        for head_logits, head_mask in zip(
+            torch.split(logits, nvec, dim=1), torch.split(mask, nvec, dim=1)
+        ):
+            if self.sample:
+                choice = CategoricalMasked(
+                    logits=head_logits, masks=head_mask
+                ).sample()
+            else:
+                choice = torch.where(
+                    head_mask,
+                    head_logits,
+                    torch.tensor(-1e8, device=self.device),
+                ).argmax(dim=1)
+            choices.append(int(choice.item()))
+        return choices[0], (choices[1] if len(choices) > 1 else None)
+
+    def _observation_inputs(
+        self, view: View
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
+        """The single-row model inputs for ``view`` (obs + optional history).
+
+        Shared by :meth:`act` and :meth:`value_and_outcome` so the readout is
+        always evaluated on exactly the tensor layout the policy acts on.
+        """
         obs = torch.as_tensor(
             encode_observation(view, self.rules),
             dtype=torch.float32,
@@ -793,7 +1427,9 @@ class NeuralPolicy:
                 tokens = encode_history(
                     view, length, getattr(self.agent, "seq_order", "chrono")
                 )
-            seqs = torch.as_tensor(tokens, dtype=torch.int64, device=self.device).unsqueeze(0)
+            seqs = torch.as_tensor(
+                tokens, dtype=torch.int64, device=self.device
+            ).unsqueeze(0)
         events = event_seats = event_mask = None
         if getattr(self.agent, "event_len", 0) > 0:
             event_values, seat_values, mask_values = encode_events(
@@ -816,22 +1452,23 @@ class NeuralPolicy:
             event_mask = torch.as_tensor(
                 mask_values, dtype=torch.bool, device=self.device
             ).unsqueeze(0)
-        logits = self.agent.policy_logits(
-            obs, seqs, events, event_seats, event_mask
-        )
-        choices: list[int] = []
-        for head_logits, head_mask in zip(
-            torch.split(logits, nvec, dim=1), torch.split(mask, nvec, dim=1)
-        ):
-            if self.sample:
-                choice = CategoricalMasked(
-                    logits=head_logits, masks=head_mask
-                ).sample()
-            else:
-                choice = torch.where(
-                    head_mask,
-                    head_logits,
-                    torch.tensor(-1e8, device=self.device),
-                ).argmax(dim=1)
-            choices.append(int(choice.item()))
-        return choices[0], (choices[1] if len(choices) > 1 else None)
+        return obs, seqs, events, event_seats, event_mask
+
+    @torch.no_grad()
+    def value_and_outcome(self, view: View) -> tuple[float, float | None]:
+        """Raw head readout for ``view``'s seat: ``(critic, outcome | None)``.
+
+        ``critic`` is the value head's :meth:`Game.returns`-units margin
+        (``own/total - mean(others)/total``); ``outcome`` is the
+        ``vf_outcome`` head's discounted win/tie/loss estimate when the
+        checkpoint carries one, else ``None``.  This is the one-forward-pass
+        readout (no search, no rollouts) the web table shows live.
+        """
+        obs, seqs, events, event_seats, event_mask = self._observation_inputs(view)
+        if getattr(self.agent, "vf_outcome", False):
+            value, outcome = self.agent.get_value_and_outcome(
+                obs, seqs, events, event_seats, event_mask
+            )
+            return float(value.reshape(-1)[0]), float(outcome.reshape(-1)[0])
+        value = self.agent.get_value(obs, seqs, events, event_seats, event_mask)
+        return float(value.reshape(-1)[0]), None

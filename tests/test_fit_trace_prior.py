@@ -48,23 +48,28 @@ _spec.loader.exec_module(fit)
 STUDY = ROOT / "traces" / "study"
 PER_LEVEL = 10
 
-#: The 2026-09-29 published 11-level joint probit-MLE table
-#: (``runs/w2m/calibration/table_with_search.json``; ADR-0013 single fit,
+#: The 2026-10-08 published 13-level joint probit-MLE table (P5a: 18,000 raw
+#: + 16,000 bres221 7M/9M beta=1 search games; ADR-0013 single fit,
 #: ``--keep-rungs`` keeps the rungs at ``lvl1``/``lvl4``).  The raw levels are
-#: a fresh fit, not the 2026-09-27 table, and ``search_leafq`` is prior-off at
-#: placement time (μ≈260 lies beyond the raw trace-prior domain).
+#: a fresh fit, not the 2026-09-29 table; ``search_leafq`` keeps its published
+#: 2026-09-29 value (carried over, not re-measured in P5a), and the web-local
+#: ``head32ln5m``/``bres221_7M`` raw entries stay outside this measured
+#: contract.  Search rungs are prior-off at placement time (μ≳260 lies beyond
+#: the raw trace-prior domain).
 REFIT_MLE_LEVELS: dict[str, float] = {
     "random": 0.0,
-    "lvl1": 84.599599570713,
-    "lvl2": 109.7939982123375,
-    "lvl3": 126.24498663885113,
-    "lvl4": 181.18931615419723,
-    "ws_s2": 182.90832278575581,
-    "pself_s2": 183.24226866419082,
-    "w2m_low": 186.0021371467179,
-    "w2m_plain": 186.24946440941844,
-    "w2m_ctl": 187.45982657100728,
+    "lvl1": 87.37339532345482,
+    "lvl2": 109.37677605377907,
+    "lvl3": 125.81194449020524,
+    "lvl4": 175.5121569659044,
+    "ws_s2": 183.3932271777491,
+    "pself_s2": 182.81256800253172,
+    "w2m_low": 185.5821533622947,
+    "w2m_plain": 185.8243222782719,
+    "w2m_ctl": 187.0353134733631,
     "search_leafq": 260.0309697237381,
+    "bres221_7M_b1": 262.136097329836,
+    "bres221_9M_b1": 265.69792886764594,
 }
 
 # ``traces/`` is gitignored (data artifact); a fresh checkout without the ladder
@@ -214,11 +219,25 @@ def test_t2_labels_are_the_prior_calibration_table_and_the_manifest_adds_search(
         "ws_s2": 185.96380656765228,
     }
     manifest = json.loads((STUDY / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["levels"] == REFIT_MLE_LEVELS
+    # Web-local, unmeasured additions (head32ln5m …) are deliberately outside
+    # the published MLE contract; the measured table must still match it.
+    web_local = {
+        str(entry["id"])
+        for entry in manifest["subjects"]
+        if entry.get("web_local")
+    }
+    measured_levels = {
+        id_: mu
+        for id_, mu in manifest["levels"].items()
+        if id_ not in web_local
+    }
+    assert measured_levels == REFIT_MLE_LEVELS
     assert manifest["estimator"]["kind"] == "probit-mle"
     raw = {id_: manifest["levels"][id_] for id_ in prior.T2_LABELS}
     assert raw != prior.T2_LABELS  # a cross-fit refit, not the old table
-    assert max(abs(raw[id_] - prior.T2_LABELS[id_]) for id_ in raw) <= 10.0
+    # Both refits moved the raw ladder while staying in the same neighborhood;
+    # the 2026-10-08 joint fit moved lvl4 the most (-12.2).
+    assert max(abs(raw[id_] - prior.T2_LABELS[id_]) for id_ in raw) <= 15.0
     specs = {entry["id"]: entry["spec"] for entry in manifest["subjects"]}
     assert specs["lvl1"].startswith("ckpt:")
     assert specs["random"] == "random"

@@ -265,12 +265,17 @@ def policy_from_spec(
     rules: Rules = DEFAULT_RULES,
     seed: int | None = None,
     device: str = "cpu",
+    *,
+    sample: bool = False,
 ) -> Policy:
     """Build a policy from the shared ``random`` / ``ckpt:<path>`` grammar.
 
     The single spec parser for the tracing/rating tools (ADR-0006/0012).  Torch
     is imported lazily inside the ``ckpt:`` branch, so the default import stays
-    torch-free; agent weights are cached per ``(path, device)``.
+    torch-free; agent weights are cached per ``(path, device)``.  ``sample``
+    only affects ``ckpt:`` policies (``NeuralPolicy`` argmax by default); the
+    training league passes the pool's sampling default through it, while every
+    evaluation/rating caller keeps the deterministic argmax.
     """
     if spec == "random":
         return RandomBot(random.Random(seed))
@@ -285,7 +290,7 @@ def policy_from_spec(
             agent, _ = load_agent(path, device=device)
             _AGENT_CACHE[key] = agent
         return NeuralPolicy(  # type: ignore[arg-type]
-            _AGENT_CACHE[key], rules, device=device, seed=seed
+            _AGENT_CACHE[key], rules, device=device, seed=seed, sample=sample
         )
     raise ValueError(
         f"unknown policy spec {spec!r} (want random / ckpt:<path>)"

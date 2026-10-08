@@ -162,6 +162,11 @@ for s in 1 2 3; do
 done
 ```
 
+> **配方修订（2026-10-07，[ADR-0015](../adr/0015-continuation-pool-random-mix.md)，operator 决策）**：
+> 上面 §5 命令是 2026-09-27 的历史复现，保留原样；**后续新的续训默认**在该 6 成员池上
+> 混入 10% RandomBot——成员权重由 `1@` 改为 `3@`，并追加 `--pool-member 2@random`
+> （`2/20 = 10%`，`--pool-episode True` 下按局抽）。理由与完整命令见 ADR-0015。
+
 评测模板（串行，CPU/4 workers；快照用 `--seeds 150,151,152`，final 用 `150..158`）：
 
 ```bash

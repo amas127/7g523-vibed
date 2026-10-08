@@ -14,7 +14,7 @@ const S = {
   screen: "home",
   setup: {
     opponent: "random", seat: 0, seed: "", games: 10, usePrior: true, search: null,
-    twinPairs: 30, twinSeed: "",
+    estimate: false, twinPairs: 30, twinSeed: "",
   },
   lastStart: null,
   pendingSuit: null, // { actionId }
@@ -72,16 +72,33 @@ function defaultSearch(search) {
   return out;
 }
 
+function applyPinnedSearch(opponentId) {
+  const search = S.cfg && S.cfg.search;
+  if (!search) return;
+  const opponent = (S.cfg.opponents || []).find((entry) => entry.id === opponentId);
+  const pinned = opponent && opponent.search_config;
+  if (!pinned) return;
+  const options = search.options || {};
+  const next = { ...(S.setup.search || defaultSearch(search)) };
+  ["trunc_ply", "rollout_k", "outcome_blend"].forEach((key) => {
+    if (pinned[key] != null && options[key]) next[key] = Number(pinned[key]);
+  });
+  S.setup.search = next;
+}
+
 function sameSearch(a, b) {
-  return Boolean(a && b) &&
-    Number(a.trunc_ply) === Number(b.trunc_ply) &&
-    Number(a.rollout_k) === Number(b.rollout_k);
+  if (!a || !b) return false;
+  const keys = Object.keys(a).filter((key) => typeof a[key] === "number");
+  if (!keys.length) return false;
+  return keys.every((key) => Number(a[key]) === Number(b[key]));
 }
 
 function searchLabel(search) {
   if (!search) return "";
   const t = Number(search.trunc_ply) === 0 ? "全量" : `t=${search.trunc_ply}`;
-  return `${t} · K=${search.rollout_k}`;
+  const beta = Number(search.outcome_blend) > 0 ? ` · β=${search.outcome_blend}` : "";
+  const endgame = Number(search.endgame) > 0 ? " · 终局精确" : "";
+  return `${t} · K=${search.rollout_k}${beta}${endgame}`;
 }
 
 function armLabel(twin, arm) {
@@ -334,6 +351,23 @@ function placementPanel(snap) {
   );
 }
 
+function estimatePanel(snap) {
+  const est = snap.model_estimate;
+  if (!est) return "";
+  const win =
+    est.win_prob == null
+      ? "—（该 ckpt 无 outcome 头）"
+      : `${Math.round(Number(est.win_prob) * 100)}%`;
+  return (
+    `<section class="panel progress-panel">` +
+    `<h2>对手模型预估</h2>` +
+    `<div class="metric"><span>预估终局分差</span><b>${fmtSigned(est.margin, 1)}</b></div>` +
+    `<div class="metric"><span>你胜率</span><b>${win}</b></div>` +
+    `<small>critic/outcome 头即时读出（不含搜索）；正分差 = 你领先。默认关闭，设置页可开。</small>` +
+    `</section>`
+  );
+}
+
 function twinPanel(snap) {
   const t = snap.twin;
   if (!t) return "";
@@ -540,7 +574,7 @@ function renderTable(snap) {
       ? `<div class="felt-log"><div class="felt-title">动作日志</div>${logLines(snap, 40)}</div>`
       : "") +
     `</div>` +
-    `<div class="va-side">${placementPanel(snap)}${twinPanel(snap)}${renderCounter(snap)}</div>` +
+    `<div class="va-side">${placementPanel(snap)}${twinPanel(snap)}${estimatePanel(snap)}${renderCounter(snap)}</div>` +
     `</div>` +
     `<div class="va-bottom">` +
     `<div class="turn-hint ${snap.phase === "human" ? "yours" : ""}">` +
@@ -565,10 +599,17 @@ function searchControls(search) {
   const options = search.options || {};
   const t = options.trunc_ply || {};
   const k = options.rollout_k || {};
+  const blend = options.outcome_blend || null;
+  const endgame = options.endgame || null;
   const current = S.setup.search || defaultSearch(search);
   const presets = (search.presets || [])
     .map((preset, index) =>
       `<button data-search-preset="${index}" class="${sameSearch(preset, current) ? "on" : ""}">${esc(preset.label)}</button>`
+    )
+    .join("");
+  const blendPresets = (search.blend_presets || [])
+    .map((preset) =>
+      `<button data-search-blend="${esc(preset.outcome_blend)}" class="${blend && Number(current.outcome_blend) === Number(preset.outcome_blend) ? "on" : ""}">${esc(preset.label)}</button>`
     )
     .join("");
   return (
@@ -576,9 +617,17 @@ function searchControls(search) {
     `<div class="search-row">` +
     `<input type="number" id="search-t" min="${t.min}" max="${t.max}" value="${esc(current.trunc_ply)}" title="截断 t（0 = 全量）">` +
     `<input type="number" id="search-k" min="${k.min}" max="${k.max}" value="${esc(current.rollout_k)}" title="K 个隐藏世界">` +
+    (blend
+      ? `<input type="number" id="search-beta" min="${blend.min}" max="${blend.max}" step="${blend.step || 0.25}" value="${esc(current.outcome_blend)}" title="β：outcome 头拌进截断叶值（0 = 只用 critic）">`
+      : "") +
+    (endgame
+      ? `<label style="display:inline-flex;align-items:center;gap:4px;font-size:12px" title="${esc(endgame.note || "")}"><input type="checkbox" id="search-endgame" ${Number(current.endgame) ? "checked" : ""}> 终局精确解</label>`
+      : "") +
     `</div>` +
     (presets ? `<div class="seg">${presets}</div>` : "") +
-    `<small>左 = t（${esc(t.note || "")}），右 = K（${esc(k.note || "")}）。</small></div>`
+    (blend && blendPresets ? `<div class="seg">${blendPresets}</div>` : "") +
+    `<small>左 = t（${esc(t.note || "")}），中 = K（${esc(k.note || "")}）` +
+    (blend ? `，右 = β（${esc(blend.note || "")}）` : "") + `。</small></div>`
   );
 }
 
@@ -597,7 +646,7 @@ function renderHome() {
       : "") +
     (search
       ? `<div class="hint-note">搜索已启用：${esc(search.label)}。` +
-        `自由对战中的 ckpt 对手由搜索包装，设置页可<b>逐局选择 t / K</b>；` +
+        `自由对战中的 ckpt 对手由搜索包装，设置页可<b>逐局选择 t / K / β</b>；` +
         `定级使用 manifest 的<b>单一对手池</b>（raw 档 + 搜索 rung 同表调度，` +
         `搜索 rung 的固定配置来自 manifest 的 <code>search_config</code>）。</div>`
       : "") +
@@ -648,11 +697,19 @@ function renderFreeSetup() {
           : search
             ? "搜索包装"
             : "checkpoint 梯级";
+      const pinned = opponent.search_config || {};
+      const pinBits = [];
+      if (pinned.trunc_ply != null) {
+        pinBits.push(Number(pinned.trunc_ply) === 0 ? "t全" : `t${pinned.trunc_ply}`);
+      }
+      if (pinned.rollout_k != null) pinBits.push(`K${pinned.rollout_k}`);
+      if (Number(pinned.outcome_blend) > 0) pinBits.push(`β${pinned.outcome_blend}`);
+      const pin = pinBits.length ? ` · ${pinBits.join("·")}` : "";
       return (
         `<button class="opp-card ${s.opponent === opponent.id ? "selected" : ""}" data-opp="${esc(opponent.id)}" ${unavailable ? "disabled" : ""}>` +
         `<div class="id">${esc(opponent.id)}</div>` +
         `<div class="mu">μ ${round2(opponent.mu)}${opponent.anchor ? " · 锚" : ""}</div>` +
-        `<div class="tag">${tag}</div>` +
+        `<div class="tag">${tag}${pin}</div>` +
         `</button>`
       );
     })
@@ -663,7 +720,7 @@ function renderFreeSetup() {
     `<div class="sub">选一个对手、指定座位，直接开打。每局都记录真实 trace（可用 7g523-play --replay 校验）。</div>` +
     (search
       ? `<div class="hint-note">搜索已启用：${esc(search.label)}。` +
-        `ckpt 对手由 O4-lite 搜索包装（random 锚不包装）· ${esc(search.note || "")}</div>`
+        `ckpt 对手由 O4-lite 搜索包装（random 锚不包装） · ${esc(search.note || "")}</div>`
       : "") +
     (search ? searchControls(search) : "") +
     (search
@@ -683,6 +740,12 @@ function renderFreeSetup() {
     `</div><small>座位只影响谁先手（先手由亮牌定），与强弱无关。</small></div>` +
     `<div class="field"><label>随机种子（可留空）</label>` +
     `<input type="text" id="seed-input" value="${esc(s.seed)}" placeholder="例如 42"></div>` +
+    `<div class="field"><label>对手模型预估（逐局）</label>` +
+    `<div class="seg">` +
+    `<button data-estimate="0" class="${s.estimate ? "" : "on"}">关闭</button>` +
+    `<button data-estimate="1" class="${s.estimate ? "on" : ""}">开启</button>` +
+    `</div><small>实时显示对手模型对终局分差/你胜率的即时读出（critic/outcome 头，不含搜索）；` +
+    `random 锚与无 torch 的进程没有模型，开了也不显示。</small></div>` +
     `<div class="actions">` +
     `<button class="btn primary" data-nav="start_free" ${S.busy ? "disabled" : ""}>开始对局</button>` +
     `<button class="btn ghost" data-nav="home">返回</button>` +
@@ -1109,10 +1172,15 @@ async function startFree() {
   S.busy = true;
   render();
   try {
-    const payload = { mode: "free", opponent_id: s.opponent, seat: s.seat, seed };
+    const payload = {
+      mode: "free", opponent_id: s.opponent, seat: s.seat, seed, estimate: Boolean(s.estimate),
+    };
     if (S.cfg && S.cfg.search && s.search) payload.search = s.search;
     apply(await api("/api/start", payload));
-    S.lastStart = { mode: "free", opponent_id: s.opponent, seat: s.seat, seed, search: s.search };
+    S.lastStart = {
+      mode: "free", opponent_id: s.opponent, seat: s.seat, seed, estimate: s.estimate,
+      search: s.search,
+    };
   } catch (error) {
     toast(error.message);
   }
@@ -1202,6 +1270,7 @@ function bindEvents() {
     const oppEl = event.target.closest("[data-opp]");
     if (oppEl) {
       S.setup.opponent = oppEl.dataset.opp;
+      applyPinnedSearch(S.setup.opponent);
       render();
       return;
     }
@@ -1211,10 +1280,26 @@ function bindEvents() {
       render();
       return;
     }
+    const estimateEl = event.target.closest("[data-estimate]");
+    if (estimateEl) {
+      S.setup.estimate = estimateEl.dataset.estimate === "1";
+      render();
+      return;
+    }
     const presetEl = event.target.closest("[data-search-preset]");
     if (presetEl && S.cfg && S.cfg.search) {
       const preset = (S.cfg.search.presets || [])[Number(presetEl.dataset.searchPreset)] || {};
-      S.setup.search = { trunc_ply: preset.trunc_ply, rollout_k: preset.rollout_k };
+      const current = S.setup.search || {};
+      const next = { trunc_ply: preset.trunc_ply, rollout_k: preset.rollout_k };
+      if (preset.outcome_blend != null) next.outcome_blend = preset.outcome_blend;
+      else if (current.outcome_blend != null) next.outcome_blend = current.outcome_blend;
+      S.setup.search = next;
+      render();
+      return;
+    }
+    const blendEl = event.target.closest("[data-search-blend]");
+    if (blendEl && S.cfg && S.cfg.search) {
+      S.setup.search = { ...(S.setup.search || {}), outcome_blend: Number(blendEl.dataset.searchBlend) };
       render();
       return;
     }
@@ -1268,6 +1353,12 @@ function bindEvents() {
       }
       if (event.target.id === "search-k" && event.target.value !== "") {
         S.setup.search.rollout_k = Number(event.target.value);
+      }
+      if (event.target.id === "search-beta" && event.target.value !== "") {
+        S.setup.search.outcome_blend = Number(event.target.value);
+      }
+      if (event.target.id === "search-endgame") {
+        S.setup.search.endgame = event.target.checked ? 1 : 0;
       }
     }
   });

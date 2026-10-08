@@ -57,6 +57,7 @@ from .rules import Rules
 __all__ = [
     "MetricsLogger",
     "TensorboardLogger",
+    "annealed_lr",
     "lr_scale",
     "main",
     "make_env",
@@ -78,6 +79,30 @@ def lr_scale(schedule: str, update: int, num_updates: int) -> float:
     if schedule == "linear":
         return 1.0 - (update - 1.0) / num_updates
     raise ValueError(f"unknown lr schedule {schedule!r}")
+
+
+#: Default absolute LR floor under ``--anneal-lr`` (operator decision
+#: 2026-10-07): the annealed schedule never decays below 1e-5.  Pass
+#: ``--lr-floor 0`` (or call :func:`annealed_lr` with ``floor=0``) to restore
+#: the historical anneal-to-zero behaviour.
+_DEFAULT_LR_FLOOR = 1e-5
+
+
+def annealed_lr(
+    schedule: str,
+    update: int,
+    num_updates: int,
+    learning_rate: float,
+    floor: float = _DEFAULT_LR_FLOOR,
+) -> float:
+    """Optimizer LR at 1-based ``update``: the schedule clamped to ``floor``.
+
+    The floor never raises the rate above ``learning_rate`` (so ``floor``
+    larger than the peak is capped, and ``learning_rate=0`` stays exactly
+    zero for frozen-LR smoke tests).
+    """
+    scaled = lr_scale(schedule, update, num_updates) * learning_rate
+    return max(scaled, min(float(floor), float(learning_rate)))
 
 
 def _bool(value: str) -> bool:
@@ -120,6 +145,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="LR decay shape under --anneal-lr (default linear)",
     )
     parser.add_argument(
+        "--lr-floor",
+        type=float,
+        default=_DEFAULT_LR_FLOOR,
+        help=(
+            "absolute lower bound of the annealed learning rate (default "
+            "1e-5, operator decision 2026-10-07); pass 0 to restore the "
+            "historical anneal-to-zero behaviour"
+        ),
+    )
+    parser.add_argument(
         "--optimizer",
         choices=["adam", "adamw"],
         default="adam",
@@ -143,6 +178,65 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--clip-vloss", type=_bool, default=True, nargs="?", const=True
     )
+    parser.add_argument(
+        "--vf-nll",
+        type=_bool,
+        default=False,
+        nargs="?",
+        const=True,
+        help=(
+            "heteroscedastic critic (Amendment A2): the value head predicts "
+            "(mean, logvar) and is trained with the Gaussian NLL instead of "
+            "the clipped MSE; --clip-vloss does not apply"
+        ),
+    )
+    parser.add_argument(
+        "--vf-sample",
+        type=_bool,
+        default=False,
+        nargs="?",
+        const=True,
+        help=(
+            "Amendment A3: draw the rollout value from N(mean, var) instead "
+            "of using the mean (requires --vf-nll); evaluation/search keep "
+            "using the mean"
+        ),
+    )
+    parser.add_argument(
+        "--vf-decoupled",
+        type=_bool,
+        default=False,
+        nargs="?",
+        const=True,
+        help=(
+            "Amendment A4: keep the base clipped-MSE objective on the mean "
+            "and train the variance head with the mean detached (requires "
+            "--vf-nll)"
+        ),
+    )
+    parser.add_argument(
+        "--vf-outcome",
+        type=_bool,
+        default=False,
+        nargs="?",
+        const=True,
+        help=(
+            "outcome-decomposed value: the critic is trained on the jump-free "
+            "return and a separate head predicts the discounted win/loss term "
+            "E[gamma**(T-t)*seat_outcome]; requires a reward mode with a "
+            "discrete outcome jump (arcsin/terminal_win/trick_diff_win/win) "
+            "and is incompatible with --vf-nll"
+        ),
+    )
+    parser.add_argument(
+        "--outcome-coef",
+        type=float,
+        default=1.0,
+        help=(
+            "--vf-outcome only: weight of the outcome head's masked MSE "
+            "loss in the total PPO objective"
+        ),
+    )
     parser.add_argument("--ent-coef", type=float, default=0.01)
     parser.add_argument("--vf-coef", type=float, default=0.5)
     parser.add_argument("--max-grad-norm", type=float, default=0.5)
@@ -159,14 +253,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "trick_diff_win",
             "terminal_win",
             "saturate",
+            "arcsin",
         ],
-        default="terminal",
+        default="arcsin",
         help=(
-            "terminal: legacy sparse terminal return; trick_diff: per-step "
-            "potential difference (telescopes to the terminal return); win: "
-            "terminal sign(own - best other); trick_diff_win: both; "
-            "terminal_win: terminal return + win_jump * sign(own - best other); "
-            "saturate: terminal return, but wins are capped at --reward-cap tau"
+            "arcsin (default): terminal margin shaped by "
+            "(1-α)*margin + α*(2/pi)*arcsin(margin) (steep near 0/100 "
+            "points) + win_jump * sign(own - best other) at the 50-point "
+            "boundary; terminal: legacy sparse terminal return; trick_diff: "
+            "per-step potential difference (telescopes to the terminal "
+            "return); win: terminal sign(own - best other); trick_diff_win: "
+            "both; terminal_win: terminal return + win_jump * sign(own - best "
+            "other); saturate: terminal return, but wins are capped at "
+            "--reward-cap tau"
         ),
     )
     parser.add_argument(
@@ -174,9 +273,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=1.0,
         help=(
-            "terminal_win only: the win/loss boundary jump λ in "
+            "terminal_win/arcsin only: the win/loss boundary jump λ in "
             "r = terminal margin + λ * seat_outcome (finite, 0 <= λ <= 10); "
             "ignored by every other mode"
+        ),
+    )
+    parser.add_argument(
+        "--arcsin-mix",
+        type=float,
+        default=0.5,
+        help=(
+            "arcsin only: blend weight α in r = (1-α)*margin + "
+            "α*(2/pi)*arcsin(margin) (finite, 0 <= α <= 1; α=0 is "
+            "terminal_win, α=1 is the full arcsin curve); ignored by every "
+            "other mode"
         ),
     )
     parser.add_argument(
@@ -198,12 +308,133 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--arch",
-        choices=["shared", "towers"],
+        choices=[
+            "shared",
+            "towers",
+            "ln",
+            "deep",
+            "deep_ln",
+            "deep_res",
+            "deep_lnres",
+            "head21",
+            "head31",
+            "head12",
+            "head22",
+            "head32",
+            "head13",
+            "head23",
+            "head33",
+            "head21ln",
+            "head31ln",
+            "head12ln",
+            "head22ln",
+            "head32ln",
+            "head13ln",
+            "head23ln",
+            "head33ln",
+            "lnres21",
+            "lnres31",
+            "lnres12",
+            "lnres22",
+            "lnres32",
+            "lnres13",
+            "lnres23",
+            "lnres33",
+            "gnres11",
+            "gnres21",
+            "gnres31",
+            "gnres12",
+            "gnres22",
+            "gnres32",
+            "gnres13",
+            "gnres23",
+            "gnres33",
+            "bnres11",
+            "bnres21",
+            "bnres31",
+            "bnres12",
+            "bnres22",
+            "bnres32",
+            "bnres13",
+            "bnres23",
+            "bnres33",
+            "res411",
+            "res421",
+            "res431",
+            "res412",
+            "res422",
+            "res432",
+            "res413",
+            "res423",
+            "res433",
+            "bres411",
+            "bres421",
+            "bres431",
+            "bres412",
+            "bres422",
+            "bres432",
+            "bres413",
+            "bres423",
+            "bres433",
+            "bres211",
+            "bres221",
+            "bres231",
+            "bres212",
+            "bres222",
+            "bres232",
+            "bres213",
+            "bres223",
+            "bres233",
+        ],
         default="shared",
         help=(
             "trunk topology: shared = one trunk feeding both heads "
             "(default); towers = independent actor/critic MLPs "
-            "(reference ppo.py layout)"
+            "(reference ppo.py layout); ln = shared + LayerNorm before each "
+            "hidden activation; deep = shared + a third hidden layer; "
+            "deep_ln = both; deep_res/deep_lnres = deep/deep_ln + residual "
+            "skips (same parameter counts); head<a><c> = shared trunk + "
+            "a-layer actor head / c-layer critic head (a,c in {1,2,3}; "
+            "multi-layer heads are residual by default); head<a><c>ln = same "
+            "grid with pre-norm LayerNorm inside every residual head block; "
+            "lnres<a><c>/gnres<a><c>/bnres<a><c> = residual 3-block body "
+            "normalized with LayerNorm / GroupNorm (--gn-groups) / BatchNorm "
+            "and *non-residual* a-layer actor / c-layer critic plain heads; "
+            "res<d><a><c> = the same plain heads with a no-norm residual body "
+            "of d blocks (res4... = depth 4); bres<d><a><c> = the same body "
+            "with every residual block widened to a hidden -> mid -> hidden "
+            "bottleneck (mid = --res-expansion * --hidden-size)"
+        ),
+    )
+    parser.add_argument(
+        "--actor-out-std",
+        type=float,
+        default=0.01,
+        help=(
+            "orthogonal-init std of the actor output layer (default 0.01 = "
+            "historical); deep actor heads may need a larger gain (e.g. 0.1) "
+            "so their hidden layers are not starved by the small output scale"
+        ),
+    )
+    parser.add_argument(
+        "--gn-groups",
+        type=int,
+        default=8,
+        help=(
+            "gnres<a><c> only: number of groups of the body's GroupNorm "
+            "(default 8; must divide --hidden-size)"
+        ),
+    )
+    parser.add_argument(
+        "--res-expansion",
+        type=float,
+        default=3.0,
+        help=(
+            "bres<d><a><c> only: multiplier of the residual block's hidden "
+            "width (hidden -> mid -> hidden, mid = factor * --hidden-size); "
+            "default 3.  Values < 1 make a compression bottleneck: 0.25 at "
+            "--hidden-size 64 is the (64, 16, 64) block.  hidden * factor "
+            "must be a positive integer"
         ),
     )
     parser.add_argument(
@@ -427,7 +658,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=False,
         nargs="?",
         const=True,
-        help="sample self-play opponent actions instead of acting greedily",
+        help=(
+            "--opponent self/mix: sample the frozen self-play opponent's "
+            "actions instead of acting greedily"
+        ),
+    )
+    parser.add_argument(
+        "--pool-sample",
+        type=_bool,
+        default=True,
+        nargs="?",
+        const=True,
+        help=(
+            "--opponent pool: pool members (ckpt: and self) sample actions "
+            "instead of acting greedily (default true, operator decision "
+            "ADR-0017); pass false to restore the historical greedy pool"
+        ),
     )
     parser.add_argument(
         "--load-checkpoint", type=str, default=None, help="warm-start agent.pt"
@@ -446,6 +692,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "updates between snapshot checkpoints under <run_dir>/snapshots "
             "(0 = off)"
+        ),
+    )
+    parser.add_argument(
+        "--snapshot-steps",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "save a snapshot after the first update whose step count reaches "
+            "each multiple of N environment steps (0 = off; independent of "
+            "--snapshot-interval, which is measured in updates)"
         ),
     )
     parser.add_argument(
@@ -483,8 +740,9 @@ def make_env(
     opponents: list[Policy],
     seed: int,
     idx: int,
-    reward_shaping: str = "terminal",
+    reward_shaping: str = "arcsin",
     win_jump: float = 1.0,
+    arcsin_mix: float = 0.5,
     reward_cap: float | None = None,
     seq_len: int = 0,
     seq_order: str = "chrono",
@@ -506,6 +764,7 @@ def make_env(
             learner=learner,
             reward_shaping=reward_shaping,
             win_jump=win_jump,
+            arcsin_mix=arcsin_mix,
             reward_cap=reward_cap,
         )
         if seq_len > 0:
@@ -555,11 +814,47 @@ def _final_outcome(infos: dict, index: int) -> int | None:
     return int(outcomes[index])
 
 
+def _final_reward_jump(infos: dict, index: int) -> float | None:
+    """The env-published terminal win/loss addend for one finished sub-env."""
+    final_info = infos.get("final_info")
+    if not isinstance(final_info, dict):
+        return None
+    jumps = final_info.get("reward_jump")
+    if jumps is None:
+        return None
+    return float(jumps[index])
+
+
+def _episode_outcome_labels(
+    outcome: int,
+    step: int,
+    start: int,
+    gamma: float,
+    *,
+    device: torch.device | str = "cpu",
+) -> torch.Tensor:
+    """Discounted outcome target for rollout rows ``[start, step]``.
+
+    The terminal jump is received at ``step``, so a state ``t`` in the
+    episode carries ``gamma**(step - t) * outcome``; the same discount that
+    the GAE jump stream applies to the terminal reward.
+    """
+    steps = torch.arange(start, step + 1, device=device)
+    return float(outcome) * gamma ** (step - steps)
+
+
 #: Reward modes whose episode return always has the sign of the seat outcome,
 #: so the PFSP fallback may infer the outcome from the reward.  ``saturate``
 #: (and especially K0, where a win scores 0) is deliberately not here: reading
 #: the outcome off the reward sign would score wins as ties.
 _SIGN_LIKE_REWARDS = frozenset({"win"})
+
+#: Reward modes the ``--vf-outcome`` decomposition is defined for: their
+#: terminal reward is exactly ``base + scale * seat_outcome`` (the env
+#: publishes ``info["reward_jump"]`` for all of them).
+_OUTCOME_JUMP_REWARDS = frozenset(
+    {"arcsin", "terminal_win", "trick_diff_win", "win"}
+)
 
 
 def train(args: argparse.Namespace) -> Path:
@@ -567,6 +862,30 @@ def train(args: argparse.Namespace) -> Path:
     if args.pool_episode and args.opponent not in {"pool", "mix"}:
         raise SystemExit("--pool-episode needs --opponent pool or mix")
     validate_reward_cap(args.reward_shaping, args.reward_cap)
+    if not 0.0 <= args.arcsin_mix <= 1.0:
+        raise SystemExit("--arcsin-mix must be in [0, 1]")
+    if args.lr_floor < 0.0:
+        raise SystemExit("--lr-floor must be >= 0")
+    if not math.isfinite(args.outcome_coef) or args.outcome_coef < 0.0:
+        raise SystemExit("--outcome-coef must be finite and >= 0")
+    if args.gn_groups < 1:
+        raise SystemExit("--gn-groups must be >= 1")
+    if args.arch.startswith("gnres") and args.hidden_size % args.gn_groups != 0:
+        raise SystemExit(
+            f"--gn-groups {args.gn_groups} must divide --hidden-size "
+            f"{args.hidden_size} for --arch {args.arch}"
+        )
+    if args.vf_outcome and args.reward_shaping not in _OUTCOME_JUMP_REWARDS:
+        raise SystemExit(
+            "--vf-outcome needs a reward mode with a discrete outcome jump "
+            f"({', '.join(sorted(_OUTCOME_JUMP_REWARDS))}), not "
+            f"--reward-shaping {args.reward_shaping}"
+        )
+    if args.vf_outcome and args.vf_nll:
+        raise SystemExit(
+            "--vf-outcome is incompatible with --vf-nll: the decomposition "
+            "is defined for the mean-only critic"
+        )
     if args.pfsp and not (args.opponent == "pool" and args.pool_episode):
         raise SystemExit("--pfsp needs --opponent pool --pool-episode")
     if args.pfsp:
@@ -596,6 +915,8 @@ def train(args: argparse.Namespace) -> Path:
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    if args.vf_decoupled and not args.vf_nll:
+        raise SystemExit("--vf-decoupled requires --vf-nll true")
     rules = Rules(num_players=args.num_players)
     learner = 0
     obs_dim = observation_dim(rules.num_players)
@@ -607,6 +928,12 @@ def train(args: argparse.Namespace) -> Path:
         hidden=args.hidden_size,
         activation=args.activation,
         arch=args.arch,
+        actor_out_std=args.actor_out_std,
+        gn_groups=args.gn_groups,
+        res_expansion=args.res_expansion,
+        vf_nll=args.vf_nll,
+        vf_sample=args.vf_sample,
+        vf_outcome=args.vf_outcome,
         seq_len=args.seq_len,
         seq_emb=args.seq_emb,
         seq_hidden=args.seq_hidden,
@@ -630,11 +957,25 @@ def train(args: argparse.Namespace) -> Path:
         try:
             warm = warm_start_from(args.load_checkpoint, agent, device=str(device))
         except WarmStartLayoutError as error:
+            if error.reason is not None:
+                detail = error.reason
+                guidance = "train the value head from scratch or match vf_nll"
+            elif error.loaded_arch is not None:
+                detail = f"arch {error.loaded_arch!r} into {error.agent_arch!r}"
+                guidance = (
+                    "only the shared<->towers bridge is supported for "
+                    "cross-architecture warm starts"
+                )
+            else:
+                detail = f"layout {error.loaded_layout!r} into {error.agent_layout!r}"
+                guidance = (
+                    "the event arm needs a from-scratch run or a "
+                    "same-layout checkpoint"
+                )
             raise SystemExit(
                 f"--load-checkpoint {args.load_checkpoint}: cannot warm-start "
-                f"layout {error.loaded_layout!r} into {error.agent_layout!r} "
-                f"(obs_dim {error.loaded_obs_dim}->{error.agent_obs_dim}); the "
-                f"event arm needs a from-scratch run or a same-layout checkpoint"
+                f"{detail} (obs_dim {error.loaded_obs_dim}->{error.agent_obs_dim}); "
+                f"{guidance}"
             ) from error
         except RuntimeError as error:
             raise SystemExit(
@@ -666,6 +1007,7 @@ def train(args: argparse.Namespace) -> Path:
             mix_random_prob=args.mix_random_prob,
             pool_episode=args.pool_episode,
             self_play_sample=args.self_play_sample,
+            pool_sample=args.pool_sample,
         ),
         rules=rules,
         agent=agent,
@@ -704,6 +1046,7 @@ def train(args: argparse.Namespace) -> Path:
                 idx,
                 args.reward_shaping,
                 win_jump=args.win_jump,
+                arcsin_mix=args.arcsin_mix,
                 reward_cap=args.reward_cap,
                 seq_len=args.seq_len,
                 seq_order=args.seq_order,
@@ -774,6 +1117,26 @@ def train(args: argparse.Namespace) -> Path:
         if args.event_len > 0
         else None
     )
+    # --vf-outcome: the env publishes the terminal win/loss addend; the critic
+    # trains on the jump-free stream while the outcome head gets the discounted
+    # outcomes of the episodes that finish inside each rollout.  The buffers
+    # are fresh per rollout (inside the update loop) because every cell must be
+    # zero at step 0: a stale jump or label from the previous rollout would
+    # silently contaminate both streams.
+    jump_rewards: torch.Tensor | None = None
+    values_jump: torch.Tensor | None = None
+    outcome_targets: torch.Tensor | None = None
+    outcome_mask: torch.Tensor | None = None
+    segment_start: np.ndarray | None = None
+    jump_scale = 0.0
+    if args.vf_outcome:
+        scale = float(envs.envs[0].get_wrapper_attr("reward_jump_scale"))
+        if scale <= 0.0:
+            raise ValueError(
+                f"reward_shaping={args.reward_shaping!r} publishes no outcome "
+                f"jump for --vf-outcome"
+            )
+        jump_scale = scale
 
     num_updates = args.total_timesteps // args.batch_size
     if num_updates < 1:
@@ -784,6 +1147,11 @@ def train(args: argparse.Namespace) -> Path:
 
     global_step = 0
     episodes_done = 0
+    #: Step-based snapshot boundaries (see ``--snapshot-steps``).  An update
+    #: saves a snapshot at every boundary it reaches, so batch sizes that do
+    #: not divide N land on the first update at/after each multiple of N.
+    snapshot_steps = int(getattr(args, "snapshot_steps", 0) or 0)
+    next_snapshot_step = snapshot_steps
     start_time = time.time()
     next_obs, _ = envs.reset(seed=args.seed)
     next_obs = torch.as_tensor(next_obs, dtype=torch.float32, device=device)
@@ -804,11 +1172,30 @@ def train(args: argparse.Namespace) -> Path:
                 frozen.agent.load_state_dict(agent.state_dict())
 
             if args.anneal_lr:
-                optimizer.param_groups[0]["lr"] = (
-                    lr_scale(args.lr_schedule, update, num_updates)
-                    * args.learning_rate
+                optimizer.param_groups[0]["lr"] = annealed_lr(
+                    args.lr_schedule,
+                    update,
+                    num_updates,
+                    args.learning_rate,
+                    args.lr_floor,
                 )
 
+            if args.vf_outcome:
+                jump_rewards = torch.zeros(
+                    (args.num_steps, args.num_envs), device=device
+                )
+                values_jump = torch.zeros(
+                    (args.num_steps, args.num_envs), device=device
+                )
+                outcome_targets = torch.zeros(
+                    (args.num_steps, args.num_envs), device=device
+                )
+                outcome_mask = torch.zeros(
+                    (args.num_steps, args.num_envs),
+                    dtype=torch.bool,
+                    device=device,
+                )
+                segment_start = np.zeros(args.num_envs, dtype=np.int64)
             ep_returns: list[float] = []
             ep_lengths: list[int] = []
             for step in range(args.num_steps):
@@ -890,6 +1277,18 @@ def train(args: argparse.Namespace) -> Path:
                         event_seats=seat_tensors,
                         event_mask=mask_tensors,
                     )
+                    if args.vf_outcome:
+                        # The critic head is the jump-free value; the outcome
+                        # head supplies the jump baseline for the advantages.
+                        assert values_jump is not None
+                        value, outcome_pred = agent.get_value_and_outcome(
+                            next_obs,
+                            seqs=seq_tokens,
+                            events=event_tensors,
+                            event_seats=seat_tensors,
+                            event_mask=mask_tensors,
+                        )
+                        values_jump[step] = (jump_scale * outcome_pred).flatten()
                     values[step] = value.flatten()
                 actions[step] = action
                 logprobs[step] = logprob
@@ -917,6 +1316,40 @@ def train(args: argparse.Namespace) -> Path:
                         tensorboard.log_episode(
                             global_step, episode_return, episode_length
                         )
+                        if args.vf_outcome:
+                            # Backfill the episode's states still inside this
+                            # rollout with the discounted outcome label.  The
+                            # pre-rollout head of an unfinished episode is
+                            # already gone, which is why the label carries a
+                            # mask instead of being assumed zero.
+                            assert (
+                                jump_rewards is not None
+                                and outcome_targets is not None
+                                and outcome_mask is not None
+                                and segment_start is not None
+                            )
+                            jump = _final_reward_jump(infos, int(idx))
+                            outcome = _final_outcome(infos, int(idx))
+                            if jump is None or outcome is None:
+                                raise RuntimeError(
+                                    "finished episode without "
+                                    "info['reward_jump']/info['outcome'] under "
+                                    "--vf-outcome; the env must publish the "
+                                    "reward decomposition"
+                                )
+                            start = int(segment_start[idx])
+                            jump_rewards[step, idx] = jump
+                            outcome_targets[start : step + 1, idx] = (
+                                _episode_outcome_labels(
+                                    outcome,
+                                    step,
+                                    start,
+                                    args.gamma,
+                                    device=device,
+                                )
+                            )
+                            outcome_mask[start : step + 1, idx] = True
+                            segment_start[idx] = step + 1
                         if pfsp is not None:
                             # The env publishes the terminal win/tie/loss; the
                             # reward sign is only a fallback for exotic wrappers.
@@ -1024,23 +1457,60 @@ def train(args: argparse.Namespace) -> Path:
                     device=device,
                 )
             with torch.no_grad():
-                next_value = agent.get_value(
-                    next_obs,
-                    next_seqs,
-                    next_events,
-                    next_event_seats,
-                    next_event_mask,
-                ).reshape(1, -1)
-                advantages, returns = compute_gae(
-                    rewards,
-                    values,
-                    dones,
-                    next_value,
-                    next_done,
-                    gamma=args.gamma,
-                    gae_lambda=args.gae_lambda,
-                    use_gae=args.gae,
-                )
+                if args.vf_outcome:
+                    assert jump_rewards is not None and values_jump is not None
+                    # GAE is linear in (reward, value), so the total advantage
+                    # splits exactly into the jump-free stream plus the jump
+                    # stream baselined by the outcome head.  The critic target
+                    # (returns) stays jump-free.
+                    next_value, next_outcome = agent.get_value_and_outcome(
+                        next_obs,
+                        next_seqs,
+                        next_events,
+                        next_event_seats,
+                        next_event_mask,
+                    )
+                    next_value = next_value.reshape(1, -1)
+                    next_value_jump = (jump_scale * next_outcome).reshape(1, -1)
+                    adv_base, returns = compute_gae(
+                        rewards - jump_rewards,
+                        values,
+                        dones,
+                        next_value,
+                        next_done,
+                        gamma=args.gamma,
+                        gae_lambda=args.gae_lambda,
+                        use_gae=args.gae,
+                    )
+                    adv_jump, _ = compute_gae(
+                        jump_rewards,
+                        values_jump,
+                        dones,
+                        next_value_jump,
+                        next_done,
+                        gamma=args.gamma,
+                        gae_lambda=args.gae_lambda,
+                        use_gae=args.gae,
+                    )
+                    advantages = adv_base + adv_jump
+                else:
+                    next_value = agent.get_value(
+                        next_obs,
+                        next_seqs,
+                        next_events,
+                        next_event_seats,
+                        next_event_mask,
+                    ).reshape(1, -1)
+                    advantages, returns = compute_gae(
+                        rewards,
+                        values,
+                        dones,
+                        next_value,
+                        next_done,
+                        gamma=args.gamma,
+                        gae_lambda=args.gae_lambda,
+                        use_gae=args.gae,
+                    )
 
             batch = RolloutBatch.flatten(
                 obs,
@@ -1054,6 +1524,8 @@ def train(args: argparse.Namespace) -> Path:
                 events,
                 event_seats,
                 event_masks,
+                outcome_targets,
+                outcome_mask,
             )
             losses = ppo_update(agent, optimizer, batch, config)
 
@@ -1076,6 +1548,12 @@ def train(args: argparse.Namespace) -> Path:
                     episodes=args.eval_episodes,
                     seed=args.seed + update,
                 )
+                # ``NeuralPolicy`` puts the *live* learner into eval mode; the
+                # learner must keep collecting/updating in train mode (a
+                # ``bnres`` body would otherwise freeze its running statistics
+                # from the first periodic eval onward).  Frozen opponents are
+                # separate deep copies, so only the learner is restored.
+                agent.train()
                 metrics.update(
                     eval_return=evaluation["mean_return"],
                     eval_score=evaluation["learner_score"],
@@ -1111,6 +1589,17 @@ def train(args: argparse.Namespace) -> Path:
                     agent,
                     extra={"global_step": global_step, "args": vars(args)},
                 )
+
+            if snapshot_steps and global_step >= next_snapshot_step:
+                snapshot_dir = run_dir / "snapshots"
+                snapshot_dir.mkdir(parents=True, exist_ok=True)
+                save_agent(
+                    snapshot_dir / f"checkpoint_step{global_step:07d}.pt",
+                    agent,
+                    extra={"global_step": global_step, "args": vars(args)},
+                )
+                while global_step >= next_snapshot_step:
+                    next_snapshot_step += snapshot_steps
 
         save_agent(
             run_dir / "agent.pt",

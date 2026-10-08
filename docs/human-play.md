@@ -118,6 +118,13 @@ uv run --group train 7g523-elo --simulate random --games 10 --seed 0
   `search_leafq` 只有在注入搜索 factory 时才能构建，否则 CLI/web 会跳过并告警）与
   `artifacts/human-elo/prior.json`（2026-09-27 先验 **v2/R1**，sha256 `15fddff1…`）；
   10 副不同牌、5/5 座位轮换、前 2 局 Thompson 探索、之后 `info` 选档。
+- **2026-10-07/08 池追加（当前共 17 个 subject）**：web-local 未测量档 `head32ln5m` /
+  `search_head32ln5m` 与 raw `bres221_7M` / `bres221_9M`（μ≈212.8/213.7、σ=8、games=0）；
+  以及已测量的 β=1 搜索档 `bres221_7M_b1`（μ=**262.14** [256.94,267.58]）/
+  `bres221_9M_b1`（μ=**265.70** [260.37,271.10]），σ≈2.7、n=8000，语料 34k（18k
+  calibration + 16k p5a；`search_leafq` 按 option B carried-over，p4a 语料丢失）。
+  provenance：`artifacts/web-bres221-b1/`、`artifacts/web-head32ln5m/`；背景见
+  [`experiments/outcome-search-probe.md`](./experiments/outcome-search-probe.md) §6。
 - 若显式指定其他 manifest：已删除的 ckpt 档位会被自动跳过并告警；跨 `rules_id`
   的旧 manifest 会被门禁拒绝（ADR-0013）。
 - **先验已升级为 v2（R1）**：`prior.json` = 二次特征展开（152 列）+ cell 校准惩罚
@@ -171,7 +178,11 @@ SEVEN523_WEB_PLUGIN=off uv run 7g523-web       # 同 --no-plugin
 
 - **自由对战**：从 manifest 的池子里任选对手 + 座位，单局即打；每局写成真实
   trace 到 `traces/web/<run-id>/`，可用 `uv run 7g523-play --replay <trace>` 校验。
-  启用搜索插件后，`ckpt:` 对手按页面逐局选定的 t/K 包装（`random` 锚不包装）。
+  启用搜索插件后，`ckpt:` 对手按页面逐局选定的 t/K/β 包装（`random` 锚不包装）。
+  设置页可选（**默认关闭**）**对手模型预估**：打牌时右栏实时显示对手模型
+  critic/outcome 头对终局分差与你胜率的即时读出（单次前向，不含搜索与 β；
+  没有 outcome 头的 ckpt 只显示分差，`random` 锚没有模型不显示）；空底后若已有精确解
+  则直接显示精确分差（不额外触发求解）。
 - **定级模式**（见 §6.3）：
   * 单一 manifest 池（锚点 + raw 档 + 能构建的搜索 rung，同一联合拟合尺度）；
     前 2 局 Thompson 探索、之后 Fisher 信息选档，产物与 `7g523-elo` 完全一致：
@@ -200,12 +211,21 @@ uv run --group train python runs/o4lite-search/web_search.py --full          # �
 uv run --group train python runs/o4lite-search/web_search.py --no-fast       # 不装 Route-A 加速层
 ```
 
-- **自由对战**：所有 `ckpt:` 对手被 O4-lite 包装（选中 ckpt 做 base/argmax，
-  `--value-ckpt`（默认 `runs/ei2_value_t5/t_leafq/critic.pt`）跑 rollout 与 value 读出；`random` 锚不包装）。
-  设置页**逐局可选搜索深度**：`t`（截断 ply，`0` = 全量）与 `K`（隐藏世界数，1..64；
-  t 的硬界 0..40），附实测预设 t5·K8 / t5·K16 / t5·K32 / 全量 K8；游戏内与结算页显示当局配置，
-  自由对战 trace 里记 `opponent_search`（回放忽略）。stock 插件默认 t=5 / K=32（与 measured rung、
-  twin 搜索臂同一 pin）；`web_search.py` 启动器仍默认 t=5 / K=16。
+- **自由对战**：所有 `ckpt:` 对手被 O4-lite 包装（选中 ckpt 同时做 base/argmax 与
+  自己的 value/outcome 核心——不再有第二个 `--value-ckpt` 模型；`random` 锚不包装）。
+  设置页**逐局可选搜索深度**：`t`（截断 ply，`0` = 全量）、`K`（隐藏世界数，1..512；
+  t 的硬界 0..40）与 `β`（outcome 头拌进截断叶值 `V + β·u`，0..8，0 = 只用 critic；
+  只有带 `vf_outcome` 头的 ckpt 能非零），附实测预设 t5·K8 / t5·K16 / t5·K32 /
+  全量 K8 与 β0/0.5/1/2；游戏内与结算页显示当局配置，自由对战 trace 里记
+  `opponent_search`（回放忽略）。stock 插件默认 t=5 / K=32 / β=0（placement 的
+  搜索 rung 用 manifest `search_config`，含 pinned `outcome_blend`）；`web_search.py`
+  启动器仍默认 t=5 / K=16。
+  另有**「终局精确解」**开关（`search.endgame`，默认开）：空底（`draw_count=0`）后由
+  α-β minimax 精确接管（预算 1e6 节点 / 5s，总牌数 ≤14，超限回退原搜索；一局只解一次，
+  之后查表），页面与 trace 同样记录；定级/twin 的搜索 rung 不受该开关影响
+  （manifest `search_config.endgame` 缺省 0，显式写 1 才进身份）。逐位验证见
+  [`experiments/endgame-minimax-audit.md`](./experiments/endgame-minimax-audit.md)，
+  身份裁定见 [ADR-0019](./adr/0019-endgame-exact-minimax-overlay.md)。
 - **惰性 torch**：插件导入本身不 import torch；只有真正选 ckpt 对局（free 包装 / twin /
   搜索 rung 定级）才加载 value ckpt。无 torch 时插件元数据照常展示，但 ckpt 对手与
   twin/搜索 rung 开始请求都会 400；raw 定级与 `random` 自由对战不受影响。
@@ -213,6 +233,13 @@ uv run --group train python runs/o4lite-search/web_search.py --no-fast       # �
   搜索 rung 的身份（t5/K32/C6、rollout 对手 `w2m_ctl`、`O4_AGG=mean`）钉在
   `search_leafq` 条目的 `search_config`，插件从 `--manifest` 读它，不再有 rated 子池/artifact 覆盖。
   没有 factory 的 stock 服务端按能力门跳过并告警，行为与旧 raw 池一致。
+- **本地追加（2026-10-07）**：`traces/pool10/manifest.json`（= `traces/study/manifest.json` 镜像）
+  里加了两条 **web-local、未测量**的条目：raw `head32ln5m`（`ckpt:runs/head-depth/cont/
+  hd_head32ln5m__1__1791396292/agent.pt`，μ≈198.6、σ=8、games=0）与搜索档 `search_head32ln5m`
+  （spec `rolloutt:<同一 ckpt>`，`search_config` 抄 `search_leafq` 的 t5/K32/C6 + rollout 对手
+  `w2m_ctl` + mean；μ≈271.2 粗估）。两者已在 web 池中可打（自由对战/定级/搜索构建实测通过）；
+  μ 是 k=1 h2h 粗估，不得进任何测量发布。回滚备份与操作脚本：`artifacts/web-head32ln5m/`；
+  背景见 [`head-depth-plan.md`](./head-depth-plan.md) §15 与 [`experiments/head-depth-500k.md`](./experiments/head-depth-500k.md) §12。
 - 其余参数原样转发给 `7g523-web`（`--manifest` / `--prior` / `--port` / `--open` …）；
   web_search 启动器的 `--trunc` / `--rollout-k` 只决定设置页的默认值。
 
